@@ -7,13 +7,13 @@ import { settings } from './config.js';
 import { startServer } from './server.js';
 import { buildDefaultRuntimeConfig } from './services/runtime-config.js';
 import { log } from './utils/logger.js';
-import { checkExistingProcess, stopProcess, getStatus, writePidFile, removePidFile } from './utils/pid.js';
+import { checkExistingProcess, stopProcess, getStatus, writeProcessInfo, removeProcessInfo, openAdminUI } from './utils/pid.js';
 import process from 'node:process';
 
 const program = new Command();
 
 program
-  .name('claude-code-gateway-proxy')
+  .name('ccop')
   .description('Claude Code 多供应商代理（TypeScript 版）')
   .version('0.1.0');
 
@@ -26,45 +26,38 @@ program
   .option('-d, --daemon', '后台运行（守护进程模式）', false)
   .action(async (options) => {
     const port = Number(options.port || settings.port);
+    const host = options.host || settings.host;
 
     // check if already running
-    const existingPid = await checkExistingProcess(port);
-    if (existingPid) {
-      log('warn', '服务已在运行', { port, pid: existingPid });
-      console.log(`服务已在运行 (PID: ${existingPid})`);
+    const existingInfo = await checkExistingProcess();
+    if (existingInfo) {
+      log('warn', '服务已在运行', { port: existingInfo.port, pid: existingInfo.pid });
+      console.log(`服务已在运行 (Port: ${existingInfo.port}, PID: ${existingInfo.pid})`);
       process.exit(1);
     }
 
     if (options.daemon) {
       // start in background
-      const args = process.argv.slice(2).filter(arg => arg !== '-d' && arg !== '--daemon');
+      const args = ['start', ...process.argv.slice(3).filter(arg => arg !== '-d' && arg !== '--daemon')];
       const child = spawn(process.argv0, [process.argv[1], ...args], {
         detached: true,
         stdio: 'ignore',
         windowsHide: true
       });
       child.unref();
-      console.log(`服务已在后台启动 (PID: ${child.pid})`);
-      log('info', '服务已在后台启动', { pid: child.pid, port });
+      console.log(`服务已在后台启动`);
+      log('info', '服务已在后台启动', { pid: child.pid, port, host });
       process.exit(0);
     } else {
-      await writePidFile(port);
+      await writeProcessInfo({ pid: process.pid, port, host });
 
-      // cleanup pid file on exit
-      process.on('exit', () => {
-        void removePidFile(port);
-      });
-      process.on('SIGINT', () => {
-        void removePidFile(port);
-        process.exit(0);
-      });
-      process.on('SIGTERM', () => {
-        void removePidFile(port);
-        process.exit(0);
-      });
+      // cleanup on exit
+      process.on('exit', () => { void removeProcessInfo(); });
+      process.on('SIGINT', () => { void removeProcessInfo(); process.exit(0); });
+      process.on('SIGTERM', () => { void removeProcessInfo(); process.exit(0); });
 
       await startServer({
-        host: options.host || settings.host,
+        host,
         port: Number.isFinite(port) ? port : settings.port,
         configPath: options.config || settings.configFile
       });
@@ -73,11 +66,9 @@ program
 
 program
   .command('stop')
-  .description('停止代理服务')
-  .option('-p, --port <port>', '监听的端口', String(settings.port))
-  .action(async (options) => {
-    const port = Number(options.port || settings.port);
-    const result = await stopProcess(port);
+  .description('停止代理服务（自动读取端口）')
+  .action(async () => {
+    const result = await stopProcess();
     console.log(result);
     log('info', result);
   });
@@ -85,15 +76,38 @@ program
 program
   .command('status')
   .description('查看服务运行状态')
-  .option('-p, --port <port>', '监听的端口', String(settings.port))
-  .action((options) => {
-    const port = Number(options.port || settings.port);
-    const status = getStatus(port);
+  .action(async () => {
+    const status = await getStatus();
     if (status.running) {
       console.log(`✓ 服务运行中 - Port: ${status.port}, PID: ${status.pid}`);
       log('info', '服务运行中', { port: status.port, pid: status.pid });
     } else {
-      console.log(`✗ 服务未运行 - Port: ${status.port}`);
+      console.log('✗ 服务未运行');
+    }
+  });
+
+program
+  .command('ui')
+  .description('打开管理后台界面（自动检测浏览器）')
+  .action(async () => {
+    try {
+      const url = await openAdminUI();
+      console.log(`管理界面地址: ${url}`);
+      log('info', '打开管理界面', { url });
+
+      // try to open browser (cross-platform)
+      const { exec } = await import('node:child_process');
+      const platform = process.platform;
+      const cmd = platform === 'darwin' ? 'open' : platform === 'win32' ? 'start' : 'xdg-open';
+      exec(`${cmd} "${url}"`, (error) => {
+        if (error) {
+          console.log('请手动在浏览器中打开上述地址');
+        }
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(`错误: ${msg}`);
+      process.exit(1);
     }
   });
 

@@ -5,8 +5,8 @@
   "type": "module",
   "main": "dist/server.js",
   "bin": {
-    "claude-code-gateway-proxy": "dist/cli.js",
-    "ccnp": "dist/cli.js"
+    "claude-code-openai-proxy": "dist/cli.js",
+    "ccop": "dist/cli.js"
   },
   "files": [
     "dist",

@@ -1,215 +1,305 @@
-# Claude Code Gateway Proxy（TypeScript / npm 版）
+# Claude Code OpenAI Proxy
 
-这是 TypeScript 版本的 Claude Code 多供应商代理项目：
+Claude Code 多供应商代理（TypeScript / npm 版）：
 
 - 对外暴露 Anthropic Messages 风格接口，供 Claude Code 使用
-- 对内转发到 OpenAI-compatible 上游，例如 Ollama、vLLM、各类兼容网关
-- 支持多供应商、多模型映射、前端登录与配置管理、配置热生效、北京时间 JSON 日志
-- 可以作为 npm 包发布，支持全局安装后通过快捷命令启动，也支持 `npx` 直接启动
+- 对内转发到 OpenAI-compatible 上游，例如 Ollama、vLLM、NIM、各类兼容网关
+- 支持多供应商、多模型映射、Web UI 配置管理、配置热生效、JSON 日志
+- 全局安装后通过 `ccop` 命令快速启动
 
-## 主要能力
+## 主要特性
 
-- 全链路异步
-- 中文代码注释、中文管理界面、北京时间日志
-- 通过 `runtime_models.json` 管理多个供应商和多个模型映射
-- 保存配置后立即生效
-- 前端表单化配置，不再直接手改 JSON
-- 访问 `ip:port` 时先进入登录页，认证后才进入 `/admin`
-- 非流式与流式请求都尽量从上游供应商响应的 `usage` 获取 token
-- `/v1/messages/count_tokens` 会发起一次最小化上游请求，并从供应商响应里的 `usage.prompt_tokens` 读取输入 token
-- CLI 命令可用于 npm 全局安装后的快捷启动
+- **协议转换**：Anthropic ↔ OpenAI 自动转换
+- **多供应商**：支持多个上游供应商，自动故障切换
+- **配置管理**：Web UI 表单化配置，热生效无需重启
+- **守护进程**：支持后台运行、自动记录 PID
+- **便捷 CLI**：`ccop start/stop/status/ui` 命令
+- **日志**：结构化 JSON 日志，支持日志级别控制
 
 ## 目录结构
 
 ```text
 src/
-  cli.ts                    # npm CLI 入口，支持 start / init-config
-  server.ts                 # Fastify 服务入口
-  config.ts                 # 环境变量配置
-  auth.ts                   # 代理鉴权 / 管理后台鉴权
-  models.ts                 # 数据模型与校验
+  cli.ts              # CLI 入口 (ccop 命令)
+  server.ts           # Fastify 服务
+  config.ts           # 配置管理
+  auth.ts             # 认证中间件
+  models.ts           # 数据模型
   routes/
-    admin.ts                # 登录页、管理页、配置接口
-    health.ts               # /healthz
-    messages.ts             # /v1/messages /v1/messages/count_tokens /v1/models
+    admin.ts          # 管理后台 API
+    health.ts         # 健康检查
+    messages.ts       # Messages API
   services/
-    runtime-config.ts       # 运行时配置管理与热更新
-    transformers.ts         # Anthropic ↔ OpenAI 协议转换
-    upstream.ts             # 上游请求封装
-    stream-bridge.ts        # OpenAI SSE → Anthropic SSE 桥接
+    runtime-config.ts # 运行时配置
+    transformers.ts   # 协议转换
+    upstream.ts       # 上游请求
   static/
-    login.html              # 登录页
-    index.html              # 管理页
+    login.html        # 登录页
+    index.html        # 管理页
   utils/
-    id.ts                   # request_id / session_id 生成
-    logger.ts               # 北京时间 JSON 日志
-    time.ts                 # 时间工具
-scripts/
-  postbuild.mjs             # 构建后复制静态文件
+    pid.ts            # 进程管理
+    logger.ts         # 日志工具
 ```
 
-## 本地开发
+## 安装
+
+### 方式一：全局安装（推荐）
 
 ```bash
-npm install
-cp .env.example .env
-cp runtime_models.example.json runtime_models.json
-npm run dev
+npm install -g claude-code-openai-proxy
 ```
 
-启动后访问：
-
-- 登录页：`http://127.0.0.1:8765/login`
-- 管理页：`http://127.0.0.1:8765/admin`
-- 根路径：`http://127.0.0.1:8765/`
-
-## 本地构建与运行
+### 方式二：npx 直接运行（无需安装）
 
 ```bash
-npm run build
-npm start
+npx claude-code-openai-proxy start
 ```
 
-## 初始化配置文件
+## 快速开始
+
+### 1. 初始化配置
 
 ```bash
-npm run build
-node dist/cli.js init-config
+ccop init-config
 ```
 
-也可以指定路径：
+这会创建 `runtime_models.json` 配置文件。
+
+### 2. 编辑配置
 
 ```bash
-node dist/cli.js init-config --config ./runtime_models.json
+# Linux/macOS
+ccop ui
+
+# Windows 手动打开
+# http://127.0.0.1:8765/admin
 ```
 
-## npm 发布后的使用方式
+### 3. 启动服务
 
-### 方式一：全局安装后使用快捷命令
+**前台运行（开发调试）：**
 
 ```bash
-npm i -g claude-code-gateway-proxy
-ccnp start --host 0.0.0.0 --port 8765
+ccop start
 ```
 
-也支持完整命令名：
+**后台守护进程（生产环境）：**
 
 ```bash
-claude-code-gateway-proxy start --host 0.0.0.0 --port 8765
+ccop start -d
+# 或
+ccop start --daemon
 ```
 
-### 方式二：不全局安装，直接使用 npx
+**指定端口：**
 
 ```bash
-npx claude-code-gateway-proxy start --host 0.0.0.0 --port 8765
+ccop start --port 8766 --daemon
 ```
 
-## 发布到 npm
-
-1. 先确认 `package.json` 里的 `name` 没有与现有包冲突
-2. 执行构建
-3. 登录 npm
-4. 发布
+### 4. 查看状态
 
 ```bash
-npm run build
-npm login
-npm publish --access public
+ccop status
+# 输出: ✓ 服务运行中 - Port: 8765, PID: 12345
 ```
 
-如果你更倾向于作用域包，可以把 `name` 改成例如：
-
-```json
-"name": "@your-scope/claude-code-gateway-proxy"
-```
-
-然后发布：
+### 5. 停止服务
 
 ```bash
-npm publish --access public
+ccop stop
+# 自动读取运行时的端口，无需指定
 ```
 
-## Claude Code 接入
+### 6. 打开管理界面
 
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8765
-export ANTHROPIC_AUTH_TOKEN=你的 PROXY_AUTH_TOKEN
+ccop ui
 ```
+
+自动打开浏览器访问管理后台。
+
+## CLI 命令参考
+
+| 命令 | 说明 |
+|------|------|
+| `ccop start` | 前台启动服务 |
+| `ccop start -d` | 后台守护模式启动 |
+| `ccop start --port 8766` | 指定端口启动 |
+| `ccop stop` | 停止服务（自动读取端口） |
+| `ccop status` | 查看服务状态 |
+| `ccop ui` | 打开管理界面 |
+| `ccop init-config` | 初始化配置文件 |
+| `ccop --version` | 查看版本 |
 
 ## 环境变量
 
-`.env.example` 中最关键的是这几个：
+创建 `.env` 文件：
 
 ```bash
-ADMIN_AUTH_TOKEN=你的后台管理口令
+# 服务监听配置
+HOST=0.0.0.0
+PORT=8765
+
+# 认证令牌
+PROXY_AUTH_TOKEN=your-proxy-token
+ADMIN_AUTH_TOKEN=your-admin-token
+
+# 配置文件路径
 CONFIG_FILE=./runtime_models.json
+
+# 日志配置
+LOG_LEVEL=info          # debug, info, warn, error
+LOG_FORMAT=json         # json, pretty
 ```
 
-## runtime_models.json 示例
+## runtime_models.json 配置
 
 ```json
 {
   "providers": [
     {
-      "provider_id": "provider1",
+      "provider_id": "ollama",
       "provider_type": "openai_compatible",
-      "base_url": "https://provider/v1",
-      "api_key_env": "PROVIDER_API_KEY",
+      "base_url": "http://localhost:11434/v1",
+      "api_key_env": null,
       "timeout_seconds": 300,
       "enabled": true,
       "headers": {},
-      "description": ""
+      "description": "本地 Ollama"
     },
     {
-      "provider_id": "provider2",
+      "provider_id": "nvidia",
       "provider_type": "openai_compatible",
-      "base_url": "https://provider2/v1",
-      "api_key_env": "PROVIDER_API_KEY_2",
+      "base_url": "https://integrate.api.nvidia.com/v1",
+      "api_key_env": "NVIDIA_API_KEY",
       "timeout_seconds": 300,
       "enabled": true,
       "headers": {},
-      "description": ""
+      "description": "NVIDIA NIM"
     }
   ],
   "models": [
     {
       "client_model": "claude-sonnet-4-6",
-      "provider_id": "provider1",
-      "upstream_model": "llama-3.1-70b-instruct",
+      "provider_id": "ollama",
+      "upstream_model": "llama3.1:70b",
       "enabled": true,
       "extra_body": {},
-      "description": "默认 Claude Code 模型"
+      "description": "本地大模型"
     },
     {
-      "client_model": "claude-sonnet-4-6-alt",
-      "provider_id": "nvidia2",
-      "upstream_model": "llama-3.1-8b-instruct",
+      "client_model": "claude-haiku-4-5",
+      "provider_id": "nvidia",
+      "upstream_model": "meta/llama-3.1-8b-instruct",
       "enabled": true,
       "extra_body": {},
-      "description": "备用线路"
+      "description": "NVIDIA 轻量模型"
     }
   ],
   "default_client_model": "claude-sonnet-4-6"
 }
 ```
 
-## 关于 token 统计
+## 接入 Claude Code
 
-- 非流式 `/v1/messages`：从上游 `usage.prompt_tokens` / `usage.completion_tokens` 获取
-- 流式 `/v1/messages`：依赖上游流式 chunk 返回 `usage`；本项目会自动附加 `stream_options.include_usage = true`
-- `/v1/messages/count_tokens`：因为很多 OpenAI-compatible 上游没有单独的 token 计数接口，所以这里发送一个最小化请求，再从响应 `usage.prompt_tokens` 读取输入 token
+设置环境变量：
 
-## 关于 `nvidia2` 这类“找不到供应商”问题
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8765
+export ANTHROPIC_AUTH_TOKEN=your-proxy-auth-token
+```
 
-这版已经做了几层收敛：
+然后在 Claude Code 中选择 Anthropic API 即可。
 
-1. 自动去掉 `provider_id`、`client_model`、`base_url` 前后空格
-2. 保存配置时校验 `models[].provider_id` 是否真的存在于 `providers[]`
-3. 运行时报错会带出当前启用的 provider 列表，方便你快速定位
-4. 前端改成表单式编辑，尽量避免手改 JSON 时出现隐藏空格或引用错误
+## 开发
 
-## 说明
+```bash
+# 安装依赖
+npm install
 
-- 这套项目默认把“多供应商”统一为 OpenAI-compatible 协议
-- 如果你下一步要混接原生 Anthropic、Gemini、Azure OpenAI 非兼容变体，更建议继续拆 provider adapter
-- `package.json` 中的包名未必一定可用；如果 npm 已有同名包，请改名后再发布
+# 开发模式（热加载）
+npm run dev
+
+# 构建
+npm run build
+
+# 本地运行
+npm start
+```
+
+## 发布到 npm
+
+### 1. 登录 npm
+
+```bash
+npm login
+```
+
+### 2. 版本更新
+
+```bash
+# 更新版本号（遵循 semver）
+npm version patch   # 修复版: 0.1.0 -> 0.1.1
+npm version minor   # 小版本: 0.1.0 -> 0.2.0
+npm version major   # 大版本: 0.1.0 -> 1.0.0
+```
+
+### 3. 构建并发布
+
+```bash
+npm run build
+npm publish --access public
+```
+
+### 4. 更新标签（可选）
+
+```bash
+# 发布 beta 版
+npm version prerelease --preid=beta
+npm publish --tag beta
+
+# 发布 next 版
+npm publish --tag next
+```
+
+### 发布后验证
+
+```bash
+# 等待 npm 同步（约 1-5 分钟）
+npm view claude-code-openai-proxy versions
+
+# 全局安装测试
+npm install -g claude-code-openai-proxy
+ccop --version
+```
+
+## 常见问题
+
+**Q: 端口被占用？**
+```bash
+ccop stop              # 先停止旧服务
+ccop start --port 8766 # 使用新端口
+```
+
+**Q: 如何查看日志？**
+```bash
+ccop status            # 查看 PID
+tail -f logs/*.jsonl   # 查看日志文件
+```
+
+**Q: 配置文件修改后不生效？**
+
+在 Web UI 中保存后自动热加载，无需重启服务。
+
+**Q: Windows 上守护进程不工作？**
+
+Windows 建议使用 `pm2`：
+```bash
+npm install -g pm2
+pm2 start dist/cli.js --name ccop -- start
+```
+
+## License
+
+MIT
