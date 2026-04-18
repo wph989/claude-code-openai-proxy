@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>代理配置管理</title>
+  <style>
+    :root { --bg:#f3f6fb; --card:#ffffff; --line:#dbe4ee; --text:#0f172a; --muted:#64748b; --pri:#2563eb; --danger:#dc2626; --ok:#059669; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    .wrap { max-width:1240px; margin:0 auto; padding:24px; }
+    .header, .card { background:var(--card); border-radius:18px; box-shadow:0 10px 35px rgba(15,23,42,.08); }
+    .header { padding:22px 24px; display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:20px; }
+    .card { padding:20px; margin-bottom:20px; }
+    h1,h2,h3 { margin:0 0 14px; }
+    .sub { color:var(--muted); line-height:1.7; }
+    .metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-top:16px; }
+    .metric { border:1px solid var(--line); border-radius:14px; padding:14px; background:#f8fafc; }
+    .metric .k { color:var(--muted); font-size:12px; }
+    .metric .v { font-size:24px; font-weight:700; margin-top:6px; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+    .toolbar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px; }
+    button { border:none; border-radius:12px; padding:11px 16px; font-weight:700; cursor:pointer; }
+    .primary { background:var(--pri); color:#fff; }
+    .secondary { background:#475569; color:#fff; }
+    .danger { background:var(--danger); color:#fff; }
+    table { width:100%; border-collapse:collapse; }
+    th, td { text-align:left; border-bottom:1px solid var(--line); padding:10px 8px; vertical-align:top; }
+    th { color:var(--muted); font-size:13px; }
+    input, select, textarea { width:100%; border:1px solid #cbd5e1; border-radius:10px; padding:10px 12px; font-size:14px; background:#fff; }
+    textarea { min-height:88px; resize:vertical; }
+    label.small { display:block; color:var(--muted); font-size:12px; margin-bottom:6px; }
+    .badge { display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px; background:#e2e8f0; color:#0f172a; }
+    .status { margin-top:10px; font-size:14px; }
+    .tips { font-size:13px; color:var(--muted); line-height:1.7; }
+    .panel { border:1px solid var(--line); border-radius:14px; padding:14px; margin-top:12px; }
+    @media (max-width: 980px) { .grid, .metrics { grid-template-columns:1fr; } .header { align-items:flex-start; flex-direction:column; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <div>
+        <h1>代理配置管理</h1>
+        <div class=”sub”>现在通过表单管理供应商与模型映射。保存后立即热生效，并在保存前做引用校验，避免出现配置看起来存在但运行时找不到的问题。</div>
+      </div>
+      <div class="toolbar">
+        <button class="secondary" id="refreshBtn">刷新</button>
+        <button class="primary" id="saveBtn">保存并立即生效</button>
+        <button class="danger" id="logoutBtn">退出登录</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>概览</h2>
+      <div class="metrics" id="summary"></div>
+      <div class="status" id="status"></div>
+    </div>
+
+    <div class="card"> <h2>全局配置</h2> <div class="panel"> <label class="small">代理鉴权 Token (可选)</label> <input id="proxyAuthToken" type="password" placeholder="留空则不启用代理鉴权，Claude Code 无需提供 Token" /> <div class="tips" style="margin-top:8px;">配置后 Claude Code 需要在请求中提供 Authorization: Bearer token 或 X-API-Key 头。修改后立即生效。</div> </div> </div> <div class="grid">
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+          <h2>上游供应商</h2>
+          <button class="secondary" id="addProviderBtn">新增供应商</button>
+        </div>
+        <div class="tips">建议每个供应商使用唯一的 <code>provider_id</code>。系统会自动去掉前后空格，并在保存时校验是否有重复或空引用。</div>
+        <div id="providers"></div>
+      </div>
+
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+          <h2>模型映射</h2>
+          <button class="secondary" id="addModelBtn">新增模型映射</button>
+        </div>
+        <div class="panel">
+          <label class="small">默认客户端模型</label>
+          <select id="defaultClientModel"></select>
+        </div>
+        <div class="tips">这里配置 Claude Code 看到的模型名，与实际转发到上游的模型名的映射关系。</div>
+        <div id="models"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>原始 JSON 预览</h2>
+      <div class="tips">这里仅用于检查最终结构，不建议直接编辑。</div>
+      <textarea id="jsonPreview" readonly></textarea>
+    </div>
+  </div>
+
+  <template id="providerTpl">
+    <div class="panel provider-item">
+      <div class="toolbar">
+        <span class="badge">供应商</span>
+        <button class="danger remove-provider" type="button">删除</button>
+      </div>
+      <div class="grid" style="grid-template-columns:1fr 1fr; gap:12px;">
+        <div><label class="small">provider_id</label><input data-field="provider_id" placeholder="例如：nvidia2" /></div>
+        <div><label class="small">说明</label><input data-field="description" placeholder="例如：第二个 NVIDIA 入口" /></div>
+        <div><label class="small">base_url</label><input data-field="base_url" placeholder="https://integrate.api.nvidia.com/v1" /></div>
+        <div><label class="small">api_key_env</label><input data-field="api_key_env" placeholder="例如：NVIDIA_API_KEY_2" /></div>
+        <div><label class="small">api_key（可选，不推荐明文）</label><input data-field="api_key" placeholder="留空则使用环境变量" /></div>
+        <div><label class="small">timeout_seconds</label><input data-field="timeout_seconds" type="number" min="1" /></div>
+      </div>
+      <div style="margin-top:12px;"><label><input data-field="enabled" type="checkbox" /> 启用该供应商</label></div>
+      <div style="margin-top:12px;"><label class="small">headers（JSON 对象，可选）</label><textarea data-field="headers" placeholder='例如：{"api-version":"2024-xx"}'></textarea></div>
+    </div>
+  </template>
+
+  <template id="modelTpl">
+    <div class="panel model-item">
+      <div class="toolbar">
+        <span class="badge">模型映射</span>
+        <button class="danger remove-model" type="button">删除</button>
+      </div>
+      <div class="grid" style="grid-template-columns:1fr 1fr; gap:12px;">
+        <div><label class="small">客户端模型名</label><input data-field="client_model" placeholder="例如：claude-sonnet-4-5" /></div>
+        <div><label class="small">绑定供应商</label><select data-field="provider_id"></select></div>
+        <div><label class="small">上游模型名</label><input data-field="upstream_model" placeholder="例如：meta/llama-3.1-70b-instruct" /></div>
+        <div><label class="small">说明</label><input data-field="description" placeholder="例如：给 Claude Code 使用的 sonnet 映射" /></div>
+      </div>
+      <div style="margin-top:12px;"><label><input data-field="enabled" type="checkbox" /> 启用该模型映射</label></div>
+      <div style="margin-top:12px;"><label class="small">extra_body（JSON 对象，可选）</label><textarea data-field="extra_body" placeholder='例如：{"top_k":20}'></textarea></div>
+    </div>
+  </template>
+
+  <script>
+    const providersWrap = document.getElementById('providers');
+    const modelsWrap = document.getElementById('models');
+    const summaryWrap = document.getElementById('summary');
+    const statusBox = document.getElementById('status');
+    const preview = document.getElementById('jsonPreview');
+    const defaultClientModel = document.getElementById('defaultClientModel');
+    const providerTpl = document.getElementById('providerTpl');
+    const modelTpl = document.getElementById('modelTpl');
+
+    const proxyAuthTokenInput = document.getElementById('proxyAuthToken');
+let currentConfig = { providers: [], models: [], default_client_model: null, proxy_auth_token: null };
+
+    function setStatus(text, isError = false) {
+      statusBox.textContent = text;
+      statusBox.style.color = isError ? '#dc2626' : '#059669';
+    }
+
+    async function ensureSession() {
+      const res = await fetch('/api/admin/session');
+      const data = await res.json();
+      if (!data.authenticated) {
+        window.location.href = '/login';
+        throw new Error('未登录');
+      }
+    }
+
+    function parseJsonSafe(text, fallback) {
+      try { return text.trim() ? JSON.parse(text) : fallback; }
+      catch { throw new Error('JSON 字段格式不正确'); }
+    }
+
+    function renderSummary(summary) {
+      const items = [
+        ['供应商总数', summary.provider_count || 0],
+        ['模型总数', summary.model_count || 0],
+        ['启用供应商', summary.enabled_provider_count || 0],
+        ['启用模型', summary.enabled_model_count || 0],
+      ];
+      summaryWrap.innerHTML = items.map(([k,v]) => `<div class="metric"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+    }
+
+    function buildProviderItem(item = {}) {
+      const node = providerTpl.content.firstElementChild.cloneNode(true);
+      node.querySelector('[data-field="provider_id"]').value = item.provider_id || '';
+      node.querySelector('[data-field="description"]').value = item.description || '';
+      node.querySelector('[data-field="base_url"]').value = item.base_url || '';
+      node.querySelector('[data-field="api_key_env"]').value = item.api_key_env || '';
+      node.querySelector('[data-field="api_key"]').value = item.api_key || '';
+      node.querySelector('[data-field="timeout_seconds"]').value = item.timeout_seconds || 300;
+      node.querySelector('[data-field="enabled"]').checked = item.enabled !== false;
+      node.querySelector('[data-field="headers"]').value = JSON.stringify(item.headers || {}, null, 2);
+      node.querySelector('.remove-provider').addEventListener('click', () => { node.remove(); refreshDerivedViews(); });
+      node.querySelectorAll('input, textarea').forEach(el => el.addEventListener('input', refreshDerivedViews));
+      return node;
+    }
+
+    function buildModelItem(item = {}) {
+      const node = modelTpl.content.firstElementChild.cloneNode(true);
+      node.querySelector('[data-field="client_model"]').value = item.client_model || '';
+      node.querySelector('[data-field="upstream_model"]').value = item.upstream_model || '';
+      node.querySelector('[data-field="description"]').value = item.description || '';
+      node.querySelector('[data-field="enabled"]').checked = item.enabled !== false;
+      node.querySelector('[data-field="extra_body"]').value = JSON.stringify(item.extra_body || {}, null, 2);
+      node.dataset.providerId = item.provider_id || '';
+      bindProviderOptions(node.querySelector('[data-field="provider_id"]'), item.provider_id || '');
+      node.querySelector('.remove-model').addEventListener('click', () => { node.remove(); refreshDerivedViews(); });
+      node.querySelectorAll('input, textarea, select').forEach(el => el.addEventListener('input', refreshDerivedViews));
+      node.querySelectorAll('select').forEach(el => el.addEventListener('change', refreshDerivedViews));
+      return node;
+    }
+
+    function bindProviderOptions(select, selected) {
+      const providers = Array.from(providersWrap.querySelectorAll('.provider-item [data-field="provider_id"]')).map(el => el.value.trim()).filter(Boolean);
+      const options = ['<option value="">请选择供应商</option>'].concat(providers.map(id => `<option value="${id}">${id}</option>`));
+      select.innerHTML = options.join('');
+      select.value = selected || '';
+    }
+
+    function collectConfig() {
+      const providers = Array.from(providersWrap.querySelectorAll('.provider-item')).map(node => ({
+        provider_id: node.querySelector('[data-field="provider_id"]').value.trim(),
+        provider_type: 'openai_compatible',
+        base_url: node.querySelector('[data-field="base_url"]').value.trim(),
+        api_key_env: node.querySelector('[data-field="api_key_env"]').value.trim() || null,
+        api_key: node.querySelector('[data-field="api_key"]').value.trim() || null,
+        timeout_seconds: Number(node.querySelector('[data-field="timeout_seconds"]').value || 300),
+        enabled: node.querySelector('[data-field="enabled"]').checked,
+        headers: parseJsonSafe(node.querySelector('[data-field="headers"]').value, {}),
+        description: node.querySelector('[data-field="description"]').value.trim(),
+      }));
+
+      const models = Array.from(modelsWrap.querySelectorAll('.model-item')).map(node => ({
+        client_model: node.querySelector('[data-field="client_model"]').value.trim(),
+        provider_id: node.querySelector('[data-field="provider_id"]').value.trim(),
+        upstream_model: node.querySelector('[data-field="upstream_model"]').value.trim(),
+        enabled: node.querySelector('[data-field="enabled"]').checked,
+        extra_body: parseJsonSafe(node.querySelector('[data-field="extra_body"]').value, {}),
+        description: node.querySelector('[data-field="description"]').value.trim(),
+      }));
+
+      return {
+        providers,
+        models,
+        default_client_model: defaultClientModel.value || null,
+    proxy_auth_token: proxyAuthTokenInput.value.trim() || null,
+      };
+    }
+
+    function refreshProviderSelects() {
+      const current = Array.from(modelsWrap.querySelectorAll('.model-item'));
+      current.forEach(node => {
+        const select = node.querySelector('[data-field="provider_id"]');
+        const selected = select.value;
+        bindProviderOptions(select, selected);
+      });
+    }
+
+    function refreshDefaultModelOptions() {
+      const models = Array.from(modelsWrap.querySelectorAll('.model-item [data-field="client_model"]')).map(el => el.value.trim()).filter(Boolean);
+      const old = defaultClientModel.value;
+      defaultClientModel.innerHTML = ['<option value="">未设置</option>'].concat(models.map(id => `<option value="${id}">${id}</option>`)).join('');
+      defaultClientModel.value = models.includes(old) ? old : (models[0] || '');
+    }
+
+    function refreshDerivedViews() {
+      try {
+        refreshProviderSelects();
+        refreshDefaultModelOptions();
+        currentConfig = collectConfig();
+        preview.value = JSON.stringify(currentConfig, null, 2);
+      } catch (error) {
+        preview.value = `配置暂时无效：${error.message}`;
+      }
+    }
+
+    function renderAll(data) {
+      providersWrap.innerHTML = '';
+      modelsWrap.innerHTML = '';
+      (data.config.providers || []).forEach(item => providersWrap.appendChild(buildProviderItem(item)));
+      (data.config.models || []).forEach(item => modelsWrap.appendChild(buildModelItem(item)));
+      renderSummary(data.summary || {});
+      refreshProviderSelects();
+      refreshDefaultModelOptions();
+      if (data.config.default_client_model) defaultClientModel.value = data.config.default_client_model;
+  proxyAuthTokenInput.value = data.config.proxy_auth_token || "";
+  
+      refreshDerivedViews();
+    }
+
+    async function loadConfig() {
+      setStatus('正在加载配置...');
+      const res = await fetch('/api/config', { credentials: 'include' });
+      if (res.status === 401) {
+        window.location.href = '/login';
+        return;
+      }
+      const data = await res.json();
+      renderAll(data);
+      setStatus('配置已加载。');
+    }
+
+    async function saveConfig() {
+      try {
+        const payload = collectConfig();
+        setStatus('正在保存配置...');
+        const res = await fetch('/api/config', {
+          method: 'PUT',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error?.message || data?.message || '保存失败');
+        renderAll(data);
+        setStatus(data.message || '保存成功。');
+      } catch (error) {
+        setStatus(`保存失败：${error.message}`, true);
+      }
+    }
+
+    document.getElementById('addProviderBtn').addEventListener('click', () => {
+      providersWrap.appendChild(buildProviderItem({ enabled: true, timeout_seconds: 300, headers: {} }));
+      refreshDerivedViews();
+    });
+    document.getElementById('addModelBtn').addEventListener('click', () => {
+      modelsWrap.appendChild(buildModelItem({ enabled: true, extra_body: {} }));
+      refreshDerivedViews();
+    });
+    document.getElementById('refreshBtn').addEventListener('click', loadConfig);
+    document.getElementById('saveBtn').addEventListener('click', saveConfig);
+    document.getElementById('logoutBtn').addEventListener('click', async () => {
+      await fetch('/api/admin/logout', { method: 'POST', credentials: 'include' });
+      window.location.href = '/login';
+    });
+    defaultClientModel.addEventListener('change', refreshDerivedViews);
+
+    ensureSession().then(loadConfig).catch((error) => setStatus(error.message, true));
+  </script>
+</body>
+</html>
