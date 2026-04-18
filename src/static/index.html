@@ -4,123 +4,654 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>代理配置管理</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600;700&family=Source+Sans+3:wght@300;400;500;600&display=swap" rel="stylesheet">
   <style>
-    :root { --bg:#f3f6fb; --card:#ffffff; --line:#dbe4ee; --text:#0f172a; --muted:#64748b; --pri:#2563eb; --danger:#dc2626; --ok:#059669; }
-    * { box-sizing:border-box; }
-    body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-    .wrap { max-width:1240px; margin:0 auto; padding:24px; }
-    .header, .card { background:var(--card); border-radius:18px; box-shadow:0 10px 35px rgba(15,23,42,.08); }
-    .header { padding:22px 24px; display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:20px; }
-    .card { padding:20px; margin-bottom:20px; }
-    h1,h2,h3 { margin:0 0 14px; }
-    .sub { color:var(--muted); line-height:1.7; }
-    .metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-top:16px; }
-    .metric { border:1px solid var(--line); border-radius:14px; padding:14px; background:#f8fafc; }
-    .metric .k { color:var(--muted); font-size:12px; }
-    .metric .v { font-size:24px; font-weight:700; margin-top:6px; }
-    .grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
-    .toolbar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px; }
-    button { border:none; border-radius:12px; padding:11px 16px; font-weight:700; cursor:pointer; }
-    .primary { background:var(--pri); color:#fff; }
-    .secondary { background:#475569; color:#fff; }
-    .danger { background:var(--danger); color:#fff; }
-    table { width:100%; border-collapse:collapse; }
-    th, td { text-align:left; border-bottom:1px solid var(--line); padding:10px 8px; vertical-align:top; }
-    th { color:var(--muted); font-size:13px; }
-    input, select, textarea { width:100%; border:1px solid #cbd5e1; border-radius:10px; padding:10px 12px; font-size:14px; background:#fff; }
-    textarea { min-height:88px; resize:vertical; }
-    label.small { display:block; color:var(--muted); font-size:12px; margin-bottom:6px; }
-    .badge { display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px; background:#e2e8f0; color:#0f172a; }
-    .status { margin-top:10px; font-size:14px; }
-    .tips { font-size:13px; color:var(--muted); line-height:1.7; }
-    .panel { border:1px solid var(--line); border-radius:14px; padding:14px; margin-top:12px; }
-    @media (max-width: 980px) { .grid, .metrics { grid-template-columns:1fr; } .header { align-items:flex-start; flex-direction:column; } }
+    :root {
+      --bg: #0a0a0a;
+      --bg-elevated: #141414;
+      --bg-card: #1a1a1a;
+      --bg-input: #1f1f1f;
+      --text: #f0f0f0;
+      --text-muted: #888;
+      --text-dim: #666;
+      --accent: #fff;
+      --border: #2a2a2a;
+      --border-light: #3a3a3a;
+      --border-focus: #555;
+      --danger: #ff4444;
+      --success: #00c853;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Source Sans 3", -apple-system, sans-serif;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    /* 固定顶部导航栏 */
+    .sticky-header {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 1000;
+      background: rgba(10, 10, 10, 0.85);
+      backdrop-filter: blur(20px) saturate(180%);
+      -webkit-backdrop-filter: blur(20px) saturate(180%);
+      border-bottom: 1px solid var(--border);
+    }
+    .header-content {
+      max-width: 1600px;
+      margin: 0 auto;
+      padding: 16px 32px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 24px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .brand-icon {
+      width: 42px;
+      height: 42px;
+      border: 1.5px solid var(--border-light);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: "Playfair Display", serif;
+      font-size: 20px;
+      font-weight: 600;
+      color: var(--accent);
+    }
+    .brand-text h1 {
+      font-family: "Playfair Display", serif;
+      font-size: 20px;
+      font-weight: 500;
+      letter-spacing: 0.02em;
+    }
+    .brand-text span {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-weight: 300;
+    }
+    .header-actions {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 22px;
+      font-family: "Source Sans 3", sans-serif;
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: 0.03em;
+      border: 1px solid var(--border-light);
+      background: var(--bg-card);
+      color: var(--text);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .btn:hover {
+      border-color: var(--border-focus);
+      background: var(--bg-elevated);
+      transform: translateY(-1px);
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: var(--bg);
+      border-color: var(--accent);
+    }
+    .btn-primary:hover {
+      background: #e0e0e0;
+      border-color: #e0e0e0;
+      box-shadow: 0 4px 20px rgba(255,255,255,0.15);
+    }
+    .btn-danger {
+      border-color: rgba(255,68,68,0.3);
+      color: #ff8888;
+    }
+    .btn-danger:hover {
+      background: rgba(255,68,68,0.1);
+      border-color: var(--danger);
+    }
+    .btn-small {
+      padding: 10px 18px;
+      font-size: 12px;
+    }
+
+    /* 主内容区 - 考虑固定头部高度 */
+    .main-content {
+      padding-top: 100px;
+      max-width: 1600px;
+      margin: 0 auto;
+      padding-left: 32px;
+      padding-right: 32px;
+      padding-bottom: 60px;
+    }
+
+    /* 状态栏 */
+    .status-bar {
+      padding: 16px 24px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      margin-bottom: 24px;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .status-bar::before {
+      content: '';
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+    .status-bar.success { color: var(--success); }
+    .status-bar.success::before { background: var(--success); box-shadow: 0 0 10px var(--success); }
+    .status-bar.error { color: var(--danger); }
+    .status-bar.error::before { background: var(--danger); box-shadow: 0 0 10px var(--danger); }
+    .status-bar.loading { color: var(--text-muted); }
+    .status-bar.loading::before { background: var(--text-muted); animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+    /* 统计卡片 */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+    .stat-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      padding: 28px;
+      position: relative;
+      overflow: hidden;
+    }
+    .stat-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .stat-card:hover::before {
+      opacity: 1;
+    }
+    .stat-label {
+      font-size: 12px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin-bottom: 12px;
+    }
+    .stat-value {
+      font-family: "Playfair Display", serif;
+      font-size: 42px;
+      font-weight: 500;
+      line-height: 1;
+      color: var(--accent);
+    }
+    @media (max-width: 1200px) {
+      .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 640px) {
+      .stats-grid { grid-template-columns: 1fr; }
+      .header-content { flex-wrap: wrap; padding: 12px 16px; }
+      .main-content { padding-left: 16px; padding-right: 16px; }
+    }
+
+    /* 区块标题 */
+    .section-title {
+      font-family: "Playfair Display", serif;
+      font-size: 24px;
+      font-weight: 500;
+      margin-bottom: 8px;
+      letter-spacing: 0.01em;
+    }
+    .section-subtitle {
+      font-size: 14px;
+      color: var(--text-muted);
+      margin-bottom: 24px;
+      font-weight: 300;
+    }
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    /* 卡片 */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      margin-bottom: 24px;
+    }
+    .card-header {
+      padding: 24px 28px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,0.02);
+    }
+    .card-body {
+      padding: 28px;
+    }
+
+    /* 网格布局 */
+    .main-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 32px;
+    }
+    @media (max-width: 1200px) {
+      .main-grid { grid-template-columns: 1fr; }
+    }
+
+    /* 表单样式 - 明显的输入框 */
+    .form-group {
+      margin-bottom: 24px;
+    }
+    .form-group:last-child {
+      margin-bottom: 0;
+    }
+    .form-label {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: 10px;
+    }
+    .form-hint {
+      font-size: 13px;
+      color: var(--text-dim);
+      margin-top: 8px;
+      line-height: 1.5;
+    }
+
+    /* 输入框 - 有明显的视觉边界 */
+    input[type="text"],
+    input[type="password"],
+    input[type="number"],
+    select,
+    textarea {
+      width: 100%;
+      padding: 14px 16px;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-family: "Source Sans 3", sans-serif;
+      font-size: 15px;
+      color: var(--text);
+      outline: none;
+      transition: all 0.2s ease;
+    }
+    input:hover, select:hover, textarea:hover {
+      border-color: var(--border-light);
+    }
+    input:focus, select:focus, textarea:focus {
+      border-color: var(--border-focus);
+      background: #252525;
+      box-shadow: 0 0 0 3px rgba(255,255,255,0.05);
+    }
+    input::placeholder, textarea::placeholder {
+      color: var(--text-dim);
+    }
+    input[type="number"] {
+      appearance: none;
+    }
+    select {
+      cursor: pointer;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 16px center;
+      padding-right: 44px;
+    }
+    textarea {
+      min-height: 100px;
+      resize: vertical;
+      line-height: 1.6;
+      font-size: 14px;
+    }
+
+    /* 复选框 */
+    .checkbox-wrapper {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      cursor: pointer;
+      padding: 12px 0;
+    }
+    input[type="checkbox"] {
+      width: 20px;
+      height: 20px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .checkbox-label {
+      font-size: 15px;
+      color: var(--text);
+      cursor: pointer;
+    }
+
+    /* 配置项面板 */
+    .item-panel {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      margin-bottom: 20px;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .item-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 18px 20px;
+      background: rgba(255,255,255,0.03);
+      border-bottom: 1px solid var(--border);
+    }
+    .item-type {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--text-muted);
+      padding: 6px 12px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+    }
+    .item-body {
+      padding: 24px;
+    }
+    .item-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+    @media (max-width: 768px) {
+      .item-grid { grid-template-columns: 1fr; }
+    }
+
+    /* JSON预览 */
+    .json-preview {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 24px;
+      font-family: "JetBrains Mono", "SF Mono", Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      overflow-x: auto;
+      color: var(--text-muted);
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    .json-preview::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    .json-preview::-webkit-scrollbar-track {
+      background: var(--bg-card);
+    }
+    .json-preview::-webkit-scrollbar-thumb {
+      background: var(--border-light);
+      border-radius: 4px;
+    }
+
+    /* 全局配置区 */
+    .config-row {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      gap: 40px;
+      align-items: start;
+    }
+    @media (max-width: 768px) {
+      .config-row { grid-template-columns: 1fr; gap: 16px; }
+    }
+
+    /* 空状态 */
+    .empty-state {
+      padding: 48px;
+      text-align: center;
+      color: var(--text-dim);
+      border: 2px dashed var(--border);
+      border-radius: 4px;
+    }
+    .empty-state p {
+      margin-bottom: 16px;
+    }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="header">
-      <div>
-        <h1>代理配置管理</h1>
-        <div class=”sub”>现在通过表单管理供应商与模型映射。保存后立即热生效，并在保存前做引用校验，避免出现配置看起来存在但运行时找不到的问题。</div>
-      </div>
-      <div class="toolbar">
-        <button class="secondary" id="refreshBtn">刷新</button>
-        <button class="primary" id="saveBtn">保存并立即生效</button>
-        <button class="danger" id="logoutBtn">退出登录</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>概览</h2>
-      <div class="metrics" id="summary"></div>
-      <div class="status" id="status"></div>
-    </div>
-
-    <div class="card"> <h2>全局配置</h2> <div class="panel"> <label class="small">代理鉴权 Token (可选)</label> <input id="proxyAuthToken" type="password" placeholder="留空则不启用代理鉴权，Claude Code 无需提供 Token" /> <div class="tips" style="margin-top:8px;">配置后 Claude Code 需要在请求中提供 Authorization: Bearer token 或 X-API-Key 头。修改后立即生效。</div> </div> </div> <div class="grid">
-      <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
-          <h2>上游供应商</h2>
-          <button class="secondary" id="addProviderBtn">新增供应商</button>
+  <!-- 固定顶部导航 -->
+  <header class="sticky-header">
+    <div class="header-content">
+      <div class="brand">
+        <div class="brand-icon">P</div>
+        <div class="brand-text">
+          <h1>代理配置管理</h1>
+          <span>Claude Code Gateway</span>
         </div>
-        <div class="tips">建议每个供应商使用唯一的 <code>provider_id</code>。系统会自动去掉前后空格，并在保存时校验是否有重复或空引用。</div>
+      </div>
+      <div class="header-actions">
+        <button class="btn" id="refreshBtn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="23 4 23 10 17 10"></polyline>
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+          </svg>
+          刷新配置
+        </button>
+        <button class="btn btn-primary" id="saveBtn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+            <polyline points="17 21 17 13 7 13 7 21"></polyline>
+            <polyline points="7 3 7 8 15 8"></polyline>
+          </svg>
+          保存并生效
+        </button>
+        <button class="btn btn-danger" id="logoutBtn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+            <polyline points="16 17 21 12 16 7"></polyline>
+            <line x1="21" y1="12" x2="9" y2="12"></line>
+          </svg>
+          退出
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="main-content">
+    <!-- 状态栏 -->
+    <div class="status-bar loading" id="status">正在加载配置...</div>
+
+    <!-- 统计区 -->
+    <div class="stats-grid" id="summary">
+      <div class="stat-card">
+        <div class="stat-label">供应商总数</div>
+        <div class="stat-value">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">模型总数</div>
+        <div class="stat-value">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">启用供应商</div>
+        <div class="stat-value">0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">启用模型</div>
+        <div class="stat-value">0</div>
+      </div>
+    </div>
+
+    <!-- 全局配置 -->
+    <div class="card">
+      <div class="card-header">
+        <h2 class="section-title">全局配置</h2>
+      </div>
+      <div class="card-body">
+        <div class="config-row">
+          <div>
+            <span class="form-label">代理鉴权 Token</span>
+            <p class="form-hint">启用后，Claude Code 需要在请求中携带 Token 才能访问代理服务。</p>
+          </div>
+          <div>
+            <input id="proxyAuthToken" type="password" placeholder="留空则不启用代理鉴权" />
+            <p class="form-hint">配置后请求需携带 Authorization: Bearer token 或 X-API-Key 头</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 供应商与模型 -->
+    <div class="main-grid">
+      <!-- 供应商 -->
+      <div>
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">上游供应商</h2>
+            <p class="section-subtitle">配置 LLM API 供应商的接入信息</p>
+          </div>
+          <button class="btn btn-primary btn-small" id="addProviderBtn">+ 新增</button>
+        </div>
         <div id="providers"></div>
       </div>
 
-      <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
-          <h2>模型映射</h2>
-          <button class="secondary" id="addModelBtn">新增模型映射</button>
+      <!-- 模型映射 -->
+      <div>
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">模型映射</h2>
+            <p class="section-subtitle">配置客户端模型名与上游模型的对应关系</p>
+          </div>
+          <button class="btn btn-primary btn-small" id="addModelBtn">+ 新增</button>
         </div>
-        <div class="panel">
-          <label class="small">默认客户端模型</label>
-          <select id="defaultClientModel"></select>
+
+        <!-- 默认模型选择 -->
+        <div class="form-group" style="background: var(--bg-card); border: 1px solid var(--border); padding: 20px; margin-bottom: 20px; border-radius: 4px;">
+          <span class="form-label">默认客户端模型</span>
+          <select id="defaultClientModel">
+            <option value="">未设置</option>
+          </select>
         </div>
-        <div class="tips">这里配置 Claude Code 看到的模型名，与实际转发到上游的模型名的映射关系。</div>
+
         <div id="models"></div>
       </div>
     </div>
 
-    <div class="card">
-      <h2>原始 JSON 预览</h2>
-      <div class="tips">这里仅用于检查最终结构，不建议直接编辑。</div>
-      <textarea id="jsonPreview" readonly></textarea>
+    <!-- JSON 预览 -->
+    <div style="margin-top: 40px;">
+      <h2 class="section-title" style="margin-bottom: 16px;">原始 JSON 预览</h2>
+      <div class="json-preview" id="jsonPreview">加载中...</div>
     </div>
-  </div>
+  </main>
 
+  <!-- 模板：供应商 -->
   <template id="providerTpl">
-    <div class="panel provider-item">
-      <div class="toolbar">
-        <span class="badge">供应商</span>
-        <button class="danger remove-provider" type="button">删除</button>
+    <div class="item-panel provider-item">
+      <div class="item-header">
+        <span class="item-type">Provider</span>
+        <button class="btn btn-danger btn-small remove-provider">删除</button>
       </div>
-      <div class="grid" style="grid-template-columns:1fr 1fr; gap:12px;">
-        <div><label class="small">provider_id</label><input data-field="provider_id" placeholder="例如：nvidia2" /></div>
-        <div><label class="small">说明</label><input data-field="description" placeholder="例如：第二个 NVIDIA 入口" /></div>
-        <div><label class="small">base_url</label><input data-field="base_url" placeholder="https://integrate.api.nvidia.com/v1" /></div>
-        <div><label class="small">api_key_env</label><input data-field="api_key_env" placeholder="例如：NVIDIA_API_KEY_2" /></div>
-        <div><label class="small">api_key（可选，不推荐明文）</label><input data-field="api_key" placeholder="留空则使用环境变量" /></div>
-        <div><label class="small">timeout_seconds</label><input data-field="timeout_seconds" type="number" min="1" /></div>
+      <div class="item-body">
+        <div class="item-grid">
+          <div class="form-group">
+            <span class="form-label">provider_id</span>
+            <input data-field="provider_id" type="text" placeholder="例如：nvidia2" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">说明</span>
+            <input data-field="description" type="text" placeholder="例如：第二个 NVIDIA 入口" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">base_url</span>
+            <input data-field="base_url" type="text" placeholder="https://integrate.api.nvidia.com/v1" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">api_key_env</span>
+            <input data-field="api_key_env" type="text" placeholder="例如：NVIDIA_API_KEY_2" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">api_key（可选，不推荐明文）</span>
+            <input data-field="api_key" type="password" placeholder="留空则使用环境变量" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">timeout_seconds</span>
+            <input data-field="timeout_seconds" type="number" min="1" value="300" />
+          </div>
+        </div>
+        <div class="form-group" style="margin-top: 20px;">
+          <label class="checkbox-wrapper">
+            <input data-field="enabled" type="checkbox" checked />
+            <span class="checkbox-label">启用该供应商</span>
+          </label>
+        </div>
+        <div class="form-group">
+          <span class="form-label">headers（JSON 对象，可选）</span>
+          <textarea data-field="headers" placeholder='{&quot;api-version&quot;: &quot;2024-xx&quot;}'></textarea>
+        </div>
       </div>
-      <div style="margin-top:12px;"><label><input data-field="enabled" type="checkbox" /> 启用该供应商</label></div>
-      <div style="margin-top:12px;"><label class="small">headers（JSON 对象，可选）</label><textarea data-field="headers" placeholder='例如：{"api-version":"2024-xx"}'></textarea></div>
     </div>
   </template>
 
+  <!-- 模板：模型 -->
   <template id="modelTpl">
-    <div class="panel model-item">
-      <div class="toolbar">
-        <span class="badge">模型映射</span>
-        <button class="danger remove-model" type="button">删除</button>
+    <div class="item-panel model-item">
+      <div class="item-header">
+        <span class="item-type">Model Mapping</span>
+        <button class="btn btn-danger btn-small remove-model">删除</button>
       </div>
-      <div class="grid" style="grid-template-columns:1fr 1fr; gap:12px;">
-        <div><label class="small">客户端模型名</label><input data-field="client_model" placeholder="例如：claude-sonnet-4-5" /></div>
-        <div><label class="small">绑定供应商</label><select data-field="provider_id"></select></div>
-        <div><label class="small">上游模型名</label><input data-field="upstream_model" placeholder="例如：meta/llama-3.1-70b-instruct" /></div>
-        <div><label class="small">说明</label><input data-field="description" placeholder="例如：给 Claude Code 使用的 sonnet 映射" /></div>
+      <div class="item-body">
+        <div class="item-grid">
+          <div class="form-group">
+            <span class="form-label">客户端模型名</span>
+            <input data-field="client_model" type="text" placeholder="例如：claude-sonnet-4-5" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">绑定供应商</span>
+            <select data-field="provider_id"></select>
+          </div>
+          <div class="form-group">
+            <span class="form-label">上游模型名</span>
+            <input data-field="upstream_model" type="text" placeholder="例如：meta/llama-3.1-70b-instruct" />
+          </div>
+          <div class="form-group">
+            <span class="form-label">说明</span>
+            <input data-field="description" type="text" placeholder="例如：给 Claude Code 使用的映射" />
+          </div>
+        </div>
+        <div class="form-group" style="margin-top: 20px;">
+          <label class="checkbox-wrapper">
+            <input data-field="enabled" type="checkbox" checked />
+            <span class="checkbox-label">启用该模型映射</span>
+          </label>
+        </div>
+        <div class="form-group">
+          <span class="form-label">extra_body（JSON 对象，可选）</span>
+          <textarea data-field="extra_body" placeholder='{&quot;top_k&quot;: 20}'></textarea>
+        </div>
       </div>
-      <div style="margin-top:12px;"><label><input data-field="enabled" type="checkbox" /> 启用该模型映射</label></div>
-      <div style="margin-top:12px;"><label class="small">extra_body（JSON 对象，可选）</label><textarea data-field="extra_body" placeholder='例如：{"top_k":20}'></textarea></div>
     </div>
   </template>
 
@@ -133,15 +664,13 @@
     const defaultClientModel = document.getElementById('defaultClientModel');
     const providerTpl = document.getElementById('providerTpl');
     const modelTpl = document.getElementById('modelTpl');
-
     const proxyAuthTokenInput = document.getElementById('proxyAuthToken');
-let currentConfig = { providers: [], models: [], default_client_model: null, proxy_auth_token: null };
+    let currentConfig = { providers: [], models: [], default_client_model: null, proxy_auth_token: null };
 
     function setStatus(text, isError = false) {
       statusBox.textContent = text;
-      statusBox.style.color = isError ? '#dc2626' : '#059669';
+      statusBox.className = 'status-bar ' + (isError ? 'error' : (text.includes('...') ? 'loading' : 'success'));
     }
-
     async function ensureSession() {
       const res = await fetch('/api/admin/session');
       const data = await res.json();
@@ -150,12 +679,10 @@ let currentConfig = { providers: [], models: [], default_client_model: null, pro
         throw new Error('未登录');
       }
     }
-
     function parseJsonSafe(text, fallback) {
       try { return text.trim() ? JSON.parse(text) : fallback; }
       catch { throw new Error('JSON 字段格式不正确'); }
     }
-
     function renderSummary(summary) {
       const items = [
         ['供应商总数', summary.provider_count || 0],
@@ -163,9 +690,13 @@ let currentConfig = { providers: [], models: [], default_client_model: null, pro
         ['启用供应商', summary.enabled_provider_count || 0],
         ['启用模型', summary.enabled_model_count || 0],
       ];
-      summaryWrap.innerHTML = items.map(([k,v]) => `<div class="metric"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+      summaryWrap.innerHTML = items.map(([k, v], i) => `
+        <div class="stat-card" style="animation-delay: ${i * 50}ms">
+          <div class="stat-label">${k}</div>
+          <div class="stat-value">${v}</div>
+        </div>
+      `).join('');
     }
-
     function buildProviderItem(item = {}) {
       const node = providerTpl.content.firstElementChild.cloneNode(true);
       node.querySelector('[data-field="provider_id"]').value = item.provider_id || '';
@@ -180,7 +711,6 @@ let currentConfig = { providers: [], models: [], default_client_model: null, pro
       node.querySelectorAll('input, textarea').forEach(el => el.addEventListener('input', refreshDerivedViews));
       return node;
     }
-
     function buildModelItem(item = {}) {
       const node = modelTpl.content.firstElementChild.cloneNode(true);
       node.querySelector('[data-field="client_model"]').value = item.client_model || '';
@@ -191,18 +721,18 @@ let currentConfig = { providers: [], models: [], default_client_model: null, pro
       node.dataset.providerId = item.provider_id || '';
       bindProviderOptions(node.querySelector('[data-field="provider_id"]'), item.provider_id || '');
       node.querySelector('.remove-model').addEventListener('click', () => { node.remove(); refreshDerivedViews(); });
-      node.querySelectorAll('input, textarea, select').forEach(el => el.addEventListener('input', refreshDerivedViews));
-      node.querySelectorAll('select').forEach(el => el.addEventListener('change', refreshDerivedViews));
+      node.querySelectorAll('input, textarea, select').forEach(el => {
+        el.addEventListener('input', refreshDerivedViews);
+        el.addEventListener('change', refreshDerivedViews);
+      });
       return node;
     }
-
     function bindProviderOptions(select, selected) {
       const providers = Array.from(providersWrap.querySelectorAll('.provider-item [data-field="provider_id"]')).map(el => el.value.trim()).filter(Boolean);
       const options = ['<option value="">请选择供应商</option>'].concat(providers.map(id => `<option value="${id}">${id}</option>`));
       select.innerHTML = options.join('');
       select.value = selected || '';
     }
-
     function collectConfig() {
       const providers = Array.from(providersWrap.querySelectorAll('.provider-item')).map(node => ({
         provider_id: node.querySelector('[data-field="provider_id"]').value.trim(),
@@ -215,7 +745,6 @@ let currentConfig = { providers: [], models: [], default_client_model: null, pro
         headers: parseJsonSafe(node.querySelector('[data-field="headers"]').value, {}),
         description: node.querySelector('[data-field="description"]').value.trim(),
       }));
-
       const models = Array.from(modelsWrap.querySelectorAll('.model-item')).map(node => ({
         client_model: node.querySelector('[data-field="client_model"]').value.trim(),
         provider_id: node.querySelector('[data-field="provider_id"]').value.trim(),
@@ -224,42 +753,36 @@ let currentConfig = { providers: [], models: [], default_client_model: null, pro
         extra_body: parseJsonSafe(node.querySelector('[data-field="extra_body"]').value, {}),
         description: node.querySelector('[data-field="description"]').value.trim(),
       }));
-
       return {
         providers,
         models,
         default_client_model: defaultClientModel.value || null,
-    proxy_auth_token: proxyAuthTokenInput.value.trim() || null,
+        proxy_auth_token: proxyAuthTokenInput.value.trim() || null,
       };
     }
-
     function refreshProviderSelects() {
-      const current = Array.from(modelsWrap.querySelectorAll('.model-item'));
-      current.forEach(node => {
+      Array.from(modelsWrap.querySelectorAll('.model-item')).forEach(node => {
         const select = node.querySelector('[data-field="provider_id"]');
         const selected = select.value;
         bindProviderOptions(select, selected);
       });
     }
-
     function refreshDefaultModelOptions() {
       const models = Array.from(modelsWrap.querySelectorAll('.model-item [data-field="client_model"]')).map(el => el.value.trim()).filter(Boolean);
       const old = defaultClientModel.value;
       defaultClientModel.innerHTML = ['<option value="">未设置</option>'].concat(models.map(id => `<option value="${id}">${id}</option>`)).join('');
       defaultClientModel.value = models.includes(old) ? old : (models[0] || '');
     }
-
     function refreshDerivedViews() {
       try {
         refreshProviderSelects();
         refreshDefaultModelOptions();
         currentConfig = collectConfig();
-        preview.value = JSON.stringify(currentConfig, null, 2);
+        preview.textContent = JSON.stringify(currentConfig, null, 2);
       } catch (error) {
-        preview.value = `配置暂时无效：${error.message}`;
+        preview.textContent = '配置暂时无效：' + error.message;
       }
     }
-
     function renderAll(data) {
       providersWrap.innerHTML = '';
       modelsWrap.innerHTML = '';
@@ -269,23 +792,17 @@ let currentConfig = { providers: [], models: [], default_client_model: null, pro
       refreshProviderSelects();
       refreshDefaultModelOptions();
       if (data.config.default_client_model) defaultClientModel.value = data.config.default_client_model;
-  proxyAuthTokenInput.value = data.config.proxy_auth_token || "";
-  
+      proxyAuthTokenInput.value = data.config.proxy_auth_token || '';
       refreshDerivedViews();
     }
-
     async function loadConfig() {
       setStatus('正在加载配置...');
       const res = await fetch('/api/config', { credentials: 'include' });
-      if (res.status === 401) {
-        window.location.href = '/login';
-        return;
-      }
+      if (res.status === 401) { window.location.href = '/login'; return; }
       const data = await res.json();
       renderAll(data);
-      setStatus('配置已加载。');
+      setStatus('配置已加载');
     }
-
     async function saveConfig() {
       try {
         const payload = collectConfig();
@@ -299,12 +816,11 @@ let currentConfig = { providers: [], models: [], default_client_model: null, pro
         const data = await res.json();
         if (!res.ok) throw new Error(data?.error?.message || data?.message || '保存失败');
         renderAll(data);
-        setStatus(data.message || '保存成功。');
+        setStatus(data.message || '保存成功');
       } catch (error) {
-        setStatus(`保存失败：${error.message}`, true);
+        setStatus('保存失败：' + error.message, true);
       }
     }
-
     document.getElementById('addProviderBtn').addEventListener('click', () => {
       providersWrap.appendChild(buildProviderItem({ enabled: true, timeout_seconds: 300, headers: {} }));
       refreshDerivedViews();
@@ -320,7 +836,6 @@ let currentConfig = { providers: [], models: [], default_client_model: null, pro
       window.location.href = '/login';
     });
     defaultClientModel.addEventListener('change', refreshDerivedViews);
-
     ensureSession().then(loadConfig).catch((error) => setStatus(error.message, true));
   </script>
 </body>

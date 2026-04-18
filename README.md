@@ -59,9 +59,9 @@ npm run dev
 
 启动后访问：
 
-- 登录页：`http://127.0.0.1:8080/login`
-- 管理页：`http://127.0.0.1:8080/admin`
-- 根路径：`http://127.0.0.1:8080/`
+- 登录页：`http://127.0.0.1:8765/login`
+- 管理页：`http://127.0.0.1:8765/admin`
+- 根路径：`http://127.0.0.1:8765/`
 
 ## 本地构建与运行
 
@@ -89,19 +89,19 @@ node dist/cli.js init-config --config ./runtime_models.json
 
 ```bash
 npm i -g claude-code-gateway-proxy
-ccnp start --host 0.0.0.0 --port 8080
+ccnp start --host 0.0.0.0 --port 8765
 ```
 
 也支持完整命令名：
 
 ```bash
-claude-code-gateway-proxy start --host 0.0.0.0 --port 8080
+claude-code-gateway-proxy start --host 0.0.0.0 --port 8765
 ```
 
 ### 方式二：不全局安装，直接使用 npx
 
 ```bash
-npx claude-code-gateway-proxy start --host 0.0.0.0 --port 8080
+npx claude-code-gateway-proxy start --host 0.0.0.0 --port 8765
 ```
 
 ## 发布到 npm
@@ -132,7 +132,7 @@ npm publish --access public
 ## Claude Code 接入
 
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8765
 export ANTHROPIC_AUTH_TOKEN=你的 PROXY_AUTH_TOKEN
 ```
 

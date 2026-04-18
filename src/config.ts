@@ -50,7 +50,7 @@ const toBoolean = (raw: string | undefined, fallback: boolean): boolean => {
 
 export const settings: AppSettings = {
   host: process.env.HOST?.trim() || '0.0.0.0',
-  port: toNumber(process.env.PORT, 8080),
+  port: toNumber(process.env.PORT, 8765),
   proxyAuthToken: process.env.PROXY_AUTH_TOKEN?.trim() || 'replace-with-your-proxy-token',
   adminAuthToken: process.env.ADMIN_AUTH_TOKEN?.trim() || 'replace-with-your-admin-token',
   adminCookieName: 'ccgp_admin_session',
