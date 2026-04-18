@@ -30,6 +30,7 @@ interface StreamState {
   usageInputTokens: number | null;
   usageOutputTokens: number | null;
   tools: Map<number, ToolBlockState>;
+  accumulatedText: string;
 }
 
 export async function bridgeOpenAIStreamToAnthropic(params: {
@@ -50,7 +51,8 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
     stopReason: null,
     usageInputTokens: null,
     usageOutputTokens: null,
-    tools: new Map()
+    tools: new Map(),
+    accumulatedText: ''
   };
 
   try {
@@ -111,6 +113,7 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
             content_block: { type: 'text', text: '' }
           });
         }
+    state.accumulatedText += delta.content;
         writeSse(output, 'content_block_delta', {
           type: 'content_block_delta',
           index: state.textIndex,
@@ -207,7 +210,8 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
       upstream_model: metrics.upstreamModel,
       input_tokens: state.usageInputTokens,
       output_tokens: state.usageOutputTokens,
-      stop_reason: state.stopReason
+      stop_reason: state.stopReason,
+      response_body: state.accumulatedText
     });
   } catch (error) {
     log('error', '流式桥接失败', {
