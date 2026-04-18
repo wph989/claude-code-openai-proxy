@@ -42,13 +42,14 @@ export async function createApp(configPath = settings.configFile): Promise<Fasti
     request.sessionId = typeof sessionHeader === 'string' && sessionHeader.trim() ? sessionHeader.trim() : createId('session');
   });
 
-  app.setErrorHandler((error, request, reply) => {
+  app.setErrorHandler((error: unknown, request, reply) => {
+    const err = error instanceof Error ? error : new Error(String(error));
     log('error', '服务处理失败', { request_id: request.requestId, error });
     void reply.code(500).send({
       type: 'error',
       error: {
         type: 'api_error',
-        message: error.message || '服务器内部错误。'
+        message: err.message || '服务器内部错误。'
       },
       request_id: request.requestId
     });

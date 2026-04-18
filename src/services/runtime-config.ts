@@ -111,7 +111,7 @@ export class RuntimeConfigManager {
       base_url: replaceEnv(provider.base_url),
       api_key: provider.api_key || resolveApiKey(provider),
       timeout_seconds: provider.timeout_seconds || 300,
-      enabled: provider.enabled !== false,
+      enabled: !!provider.enabled,
       headers: normalizeHeaders(provider.headers || {}),
       description: provider.description || ''
     };
@@ -120,7 +120,7 @@ export class RuntimeConfigManager {
       client_model: route.client_model,
       provider_id: route.provider_id,
       upstream_model: route.upstream_model,
-      enabled: route.enabled !== false,
+      enabled: !!route.enabled,
       extra_body: route.extra_body || {},
       description: route.description || ''
     };

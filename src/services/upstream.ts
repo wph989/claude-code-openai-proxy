@@ -40,7 +40,7 @@ export class UpstreamService {
   }
 
   buildPayload(route: ResolvedRoute, payload: Record<string, unknown>): Record<string, unknown> {
-    const merged = {
+    const merged: Record<string, unknown> = {
       ...payload,
       model: route.upstream_model,
       ...route.extra_body
