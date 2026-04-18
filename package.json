@@ -1,0 +1,51 @@
+{
+  "name": "claude-code-gateway-proxy",
+  "version": "0.1.0",
+  "description": "Claude Code 多供应商代理（TypeScript 版），对外暴露 Anthropic Messages 接口，对内转发到 OpenAI-compatible 上游。",
+  "type": "module",
+  "main": "dist/server.js",
+  "bin": {
+    "claude-code-gateway-proxy": "dist/cli.js",
+    "ccnp": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    ".env.example",
+    "runtime_models.example.json"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts start",
+    "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
+    "start": "node dist/cli.js start",
+    "init-config": "node dist/cli.js init-config",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "claude-code",
+    "anthropic",
+    "proxy",
+    "gateway",
+    "nvidia",
+    "openai-compatible",
+    "typescript"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "commander": "^14.0.0",
+    "dotenv": "^17.2.3",
+    "fastify": "^5.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
