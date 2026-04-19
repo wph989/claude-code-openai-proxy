@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { writeFile } from 'node:fs/promises';
-import path, { join } from 'node:path';
+import path, { join, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { Command } from 'commander';
 import { settings } from './config.js';
@@ -9,13 +9,21 @@ import { buildDefaultRuntimeConfig } from './services/runtime-config.js';
 import { log } from './utils/logger.js';
 import { checkExistingProcess, stopProcess, getStatus, writeProcessInfo, removeProcessInfo, openAdminUI } from './utils/pid.js';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
+
+// 动态读取 package.json 版本号
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const pkgPath = join(__dirname, '..', 'package.json');
+const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
 
 const program = new Command();
 
 program
   .name('ccop')
   .description('Claude Code 多供应商代理（TypeScript 版）')
-  .version('0.1.0');
+  .version(pkg.version);
 
 program
   .command('start')
