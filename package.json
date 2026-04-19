@@ -12,7 +12,8 @@
     "dist",
     "README.md",
     ".env.example",
-    "runtime_models.example.json"
+    "runtime_models.example.json",
+    "scripts/postbuild.mjs"
   ],
   "engines": {
     "node": ">=20.0.0"
@@ -21,7 +22,7 @@
     "access": "public"
   },
   "scripts": {
-    "dev": "tsx src/cli.ts start",
+    "dev": "tsx src/cli.ts start --dev",
     "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
     "start": "node dist/cli.js start",
     "init-config": "node dist/cli.js init-config",

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import path, { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { Command } from 'commander';
 import { settings } from './config.js';
@@ -23,6 +23,7 @@ program
   .option('--host <host>', '监听地址', settings.host)
   .option('--port <port>', '监听端口', String(settings.port))
   .option('--config <path>', '运行时模型配置文件路径', settings.configFile)
+  .option('--dev', '强制开发模式（使用本地目录配置）', false)
   .option('-d, --daemon', '后台运行（守护进程模式）', false)
   .action(async (options) => {
     const port = Number(options.port || settings.port);
@@ -96,14 +97,23 @@ program
       log('info', '打开管理界面', { url });
 
       // try to open browser (cross-platform)
-      const { exec } = await import('node:child_process');
+      const { exec, spawn } = await import('node:child_process');
       const platform = process.platform;
-      const cmd = platform === 'darwin' ? 'open' : platform === 'win32' ? 'start' : 'xdg-open';
-      exec(`${cmd} "${url}"`, (error) => {
-        if (error) {
-          console.log('请手动在浏览器中打开上述地址');
-        }
-      });
+
+      if (platform === 'win32') {
+        // Windows: 使用 spawn 启动浏览器
+        spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' });
+      } else if (platform === 'darwin') {
+        // macOS
+        exec(`open "${url}"`, () => {});
+      } else {
+        // Linux
+        exec(`xdg-open "${url}"`, (error) => {
+          if (error) {
+            console.log('请手动在浏览器中打开上述地址');
+          }
+        });
+      }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       console.error(`错误: ${msg}`);
@@ -111,13 +121,15 @@ program
     }
   });
 
+import { USER_CONFIG_DIR } from './config.js';
+
 program
   .command('init-config')
-  .description('在当前目录初始化 runtime_models.json')
-  .option('--config <path>', '输出路径', './runtime_models.json')
+  .description('初始化配置文件到 ~/.ccop/')
+  .option('--config <path>', '输出路径（默认 ~/.ccop/runtime_models.json）')
   .option('--force', '覆盖已存在的文件', false)
   .action(async (options) => {
-    const output = path.resolve(options.config || './runtime_models.json');
+    const output = options.config ? path.resolve(options.config) : join(USER_CONFIG_DIR, 'runtime_models.json');
     const content = JSON.stringify(buildDefaultRuntimeConfig(), null, 2) + '\n';
     try {
       await writeFile(output, content, { encoding: 'utf-8', flag: options.force ? 'w' : 'wx' });

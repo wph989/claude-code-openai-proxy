@@ -1,10 +1,11 @@
-import { readFile, writeFile, unlink } from 'node:fs/promises';
+import { readFile, writeFile, unlink, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { log } from './logger.js';
+import { USER_CONFIG_DIR } from '../config.js';
 
-const PID_DIR = process.env.TMPDIR || process.env.TEMP || process.env.TMP || '/tmp';
-const PID_FILE = join(PID_DIR, 'ccop.pid');
-const PORT_FILE = join(PID_DIR, 'ccop.port');
+const USER_PID_DIR = join(USER_CONFIG_DIR, 'pids');
+const PID_FILE = join(USER_PID_DIR, 'ccop.pid');
+const PORT_FILE = join(USER_PID_DIR, 'ccop.port');
 
 interface ProcessInfo {
   pid: number;
@@ -12,7 +13,16 @@ interface ProcessInfo {
   host: string;
 }
 
+async function ensurePidDir(): Promise<void> {
+  try {
+    await mkdir(USER_PID_DIR, { recursive: true });
+  } catch {
+    // ignore
+  }
+}
+
 export async function writeProcessInfo(info: ProcessInfo): Promise<void> {
+  await ensurePidDir();
   await writeFile(PID_FILE, String(info.pid), 'utf-8');
   await writeFile(PORT_FILE, JSON.stringify({ port: info.port, host: info.host }), 'utf-8');
   log('info', '进程信息已写入', { pid_file: PID_FILE, port: info.port, host: info.host });
@@ -48,7 +58,7 @@ export async function readProcessInfo(): Promise<ProcessInfo | null> {
 export async function checkExistingProcess(port?: number): Promise<ProcessInfo | null> {
   // if port specified, check specific port
   if (port !== undefined) {
-    const pidFile = join(PID_DIR, `ccop-${port}.pid`);
+    const pidFile = join(USER_PID_DIR, `ccop-${port}.pid`);
     try {
       const pidStr = await readFile(pidFile, 'utf-8');
       const pid = parseInt(pidStr.trim(), 10);
@@ -88,7 +98,7 @@ export async function stopProcess(port?: number): Promise<string> {
     await removeProcessInfo();
 
     // also clean up port-specific file if exists
-    const portSpecificFile = join(PID_DIR, `ccop-${info.port}.pid`);
+    const portSpecificFile = join(USER_PID_DIR, `ccop-${info.port}.pid`);
     try { await unlink(portSpecificFile); } catch { }
 
     return `已停止服务 (PID: ${info.pid}, Port: ${info.port})`;

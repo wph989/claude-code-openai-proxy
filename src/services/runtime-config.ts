@@ -52,6 +52,7 @@ export class RuntimeConfigManager {
     const dir = path.dirname(this.configPath);
     await mkdir(dir, { recursive: true });
     await writeFile(this.configPath, JSON.stringify(buildDefaultRuntimeConfig(), null, 2) + '\n', 'utf-8');
+    console.log(`[init] 配置文件已创建: ${this.configPath}`);
   }
 
   async saveConfig(raw: RuntimeConfig): Promise<RuntimeConfig> {

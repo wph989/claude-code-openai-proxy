@@ -1,6 +1,10 @@
 import { appendFile, mkdir, readdir, rename, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { nowBeijingIso } from './time.js';
+import { isProduction, USER_CONFIG_DIR } from '../config.js';
+
+// 用户日志目录
+const USER_LOG_DIR = path.join(USER_CONFIG_DIR, 'logs');
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -22,7 +26,13 @@ if (logFormat !== 'json' && logFormat !== 'text') {
 }
 
 let detailedLogging = process.env.LOG_DETAILED?.toLowerCase().trim() === 'true';
-let logFilePath: string | undefined = process.env.LOG_FILE?.trim();
+
+// 自动设置日志路径（如果未从环境变量指定）
+function getDefaultLogFilePath(): string {
+  return path.join(USER_LOG_DIR, 'app.log');
+}
+
+let logFilePath: string | undefined = process.env.LOG_FILE?.trim() || getDefaultLogFilePath();
 let logRotation: 'none' | 'daily' | 'size' = 'daily';
 let logMaxFiles = 30;
 let logMaxSize = 50 * 1024 * 1024;

@@ -63,7 +63,9 @@ npx claude-code-openai-proxy start
 ccop init-config
 ```
 
-这会创建 `runtime_models.json` 配置文件。
+这会创建运行时配置文件。根据启动方式不同，文件位置不同：
+- **开发模式**（`--dev` 或 `NODE_ENV=development`）：当前目录 `runtime_models.json`
+- **生产模式**（npm 全局安装）：`~/.ccop/config.json`
 
 ### 2. 编辑配置
 
@@ -123,7 +125,8 @@ ccop ui
 
 | 命令 | 说明 |
 |------|------|
-| `ccop start` | 前台启动服务 |
+| `ccop start` | 前台启动服务（生产模式） |
+| `ccop start --dev` | 前台启动（开发模式，使用本地配置） |
 | `ccop start -d` | 后台守护模式启动 |
 | `ccop start --port 8766` | 指定端口启动 |
 | `ccop stop` | 停止服务（自动读取端口） |
@@ -132,9 +135,25 @@ ccop ui
 | `ccop init-config` | 初始化配置文件 |
 | `ccop --version` | 查看版本 |
 
+### 开发模式 vs 生产模式
+
+| 模式 | 启动方式 | 配置位置 | 日志位置 | PID 位置 |
+|------|---------|---------|---------|---------|
+| **开发** | `ccop start --dev`<br>or `NODE_ENV=development ccop start`<br>or `pnpm run dev` | 项目目录 `.env`<br>项目目录 `runtime_models.json` | 项目目录 `logs/app.log` | 项目目录 `pids/` |
+| **生产** | `ccop start` (npm -g 安装后) | `~/.ccop/.env`<br>`~/.ccop/config.json` | `~/.ccop/logs/app.log` | `~/.ccop/pids/` |
+
+生产模式下所有配置数据都在 `~/.ccop/`，方便备份和迁移；开发模式下配置与项目代码在一起。
+
 ## 环境变量
 
-创建 `.env` 文件：
+根据启动模式，`.env` 文件位置不同：
+
+| 模式 | `.env` 位置 |
+|------|-------------|
+| 开发模式 | 项目根目录 `.env` |
+| 生产模式 | `~/.ccop/.env`（首次运行自动生成） |
+
+### 常用环境变量
 
 ```bash
 # 服务监听配置
@@ -142,11 +161,16 @@ HOST=0.0.0.0
 PORT=8765
 
 # 认证令牌
-PROXY_AUTH_TOKEN=your-proxy-token
-ADMIN_AUTH_TOKEN=your-admin-token
+ADMIN_AUTH_TOKEN=admin123
 
-# 配置文件路径
-CONFIG_FILE=./runtime_models.json
+# 配置文件（可选，覆盖默认位置）
+# CONFIG_FILE=./runtime_models.json  # 开发模式
+# CONFIG_FILE=/home/user/.ccop/config.json  # 生产模式
+
+# 日志配置
+LOG_LEVEL=info          # debug, info, warn, error
+LOG_FORMAT=json         # json, text
+LOG_DETAILED=false      # 是否记录详细请求/响应
 
 # 日志配置
 LOG_LEVEL=info          # debug, info, warn, error
