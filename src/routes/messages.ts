@@ -161,7 +161,8 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
         providerId: provider.provider_id,
         clientModel: payload.model,
         upstreamModel: route.upstream_model
-      }
+      },
+      idleTimeoutMs: Math.max(1000, provider.stream_idle_timeout_seconds * 1000 || settings.streamIdleTimeoutMs)
     });
   });
 }

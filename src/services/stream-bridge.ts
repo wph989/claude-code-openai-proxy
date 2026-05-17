@@ -39,8 +39,9 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
   clientModel: string;
   messageId: string;
   metrics: StreamMetrics;
+  idleTimeoutMs: number;
 }): Promise<void> {
-  const { upstreamResponse, output, clientModel, messageId, metrics } = params;
+  const { upstreamResponse, output, clientModel, messageId, metrics, idleTimeoutMs } = params;
   const state: StreamState = {
     messageId,
     clientModel,
@@ -83,7 +84,7 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
       }
     });
 
-    for await (const event of iterateSse(upstreamResponse)) {
+    for await (const event of iterateSse(upstreamResponse, idleTimeoutMs)) {
       if (event.data === '[DONE]') {
         break;
       }
@@ -239,7 +240,7 @@ function writeSse(output: PassThrough, event: string, data: Record<string, unkno
   output.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-async function* iterateSse(response: Response): AsyncGenerator<{ event?: string; data: string }> {
+async function* iterateSse(response: Response, idleTimeoutMs: number): AsyncGenerator<{ event?: string; data: string }> {
   const body = response.body;
   if (!body) {
     return;
@@ -251,42 +252,55 @@ async function* iterateSse(response: Response): AsyncGenerator<{ event?: string;
   let currentEvent: string | undefined;
   let dataLines: string[] = [];
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+  try {
+    while (true) {
+      let timer: ReturnType<typeof setTimeout>;
+      const readResult = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`SSE idle timeout: ${idleTimeoutMs}ms 内未收到数据`)), idleTimeoutMs);
+        })
+      ]);
+      clearTimeout(timer!);
 
-    let newlineIndex = buffer.indexOf('\n');
-    while (newlineIndex >= 0) {
-      const rawLine = buffer.slice(0, newlineIndex);
-      buffer = buffer.slice(newlineIndex + 1);
-      const line = rawLine.replace(/\r$/, '');
+      const { value, done } = readResult;
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
 
-      if (line === '') {
-        if (dataLines.length > 0) {
-          yield { event: currentEvent, data: dataLines.join('\n') };
+      let newlineIndex = buffer.indexOf('\n');
+      while (newlineIndex >= 0) {
+        const rawLine = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        const line = rawLine.replace(/\r$/, '');
+
+        if (line === '') {
+          if (dataLines.length > 0) {
+            yield { event: currentEvent, data: dataLines.join('\n') };
+          }
+          currentEvent = undefined;
+          dataLines = [];
+        } else if (line.startsWith('event:')) {
+          currentEvent = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          dataLines.push(line.slice(5).trimStart());
         }
-        currentEvent = undefined;
-        dataLines = [];
-      } else if (line.startsWith('event:')) {
-        currentEvent = line.slice(6).trim();
-      } else if (line.startsWith('data:')) {
+
+        newlineIndex = buffer.indexOf('\n');
+      }
+    }
+
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      const line = buffer.replace(/\r$/, '');
+      if (line.startsWith('data:')) {
         dataLines.push(line.slice(5).trimStart());
       }
-
-      newlineIndex = buffer.indexOf('\n');
     }
-  }
-
-  buffer += decoder.decode();
-  if (buffer.trim()) {
-    const line = buffer.replace(/\r$/, '');
-    if (line.startsWith('data:')) {
-      dataLines.push(line.slice(5).trimStart());
+    if (dataLines.length > 0) {
+      yield { event: currentEvent, data: dataLines.join('\n') };
     }
-  }
-  if (dataLines.length > 0) {
-    yield { event: currentEvent, data: dataLines.join('\n') };
+  } finally {
+    reader.cancel().catch(() => { });
   }
 }
 

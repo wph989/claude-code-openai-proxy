@@ -599,6 +599,12 @@
           <div class="form-group">
             <span class="form-label">timeout_seconds</span>
             <input data-field="timeout_seconds" type="number" min="1" value="300" />
+            <p class="form-hint">非流式请求超时（秒）</p>
+          </div>
+          <div class="form-group">
+            <span class="form-label">stream_idle_timeout_seconds</span>
+            <input data-field="stream_idle_timeout_seconds" type="number" min="1" value="120" />
+            <p class="form-hint">流式请求帧间空闲超时（秒）</p>
           </div>
         </div>
         <div class="form-group" style="margin-top: 20px;">
@@ -705,6 +711,7 @@
       node.querySelector('[data-field="api_key_env"]').value = item.api_key_env || '';
       node.querySelector('[data-field="api_key"]').value = item.api_key || '';
       node.querySelector('[data-field="timeout_seconds"]').value = item.timeout_seconds || 300;
+      node.querySelector('[data-field="stream_idle_timeout_seconds"]').value = item.stream_idle_timeout_seconds || 120;
       node.querySelector('[data-field="enabled"]').checked = item.enabled !== false;
       node.querySelector('[data-field="headers"]').value = JSON.stringify(item.headers || {}, null, 2);
       node.querySelector('.remove-provider').addEventListener('click', () => { node.remove(); refreshDerivedViews(); });
@@ -741,6 +748,7 @@
         api_key_env: node.querySelector('[data-field="api_key_env"]').value.trim() || null,
         api_key: node.querySelector('[data-field="api_key"]').value.trim() || null,
         timeout_seconds: Number(node.querySelector('[data-field="timeout_seconds"]').value || 300),
+        stream_idle_timeout_seconds: Number(node.querySelector('[data-field="stream_idle_timeout_seconds"]').value || 120),
         enabled: node.querySelector('[data-field="enabled"]').checked,
         headers: parseJsonSafe(node.querySelector('[data-field="headers"]').value, {}),
         description: node.querySelector('[data-field="description"]').value.trim(),
@@ -822,7 +830,7 @@
       }
     }
     document.getElementById('addProviderBtn').addEventListener('click', () => {
-      providersWrap.appendChild(buildProviderItem({ enabled: true, timeout_seconds: 300, headers: {} }));
+      providersWrap.appendChild(buildProviderItem({ enabled: true, timeout_seconds: 300, stream_idle_timeout_seconds: 120, headers: {} }));
       refreshDerivedViews();
     });
     document.getElementById('addModelBtn').addEventListener('click', () => {

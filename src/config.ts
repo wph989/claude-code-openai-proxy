@@ -90,6 +90,7 @@ export interface AppSettings {
   adminCookieMaxAgeSeconds: number;
   configFile: string;
   requestTimeoutMs: number;
+  streamIdleTimeoutMs: number;
   maxRequestBodyChars: number;
   maxResponseBodyChars: number;
   logLevel: string;
@@ -138,6 +139,7 @@ export const settings: AppSettings = {
   adminCookieMaxAgeSeconds: 60 * 60 * 12,
   configFile: configFilePath,
   requestTimeoutMs: toNumber(process.env.REQUEST_TIMEOUT_MS, 300000),
+  streamIdleTimeoutMs: toNumber(process.env.REQUEST_STREAM_IDLE_TIMEOUT_MS, 120000),
   maxRequestBodyChars: toNumber(process.env.MAX_REQUEST_BODY_CHARS, 4000),
   maxResponseBodyChars: toNumber(process.env.MAX_RESPONSE_BODY_CHARS, 4000),
   logLevel: process.env.LOG_LEVEL?.trim() || 'info',

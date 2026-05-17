@@ -65,11 +65,23 @@ export class UpstreamService {
   }): Promise<Response> {
     const payload = this.buildPayload(params.route, params.payload);
     const url = this.buildChatCompletionsUrl(params.provider);
+
+    if (payload.stream === true) {
+      // 流式请求不设总超时，由 stream-bridge 的逐帧空闲超时控制断开
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: this.buildHeaders(params),
+        body: JSON.stringify(payload)
+      });
+      return response;
+    }
+
+    const timeoutMs = Math.max(1000, params.provider.timeout_seconds * 1000 || settings.requestTimeoutMs);
     return fetch(url, {
       method: 'POST',
       headers: this.buildHeaders(params),
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(Math.max(1000, params.provider.timeout_seconds * 1000 || settings.requestTimeoutMs))
+      signal: AbortSignal.timeout(timeoutMs)
     });
   }
 

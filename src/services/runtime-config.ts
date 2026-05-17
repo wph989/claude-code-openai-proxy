@@ -112,6 +112,7 @@ export class RuntimeConfigManager {
       base_url: replaceEnv(provider.base_url),
       api_key: provider.api_key || resolveApiKey(provider),
       timeout_seconds: provider.timeout_seconds || 300,
+      stream_idle_timeout_seconds: provider.stream_idle_timeout_seconds || 120,
       enabled: !!provider.enabled,
       headers: normalizeHeaders(provider.headers || {}),
       description: provider.description || ''

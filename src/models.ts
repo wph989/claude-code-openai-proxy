@@ -39,6 +39,7 @@ export interface ProviderConfig {
   api_key?: string | null;
   api_key_env?: string | null;
   timeout_seconds?: number;
+  stream_idle_timeout_seconds?: number;
   enabled?: boolean;
   headers?: Record<string, string>;
   description?: string;
@@ -74,6 +75,7 @@ export interface ResolvedProvider {
   base_url: string;
   api_key?: string | null;
   timeout_seconds: number;
+  stream_idle_timeout_seconds: number;
   enabled: boolean;
   headers: Record<string, string>;
   description: string;
@@ -96,6 +98,7 @@ export function normalizeRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
     api_key: normalizeOptional(item.api_key),
     api_key_env: normalizeOptional(item.api_key_env),
     timeout_seconds: Number(item.timeout_seconds || 300),
+    stream_idle_timeout_seconds: Number(item.stream_idle_timeout_seconds || 120),
     enabled: item.enabled !== false,
     headers: normalizeHeaders(item.headers || {}),
     description: String(item.description || '').trim()
