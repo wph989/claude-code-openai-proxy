@@ -2,7 +2,9 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { settings } from '../config.js';
 import { setRuntimeProxyToken } from '../auth.js';
+import { ApiKeyRotator } from './api-key-rotator.js';
 import {
+  KeyRotationStrategy,
   type ProviderConfig,
   type ResolvedProvider,
   type ResolvedRoute,
@@ -21,6 +23,7 @@ import {
 export class RuntimeConfigManager {
   private configPath: string;
   private config: RuntimeConfig = { providers: [], models: [], default_client_model: null };
+  private rotators: Map<string, ApiKeyRotator> = new Map();
 
   constructor(configPath = settings.configFile) {
     this.configPath = path.resolve(configPath);
@@ -43,8 +46,8 @@ export class RuntimeConfigManager {
     const text = await readFile(this.configPath, 'utf-8');
     const raw = JSON.parse(text) as RuntimeConfig;
     this.config = validateRuntimeConfig(raw);
-    // 同步代理 Token 到运行时
     setRuntimeProxyToken(this.config.proxy_auth_token ?? null);
+    this.rebuildRotators();
     return this.getConfig();
   }
 
@@ -61,8 +64,8 @@ export class RuntimeConfigManager {
     await mkdir(dir, { recursive: true });
     await writeFile(this.configPath, JSON.stringify(validated, null, 2) + '\n', 'utf-8');
     this.config = validated;
-    // 同步代理 Token 到运行时
     setRuntimeProxyToken(this.config.proxy_auth_token ?? null);
+    this.rebuildRotators();
     return this.getConfig();
   }
 
@@ -92,7 +95,7 @@ export class RuntimeConfigManager {
       }));
   }
 
-  resolveModel(clientModel: string): { route: ResolvedRoute; provider: ResolvedProvider; enabledProviderIds: string[] } {
+  resolveModel(clientModel: string): { route: ResolvedRoute; provider: ResolvedProvider; rotator: ApiKeyRotator } {
     const normalizedModel = String(clientModel || '').trim();
     const route = this.config.models.find((item) => item.client_model === normalizedModel);
     if (!route || route.enabled === false) {
@@ -100,17 +103,21 @@ export class RuntimeConfigManager {
     }
 
     const provider = this.config.providers.find((item) => item.provider_id === route.provider_id);
-    const enabledProviderIds = this.config.providers.filter((item) => item.enabled !== false).map((item) => item.provider_id);
 
     if (!provider || provider.enabled === false) {
+      const enabledProviderIds = this.config.providers.filter((item) => item.enabled !== false).map((item) => item.provider_id);
       throw new Error(`未找到可用的供应商：${route.provider_id}。当前启用的供应商：${enabledProviderIds.join(', ') || '无'}`);
     }
+
+    const apiKeys = resolveApiKeys(provider);
+    const rotator = this.getOrCreateRotator(provider.provider_id, apiKeys, provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin);
 
     const resolvedProvider: ResolvedProvider = {
       provider_id: provider.provider_id,
       provider_type: provider.provider_type,
       base_url: replaceEnv(provider.base_url),
-      api_key: provider.api_key || resolveApiKey(provider),
+      api_keys: apiKeys,
+      key_rotation_strategy: provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin,
       timeout_seconds: provider.timeout_seconds || 300,
       stream_idle_timeout_seconds: provider.stream_idle_timeout_seconds || 120,
       enabled: !!provider.enabled,
@@ -127,16 +134,57 @@ export class RuntimeConfigManager {
       description: route.description || ''
     };
 
-    return { route: resolvedRoute, provider: resolvedProvider, enabledProviderIds };
+    return { route: resolvedRoute, provider: resolvedProvider, rotator };
+  }
+
+  private getOrCreateRotator(providerId: string, keys: string[], strategy: KeyRotationStrategy): ApiKeyRotator {
+    const existing = this.rotators.get(providerId);
+    if (existing && keysEqual(existing.keys, keys) && existing.strategy === strategy) {
+      return existing;
+    }
+    const rotator = new ApiKeyRotator(keys, strategy);
+    this.rotators.set(providerId, rotator);
+    return rotator;
+  }
+
+  private rebuildRotators(): void {
+    this.rotators.clear();
+    for (const provider of this.config.providers) {
+      const apiKeys = resolveApiKeys(provider);
+      const strategy = provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin;
+      if (apiKeys.length > 0) {
+        this.rotators.set(provider.provider_id, new ApiKeyRotator(apiKeys, strategy));
+      }
+    }
   }
 }
 
-function resolveApiKey(provider: ProviderConfig): string | null {
-  const envName = provider.api_key_env?.trim();
-  if (!envName) {
-    return null;
+function resolveApiKeys(provider: ProviderConfig): string[] {
+  const keys: string[] = [];
+
+  if (provider.api_key) {
+    for (const key of provider.api_key.split(',')) {
+      const trimmed = key.trim();
+      if (trimmed) keys.push(trimmed);
+    }
   }
-  return process.env[envName]?.trim() || null;
+
+  if (provider.api_key_env) {
+    for (const envName of provider.api_key_env.split(',')) {
+      const trimmed = envName.trim();
+      if (trimmed) {
+        const val = process.env[trimmed]?.trim();
+        if (val) keys.push(val);
+      }
+    }
+  }
+
+  return keys;
+}
+
+function keysEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((v, i) => v === b[i]);
 }
 
 function replaceEnv(value: string): string {

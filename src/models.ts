@@ -32,12 +32,18 @@ export interface CountTokensRequest {
   system?: string | Record<string, unknown>[];
 }
 
+export enum KeyRotationStrategy {
+  round_robin = 'round_robin',
+  on_429 = 'on_429',
+}
+
 export interface ProviderConfig {
   provider_id: string;
   provider_type: 'openai_compatible';
   base_url: string;
   api_key?: string | null;
   api_key_env?: string | null;
+  key_rotation_strategy?: KeyRotationStrategy | null;
   timeout_seconds?: number;
   stream_idle_timeout_seconds?: number;
   enabled?: boolean;
@@ -73,7 +79,8 @@ export interface ResolvedProvider {
   provider_id: string;
   provider_type: 'openai_compatible';
   base_url: string;
-  api_key?: string | null;
+  api_keys: string[];
+  key_rotation_strategy: KeyRotationStrategy;
   timeout_seconds: number;
   stream_idle_timeout_seconds: number;
   enabled: boolean;
@@ -97,6 +104,7 @@ export function normalizeRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
     base_url: String(item.base_url || '').trim(),
     api_key: normalizeOptional(item.api_key),
     api_key_env: normalizeOptional(item.api_key_env),
+    key_rotation_strategy: normalizeRotationStrategy(item.key_rotation_strategy),
     timeout_seconds: Number(item.timeout_seconds || 300),
     stream_idle_timeout_seconds: Number(item.stream_idle_timeout_seconds || 120),
     enabled: item.enabled !== false,
@@ -186,6 +194,13 @@ function normalizeHeaders(headers: Record<string, unknown>): Record<string, stri
     result[String(key).trim()] = String(value).trim();
   }
   return result;
+}
+
+function normalizeRotationStrategy(value: unknown): KeyRotationStrategy {
+  if (value === KeyRotationStrategy.round_robin || value === KeyRotationStrategy.on_429) {
+    return value;
+  }
+  return KeyRotationStrategy.round_robin;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

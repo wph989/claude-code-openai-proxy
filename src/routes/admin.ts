@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { getExpectedAdminToken, isValidAdminToken, verifyAdminAuth } from '../auth.js';
 import { settings } from '../config.js';
 import type { RuntimeConfig } from '../models.js';
@@ -11,14 +11,30 @@ const __dirname = path.dirname(__filename);
 const staticDir = path.join(__dirname, '..', 'static');
 
 export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
+  const staticCache = new Map<string, string>();
+
+  async function serveStatic(reply: FastifyReply, filename: string, contentType: string): Promise<void> {
+    if (!staticCache.has(filename)) {
+      staticCache.set(filename, await readFile(path.join(staticDir, filename), 'utf-8'));
+    }
+    void reply.type(contentType).send(staticCache.get(filename));
+  }
+
+  app.get('/admin.css', async (_request, reply) => {
+    await serveStatic(reply, 'admin.css', 'text/css; charset=utf-8');
+  });
+
+  app.get('/admin.js', async (_request, reply) => {
+    await serveStatic(reply, 'admin.js', 'application/javascript; charset=utf-8');
+  });
+
   app.get('/', async (request, reply) => {
     const token = request.cookies?.[settings.adminCookieName];
     void reply.redirect(token && isValidAdminToken(token) ? '/admin' : '/login');
   });
 
   app.get('/login', async (_request, reply) => {
-    const html = await readFile(path.join(staticDir, 'login.html'), 'utf-8');
-    void reply.type('text/html; charset=utf-8').send(html);
+    await serveStatic(reply, 'login.html', 'text/html; charset=utf-8');
   });
 
   app.post('/api/admin/login', async (request, reply) => {
@@ -51,8 +67,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     if (!token || !isValidAdminToken(token)) {
       return reply.redirect('/login');
     }
-    const html = await readFile(path.join(staticDir, 'index.html'), 'utf-8');
-    void reply.type('text/html; charset=utf-8').send(html);
+    await serveStatic(reply, 'index.html', 'text/html; charset=utf-8');
   });
 
   app.get('/api/config', async (request, reply) => {

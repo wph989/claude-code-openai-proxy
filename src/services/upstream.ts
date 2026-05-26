@@ -1,18 +1,21 @@
 import { settings } from '../config.js';
 import type { ResolvedProvider, ResolvedRoute } from '../models.js';
+import type { ApiKeyRotator } from './api-key-rotator.js';
 
 /**
  * 上游请求服务：
  * - 统一构造 OpenAI-compatible 请求
  * - 流式请求自动打开 include_usage，便于从供应商响应中提取 token
+ * - 支持多 API Key 轮询和 429 自动切换
  */
 export class UpstreamService {
   buildChatCompletionsUrl(provider: ResolvedProvider): string {
     return `${provider.base_url.replace(/\/$/, '')}/chat/completions`;
   }
 
-  buildHeaders(params: {
+  private buildHeadersWithKey(params: {
     provider: ResolvedProvider;
+    apiKey?: string;
     requestId: string;
     sessionId: string;
     anthropicVersion?: string;
@@ -24,9 +27,10 @@ export class UpstreamService {
     headers.set('x-request-id', params.requestId);
     headers.set('x-claude-code-session-id', params.sessionId);
 
-    if (params.provider.api_key) {
-      headers.set('authorization', `Bearer ${params.provider.api_key}`);
+    if (params.apiKey) {
+      headers.set('authorization', `Bearer ${params.apiKey}`);
     }
+
     if (params.anthropicVersion) {
       headers.set('anthropic-version', params.anthropicVersion);
     }
@@ -37,6 +41,36 @@ export class UpstreamService {
       headers.set(key, value);
     }
     return headers;
+  }
+
+  private doFetch(params: {
+    url: string;
+    provider: ResolvedProvider;
+    rotator?: ApiKeyRotator;
+    payload: string;
+    timeoutMs?: number;
+    requestId: string;
+    sessionId: string;
+    anthropicVersion?: string;
+    anthropicBeta?: string;
+  }): { response: Promise<Response>; usedKey: string | undefined } {
+    const apiKey = params.rotator?.pick();
+    const fetchParams: RequestInit = {
+      method: 'POST',
+      headers: this.buildHeadersWithKey({
+        provider: params.provider,
+        apiKey,
+        requestId: params.requestId,
+        sessionId: params.sessionId,
+        anthropicVersion: params.anthropicVersion,
+        anthropicBeta: params.anthropicBeta,
+      }),
+      body: params.payload,
+    };
+    if (params.timeoutMs) {
+      fetchParams.signal = AbortSignal.timeout(params.timeoutMs);
+    }
+    return { response: fetch(params.url, fetchParams), usedKey: apiKey };
   }
 
   buildPayload(route: ResolvedRoute, payload: Record<string, unknown>): Record<string, unknown> {
@@ -57,6 +91,7 @@ export class UpstreamService {
   async postChatCompletions(params: {
     provider: ResolvedProvider;
     route: ResolvedRoute;
+    rotator?: ApiKeyRotator;
     payload: Record<string, unknown>;
     requestId: string;
     sessionId: string;
@@ -65,29 +100,50 @@ export class UpstreamService {
   }): Promise<Response> {
     const payload = this.buildPayload(params.route, params.payload);
     const url = this.buildChatCompletionsUrl(params.provider);
+    const body = JSON.stringify(payload);
 
-    if (payload.stream === true) {
-      // 流式请求不设总超时，由 stream-bridge 的逐帧空闲超时控制断开
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: this.buildHeaders(params),
-        body: JSON.stringify(payload)
+    const timeoutMs = payload.stream === true
+      ? undefined
+      : Math.max(1000, params.provider.timeout_seconds * 1000 || settings.requestTimeoutMs);
+
+    const { response, usedKey } = this.doFetch({
+      url,
+      provider: params.provider,
+      rotator: params.rotator,
+      payload: body,
+      timeoutMs,
+      requestId: params.requestId,
+      sessionId: params.sessionId,
+      anthropicVersion: params.anthropicVersion,
+      anthropicBeta: params.anthropicBeta,
+    });
+
+    const res = await response;
+
+    // 429 重试：标记 key + 用下一个可用 key 重试一次
+    if (res.status === 429 && params.rotator && usedKey && !params.rotator.allCoolingDown()) {
+      params.rotator.mark429(usedKey);
+      const { response: retryResponse } = this.doFetch({
+        url,
+        provider: params.provider,
+        rotator: params.rotator,
+        payload: body,
+        timeoutMs,
+        requestId: params.requestId,
+        sessionId: params.sessionId,
+        anthropicVersion: params.anthropicVersion,
+        anthropicBeta: params.anthropicBeta,
       });
-      return response;
+      return retryResponse;
     }
 
-    const timeoutMs = Math.max(1000, params.provider.timeout_seconds * 1000 || settings.requestTimeoutMs);
-    return fetch(url, {
-      method: 'POST',
-      headers: this.buildHeaders(params),
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(timeoutMs)
-    });
+    return res;
   }
 
   async countTokensViaProviderResponse(params: {
     provider: ResolvedProvider;
     route: ResolvedRoute;
+    rotator?: ApiKeyRotator;
     openAIMessages: Array<Record<string, unknown>>;
     requestId: string;
     sessionId: string;
@@ -97,6 +153,7 @@ export class UpstreamService {
     const response = await this.postChatCompletions({
       provider: params.provider,
       route: params.route,
+      rotator: params.rotator,
       requestId: params.requestId,
       sessionId: params.sessionId,
       anthropicVersion: params.anthropicVersion,

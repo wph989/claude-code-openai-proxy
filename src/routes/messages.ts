@@ -29,11 +29,12 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
     }
 
     try {
-      const { route, provider } = app.runtimeConfigManager.resolveModel(modelName);
+      const { route, provider, rotator } = app.runtimeConfigManager.resolveModel(modelName);
       const openAIMessages = anthropicToOpenAIMessages(payload.system, payload.messages as unknown as Array<Record<string, unknown>>);
       const tokens = await app.upstreamService.countTokensViaProviderResponse({
         provider,
         route,
+        rotator,
         openAIMessages,
         requestId,
         sessionId,
@@ -68,7 +69,7 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
       return reply.code(400).send(buildAnthropicError(requestId, 'invalid_request_error', error instanceof Error ? error.message : '模型映射失败。'));
     }
 
-    const { route, provider } = resolved;
+    const { route, provider, rotator } = resolved;
     const openAIPayload: Record<string, unknown> = {
       model: route.upstream_model,
       messages: anthropicToOpenAIMessages(payload.system, payload.messages as unknown as Array<Record<string, unknown>>),
@@ -106,6 +107,7 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
       const upstreamResponse = await app.upstreamService.postChatCompletions({
         provider,
         route,
+        rotator,
         payload: openAIPayload,
         requestId,
         sessionId,
@@ -134,6 +136,7 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
     const upstreamResponse = await app.upstreamService.postChatCompletions({
       provider,
       route,
+      rotator,
       payload: openAIPayload,
       requestId,
       sessionId,

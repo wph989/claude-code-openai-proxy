@@ -187,19 +187,23 @@ async function writeToFile(text: string): Promise<void> {
   if (!logFilePath) return;
 
   await ensureLogDir();
-  await rotateLogIfNeeded();
 
-  const today = getBeijingDate();
-  if (!currentLogPath || currentLogDate !== today) {
+  // 首次写入时先初始化状态，确保 rotateLogIfNeeded 能正确检测日期变化
+  if (!currentLogPath) {
     currentLogPath = logFilePath;
-    currentLogDate = today;
-    currentLogSize = 0;
     try {
       const s = await stat(currentLogPath);
       currentLogSize = s.size;
     } catch {
       currentLogSize = 0;
     }
+  }
+
+  await rotateLogIfNeeded();
+
+  const today = getBeijingDate();
+  if (currentLogDate !== today) {
+    currentLogDate = today;
   }
 
   const line = text + '\n';
