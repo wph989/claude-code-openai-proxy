@@ -1,5 +1,5 @@
 import { PassThrough } from 'node:stream';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { verifyProxyAuth } from '../auth.js';
 import { settings } from '../config.js';
 import type { AnthropicMessagesRequest, CountTokensRequest } from '../models.js';
@@ -30,17 +30,34 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
 
     try {
       const { route, provider, rotator } = app.runtimeConfigManager.resolveModel(modelName);
-      const openAIMessages = anthropicToOpenAIMessages(payload.system, payload.messages as unknown as Array<Record<string, unknown>>);
-      const tokens = await app.upstreamService.countTokensViaProviderResponse({
-        provider,
-        route,
-        rotator,
-        openAIMessages,
-        requestId,
-        sessionId,
-        anthropicVersion: readHeader(request.headers['anthropic-version']),
-        anthropicBeta: readHeader(request.headers['anthropic-beta'])
-      });
+      const anthropicVersion = readHeader(request.headers['anthropic-version']);
+      const anthropicBeta = readHeader(request.headers['anthropic-beta']);
+
+      let tokens: number;
+      if (provider.provider_type === 'anthropic') {
+        tokens = await app.upstreamService.countTokensAnthropic({
+          provider,
+          route,
+          rotator,
+          anthropicPayload: { messages: payload.messages, system: payload.system },
+          requestId,
+          sessionId,
+          anthropicVersion,
+          anthropicBeta
+        });
+      } else {
+        const openAIMessages = anthropicToOpenAIMessages(payload.system, payload.messages as unknown as Array<Record<string, unknown>>);
+        tokens = await app.upstreamService.countTokensViaProviderResponse({
+          provider,
+          route,
+          rotator,
+          openAIMessages,
+          requestId,
+          sessionId,
+          anthropicVersion,
+          anthropicBeta
+        });
+      }
       log('info', '根据上游响应获取输入 token 完成', {
         request_id: requestId,
         session_id: sessionId,
@@ -70,6 +87,33 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
     }
 
     const { route, provider, rotator } = resolved;
+    const anthropicVersion = readHeader(request.headers['anthropic-version']);
+    const anthropicBeta = readHeader(request.headers['anthropic-beta']);
+
+    log('info', '收到 Claude Code 请求', {
+      request_id: requestId,
+      session_id: sessionId,
+      provider_id: provider.provider_id,
+      provider_type: provider.provider_type,
+      client_model: payload.model,
+      upstream_model: route.upstream_model,
+      stream: payload.stream === true,
+      request_body: payload
+    });
+
+    if (provider.provider_type === 'anthropic') {
+      return handleAnthropicPassthrough(app, reply, {
+        payload,
+        route,
+        provider,
+        rotator,
+        requestId,
+        sessionId,
+        anthropicVersion,
+        anthropicBeta
+      });
+    }
+
     const openAIPayload: Record<string, unknown> = {
       model: route.upstream_model,
       messages: anthropicToOpenAIMessages(payload.system, payload.messages as unknown as Array<Record<string, unknown>>),
@@ -89,19 +133,6 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
     if (tools?.length) {
       openAIPayload.tools = tools;
     }
-
-    log('info', '收到 Claude Code 请求', {
-      request_id: requestId,
-      session_id: sessionId,
-      provider_id: provider.provider_id,
-      client_model: payload.model,
-      upstream_model: route.upstream_model,
-      stream: payload.stream === true,
-      request_body: payload
-    });
-
-    const anthropicVersion = readHeader(request.headers['anthropic-version']);
-    const anthropicBeta = readHeader(request.headers['anthropic-beta']);
 
     if (payload.stream !== true) {
       const upstreamResponse = await app.upstreamService.postChatCompletions({
@@ -168,6 +199,130 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
       idleTimeoutMs: Math.max(1000, provider.stream_idle_timeout_seconds * 1000 || settings.streamIdleTimeoutMs)
     });
   });
+}
+
+async function handleAnthropicPassthrough(
+  app: FastifyInstance,
+  reply: FastifyReply,
+  params: {
+    payload: AnthropicMessagesRequest;
+    route: { client_model: string; upstream_model: string; extra_body: Record<string, unknown> };
+    provider: { provider_id: string; stream_idle_timeout_seconds: number };
+    rotator: unknown;
+    requestId: string;
+    sessionId: string;
+    anthropicVersion?: string;
+    anthropicBeta?: string;
+  }
+): Promise<unknown> {
+  const { payload, route, provider, rotator, requestId, sessionId, anthropicVersion, anthropicBeta } = params;
+
+  const upstreamPayload: Record<string, unknown> = {
+    model: route.upstream_model,
+    messages: payload.messages,
+    max_tokens: payload.max_tokens ?? 4096,
+    stream: payload.stream === true,
+    ...route.extra_body
+  };
+  if (payload.system) upstreamPayload.system = payload.system;
+  if (payload.temperature != null) upstreamPayload.temperature = payload.temperature;
+  if (payload.top_p != null) upstreamPayload.top_p = payload.top_p;
+  if (payload.stop_sequences?.length) upstreamPayload.stop_sequences = payload.stop_sequences;
+  if (payload.tools?.length) upstreamPayload.tools = payload.tools;
+
+  const upstreamResponse = await app.upstreamService.postMessages({
+    provider: provider as Parameters<typeof app.upstreamService.postMessages>[0]['provider'],
+    route: route as Parameters<typeof app.upstreamService.postMessages>[0]['route'],
+    rotator: rotator as Parameters<typeof app.upstreamService.postMessages>[0]['rotator'],
+    payload: upstreamPayload,
+    requestId,
+    sessionId,
+    anthropicVersion,
+    anthropicBeta
+  });
+
+  if (payload.stream !== true) {
+    const data = await safeJson(upstreamResponse);
+    if (!upstreamResponse.ok) {
+      return reply.code(upstreamResponse.status).send(data);
+    }
+    if (data.model) data.model = payload.model;
+    log('info', 'Anthropic 透传响应完成', {
+      request_id: requestId,
+      session_id: sessionId,
+      provider_id: provider.provider_id,
+      client_model: payload.model,
+      upstream_model: route.upstream_model
+    });
+    return data;
+  }
+
+  const output = new PassThrough();
+  reply.hijack();
+  reply.raw.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache, no-transform',
+    connection: 'keep-alive'
+  });
+  output.pipe(reply.raw);
+
+  const idleTimeoutMs = Math.max(1000, provider.stream_idle_timeout_seconds * 1000 || settings.streamIdleTimeoutMs);
+  void pipeUpstreamSse({ upstreamResponse, output, requestId, sessionId, providerId: provider.provider_id, clientModel: payload.model, upstreamModel: route.upstream_model, idleTimeoutMs });
+}
+
+async function pipeUpstreamSse(params: {
+  upstreamResponse: Response;
+  output: PassThrough;
+  requestId: string;
+  sessionId: string;
+  providerId: string;
+  clientModel: string;
+  upstreamModel: string;
+  idleTimeoutMs: number;
+}): Promise<void> {
+  const { upstreamResponse, output, requestId, sessionId, providerId, clientModel, upstreamModel, idleTimeoutMs } = params;
+  try {
+    if (!upstreamResponse.ok) {
+      const errorText = await upstreamResponse.text();
+      output.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'api_error', message: errorText || `上游请求失败，状态码=${upstreamResponse.status}` } })}\n\n`);
+      output.end();
+      return;
+    }
+
+    const body = upstreamResponse.body;
+    if (!body) { output.end(); return; }
+
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    try {
+      while (true) {
+        let timer: ReturnType<typeof setTimeout>;
+        const readResult = await Promise.race([
+          reader.read(),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`SSE idle timeout: ${idleTimeoutMs}ms`)), idleTimeoutMs); })
+        ]);
+        clearTimeout(timer!);
+        const { value, done } = readResult;
+        if (done) break;
+        output.write(value);
+      }
+    } finally {
+      reader.cancel().catch(() => {});
+    }
+
+    log('info', 'Anthropic 流式透传完成', {
+      request_id: requestId,
+      session_id: sessionId,
+      provider_id: providerId,
+      client_model: clientModel,
+      upstream_model: upstreamModel
+    });
+  } catch (error) {
+    log('error', '流式透传失败', { request_id: requestId, error });
+    output.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'api_error', message: '流式透传失败。' } })}\n\n`);
+  } finally {
+    output.end();
+  }
 }
 
 function buildAnthropicError(requestId: string, errorType: string, message: string): Record<string, unknown> {

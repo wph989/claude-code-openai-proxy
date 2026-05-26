@@ -191,7 +191,7 @@ function renderTable() {
   } else {
     html += '<table class="data-table">';
     if (isProvider) {
-      html += renderTableHead(['provider_id','base_url','key_rotation_strategy','enabled'], st, ['ID','URL','切换策略','状态']);
+      html += renderTableHead(['provider_id','provider_type','base_url','key_rotation_strategy','enabled'], st, ['ID','类型','URL','切换策略','状态']);
     } else {
       html += renderTableHead(['client_model','provider_id','upstream_model','enabled'], st, ['客户端模型','供应商','上游模型','状态']);
     }
@@ -276,11 +276,13 @@ function renderTableHead(fields, st, labels) {
 
 function renderProviderRow(p, idx) {
   const strat = strategyLabel(p.key_rotation_strategy);
+  const typeLabel = p.provider_type === 'anthropic' ? 'Anthropic' : 'OpenAI';
   const badge = p.enabled !== false
     ? '<span class="badge badge-on">启用</span>'
     : '<span class="badge badge-off">停用</span>';
   return `<tr>
     <td class="col-id">${esc(p.provider_id)}</td>
+    <td>${typeLabel}</td>
     <td class="col-url" title="${esc(p.base_url)}">${esc(p.base_url)}</td>
     <td class="col-strategy">${strat}</td>
     <td>${badge}</td>
@@ -390,6 +392,13 @@ function providerFormHtml(item) {
         <input id="mf-description" type="text" value="${esc(p.description)}" placeholder="例如：第二个 NVIDIA 入口" />
       </div>
       <div class="form-group">
+        <span class="form-label">供应商类型 *</span>
+        <select id="mf-provider_type">
+          <option value="openai_compatible" ${(p.provider_type||'openai_compatible')==='openai_compatible'?'selected':''}>OpenAI Compatible（协议转换/透传）</option>
+          <option value="anthropic" ${p.provider_type==='anthropic'?'selected':''}>Anthropic Compatible（透传）</option>
+        </select>
+      </div>
+      <div class="form-group">
         <span class="form-label">base_url *</span>
         <input id="mf-base_url" type="text" value="${esc(p.base_url)}" placeholder="https://integrate.api.nvidia.com/v1" />
       </div>
@@ -475,7 +484,7 @@ function collectProviderForm() {
   if (!base_url) throw new Error('base_url 不能为空');
   return {
     provider_id,
-    provider_type: 'openai_compatible',
+    provider_type: $('#mf-provider_type').value || 'openai_compatible',
     base_url,
     api_key: $('#mf-api_key').value.trim() || null,
     api_key_env: $('#mf-api_key_env').value.trim() || null,

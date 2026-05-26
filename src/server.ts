@@ -5,6 +5,7 @@ import { RuntimeConfigManager } from './services/runtime-config.js';
 import { UpstreamService } from './services/upstream.js';
 import { registerAdminRoutes } from './routes/admin.js';
 import { registerHealthRoutes } from './routes/health.js';
+import { registerChatCompletionsRoutes } from './routes/chat-completions.js';
 import { registerMessageRoutes } from './routes/messages.js';
 import { createId } from './utils/id.js';
 import { log, setLogDetailed, setLogFormat, setLogLevel } from './utils/logger.js';
@@ -57,6 +58,7 @@ export async function createApp(configPath = settings.configFile): Promise<Fasti
 
   await registerHealthRoutes(app);
   await registerAdminRoutes(app);
+  await registerChatCompletionsRoutes(app);
   await registerMessageRoutes(app);
 
   return app;

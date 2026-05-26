@@ -13,6 +13,10 @@ export class UpstreamService {
     return `${provider.base_url.replace(/\/$/, '')}/chat/completions`;
   }
 
+  private buildMessagesUrl(provider: ResolvedProvider): string {
+    return `${provider.base_url.replace(/\/$/, '')}/messages`;
+  }
+
   private buildHeadersWithKey(params: {
     provider: ResolvedProvider;
     apiKey?: string;
@@ -28,7 +32,11 @@ export class UpstreamService {
     headers.set('x-claude-code-session-id', params.sessionId);
 
     if (params.apiKey) {
-      headers.set('authorization', `Bearer ${params.apiKey}`);
+      if (params.provider.provider_type === 'anthropic') {
+        headers.set('x-api-key', params.apiKey);
+      } else {
+        headers.set('authorization', `Bearer ${params.apiKey}`);
+      }
     }
 
     if (params.anthropicVersion) {
@@ -98,8 +106,40 @@ export class UpstreamService {
     anthropicVersion?: string;
     anthropicBeta?: string;
   }): Promise<Response> {
+    return this.postToUpstream({
+      ...params,
+      url: this.buildChatCompletionsUrl(params.provider)
+    });
+  }
+
+  async postMessages(params: {
+    provider: ResolvedProvider;
+    route: ResolvedRoute;
+    rotator?: ApiKeyRotator;
+    payload: Record<string, unknown>;
+    requestId: string;
+    sessionId: string;
+    anthropicVersion?: string;
+    anthropicBeta?: string;
+  }): Promise<Response> {
+    return this.postToUpstream({
+      ...params,
+      url: this.buildMessagesUrl(params.provider)
+    });
+  }
+
+  private async postToUpstream(params: {
+    provider: ResolvedProvider;
+    route: ResolvedRoute;
+    rotator?: ApiKeyRotator;
+    payload: Record<string, unknown>;
+    url: string;
+    requestId: string;
+    sessionId: string;
+    anthropicVersion?: string;
+    anthropicBeta?: string;
+  }): Promise<Response> {
     const payload = this.buildPayload(params.route, params.payload);
-    const url = this.buildChatCompletionsUrl(params.provider);
     const body = JSON.stringify(payload);
 
     const timeoutMs = payload.stream === true
@@ -107,7 +147,7 @@ export class UpstreamService {
       : Math.max(1000, params.provider.timeout_seconds * 1000 || settings.requestTimeoutMs);
 
     const { response, usedKey } = this.doFetch({
-      url,
+      url: params.url,
       provider: params.provider,
       rotator: params.rotator,
       payload: body,
@@ -120,11 +160,10 @@ export class UpstreamService {
 
     const res = await response;
 
-    // 429 重试：标记 key + 用下一个可用 key 重试一次
     if (res.status === 429 && params.rotator && usedKey && !params.rotator.allCoolingDown()) {
       params.rotator.mark429(usedKey);
       const { response: retryResponse } = this.doFetch({
-        url,
+        url: params.url,
         provider: params.provider,
         rotator: params.rotator,
         payload: body,
@@ -177,6 +216,46 @@ export class UpstreamService {
       throw new Error('上游响应中不存在 usage.prompt_tokens');
     }
     return Math.trunc(promptTokens);
+  }
+
+  async countTokensAnthropic(params: {
+    provider: ResolvedProvider;
+    route: ResolvedRoute;
+    rotator?: ApiKeyRotator;
+    anthropicPayload: Record<string, unknown>;
+    requestId: string;
+    sessionId: string;
+    anthropicVersion?: string;
+    anthropicBeta?: string;
+  }): Promise<number> {
+    const url = `${params.provider.base_url.replace(/\/$/, '')}/messages/count_tokens`;
+    const body = JSON.stringify({
+      ...params.anthropicPayload,
+      model: params.route.upstream_model,
+      ...params.route.extra_body
+    });
+
+    const { response } = this.doFetch({
+      url,
+      provider: params.provider,
+      rotator: params.rotator,
+      payload: body,
+      requestId: params.requestId,
+      sessionId: params.sessionId,
+      anthropicVersion: params.anthropicVersion,
+      anthropicBeta: params.anthropicBeta,
+    });
+
+    const res = await response;
+    const data = await safeJson(res);
+    if (!res.ok) {
+      throw new Error(`上游 token 统计失败：${JSON.stringify(data)}`);
+    }
+    const inputTokens = Number(data.input_tokens ?? NaN);
+    if (!Number.isFinite(inputTokens)) {
+      throw new Error('上游响应中不存在 input_tokens');
+    }
+    return Math.trunc(inputTokens);
   }
 }
 

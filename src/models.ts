@@ -39,7 +39,7 @@ export enum KeyRotationStrategy {
 
 export interface ProviderConfig {
   provider_id: string;
-  provider_type: 'openai_compatible';
+  provider_type: 'openai_compatible' | 'anthropic';
   base_url: string;
   api_key?: string | null;
   api_key_env?: string | null;
@@ -77,7 +77,7 @@ export interface RuntimeConfigSummary {
 
 export interface ResolvedProvider {
   provider_id: string;
-  provider_type: 'openai_compatible';
+  provider_type: 'openai_compatible' | 'anthropic';
   base_url: string;
   api_keys: string[];
   key_rotation_strategy: KeyRotationStrategy;
@@ -100,7 +100,7 @@ export interface ResolvedRoute {
 export function normalizeRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
   const providers = (raw.providers || []).map((item) => ({
     provider_id: String(item.provider_id || '').trim(),
-    provider_type: 'openai_compatible' as const,
+    provider_type: normalizeProviderType(item.provider_type),
     base_url: String(item.base_url || '').trim(),
     api_key: normalizeOptional(item.api_key),
     api_key_env: normalizeOptional(item.api_key_env),
@@ -213,4 +213,9 @@ function findDuplicates(values: string[]): string[] {
     count.set(value, (count.get(value) || 0) + 1);
   }
   return Array.from(count.entries()).filter(([, total]) => total > 1).map(([value]) => value);
+}
+
+function normalizeProviderType(value: unknown): 'openai_compatible' | 'anthropic' {
+  if (value === 'anthropic') return 'anthropic';
+  return 'openai_compatible';
 }
