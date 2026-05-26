@@ -273,7 +273,12 @@ npm version major   # 大版本: 0.1.0 -> 1.0.0
 
 ```bash
 npm run build
-npm publish --access public
+npm publish --access public --no-git-checks
+```
+
+#### 撤销发布
+```bash
+pnpm unpublish claude-code-openai-proxy@0.2.0 --force
 ```
 
 ### 4. 更新标签（可选）
