@@ -8,7 +8,7 @@ import { registerHealthRoutes } from './routes/health.js';
 import { registerChatCompletionsRoutes } from './routes/chat-completions.js';
 import { registerMessageRoutes } from './routes/messages.js';
 import { createId } from './utils/id.js';
-import { log, setLogDetailed, setLogFormat, setLogLevel } from './utils/logger.js';
+import { log, setLogDetailed, setLogFormat, setLogLevel, flushLogs } from './utils/logger.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -73,12 +73,21 @@ export async function startServer(options: { host: string; port: number; configP
     config_file: options.configPath || settings.configFile
   });
 
-  const shutdown = async (signal: string) => {
+  // 使用同步退出防止日志丢失：先 close server，再 flush 日志，再 exit
+  let shuttingDown = false;
+  const handleShutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     log('info', '收到退出信号，准备关闭服务', { signal });
-    await app.close();
+    try {
+      await app.close();
+    } catch {
+      // ignore
+    }
+    await flushLogs();
     process.exit(0);
   };
 
-  process.once('SIGINT', () => void shutdown('SIGINT'));
-  process.once('SIGTERM', () => void shutdown('SIGTERM'));
+  process.once('SIGINT', () => void handleShutdown('SIGINT'));
+  process.once('SIGTERM', () => void handleShutdown('SIGTERM'));
 }

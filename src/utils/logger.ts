@@ -1,6 +1,6 @@
-import { appendFile, mkdir, readdir, rename, stat, unlink } from 'node:fs/promises';
+import { appendFile, mkdir, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { nowBeijingIso } from './time.js';
+import { nowBeijingIso, toBeijingDateStr } from './time.js';
 import { isProduction, USER_CONFIG_DIR } from '../config.js';
 
 // 用户日志目录
@@ -55,10 +55,14 @@ if (!isNaN(maxSize) && maxSize > 0) {
   logMaxSize = maxSize;
 }
 
-let currentLogFile: string | undefined;
 let currentLogPath: string | undefined;
 let currentLogDate: string | undefined;
 let currentLogSize = 0;
+
+// 待写入的日志 Promise 队列，用于 flush（定期清理已 resolved 的条目）
+const pendingWrites: Promise<void>[] = [];
+const PRUNE_INTERVAL = 100;
+let writesSincePrune = 0;
 
 export function setLogLevel(level: string | undefined): void {
   if (!level) return;
@@ -81,16 +85,55 @@ export function setLogDetailed(enabled: boolean): void {
 }
 
 function getBeijingDate(): string {
-  const now = new Date();
-  now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
-  return now.toISOString().slice(0, 10);
+  return toBeijingDateStr(new Date());
 }
 
+function parseLogPath(filePath: string) {
+  const dir = path.dirname(filePath);
+  const baseName = path.basename(filePath);
+  const ext = path.extname(baseName);
+  const name = baseName.slice(0, -ext.length) || baseName;
+  return { dir, baseName, ext, name };
+}
+
+async function rotateDaily(): Promise<void> {
+  if (!currentLogPath) return;
+
+  const { dir, ext, name } = parseLogPath(currentLogPath);
+
+  let mtime: Date;
+  try {
+    const s = await stat(currentLogPath);
+    mtime = s.mtime;
+  } catch {
+    return;
+  }
+
+  const mtimeDateStr = toBeijingDateStr(new Date(mtime));
+  const today = getBeijingDate();
+
+  if (mtimeDateStr >= today) return;
+
+  const archivePath = path.join(dir, `${name}-${mtimeDateStr}${ext}`);
+  try {
+    await rename(currentLogPath, archivePath);
+  } catch {
+    return;
+  }
+
+  await writeFile(currentLogPath, '', 'utf8');
+  currentLogSize = 0;
+
+  await cleanupOldLogs(dir, name, ext);
+}
+
+let dirEnsured = false;
 async function ensureLogDir(): Promise<void> {
-  if (!logFilePath) return;
+  if (!logFilePath || dirEnsured) return;
   const dir = path.dirname(logFilePath);
   try {
     await mkdir(dir, { recursive: true });
+    dirEnsured = true;
   } catch {
     // ignore
   }
@@ -105,37 +148,29 @@ async function rotateLogIfNeeded(): Promise<void> {
     logRotation === 'size' && currentLogSize >= logMaxSize;
 
   if (needsRotation) {
-    await rotateLogFiles();
+    if (logRotation === 'daily') {
+      await rotateDaily();
+    } else {
+      await rotateBySize();
+    }
     currentLogSize = 0;
     currentLogDate = today;
   }
 }
 
-async function rotateLogFiles(): Promise<void> {
+async function rotateBySize(): Promise<void> {
   if (!logFilePath) return;
 
-  const dir = path.dirname(logFilePath);
-  const baseName = path.basename(logFilePath);
-  const ext = path.extname(baseName);
-  const name = baseName.slice(0, -ext.length) || baseName;
+  const { dir, ext, name } = parseLogPath(logFilePath);
 
-  // 按日期轮转: app.log -> app-2025-01-15.log
-  // 按大小轮转: app.log -> app.1.log
-  const today = getBeijingDate();
-  const newName = logRotation === 'daily'
-    ? `${name}-${today}${ext}`
-    : `${name}.1${ext}`;
-  const newPath = path.join(dir, newName);
-
-  // 如果目标文件已存在，添加序号
+  const newPath = path.join(dir, `${name}.1${ext}`);
   let finalPath = newPath;
   let counter = 1;
   while (true) {
     try {
       await stat(finalPath);
       counter++;
-      const base = logRotation === 'daily' ? `${name}-${today}` : `${name}.${counter}`;
-      finalPath = path.join(dir, `${base}${ext}`);
+      finalPath = path.join(dir, `${name}.${counter}${ext}`);
     } catch {
       break;
     }
@@ -147,7 +182,6 @@ async function rotateLogFiles(): Promise<void> {
     // 文件可能不存在
   }
 
-  // 清理旧日志文件
   await cleanupOldLogs(dir, name, ext);
 }
 
@@ -183,7 +217,7 @@ async function cleanupOldLogs(dir: string, name: string, ext: string): Promise<v
   }
 }
 
-async function writeToFile(text: string): Promise<void> {
+async function writeToFileImpl(text: string): Promise<void> {
   if (!logFilePath) return;
 
   await ensureLogDir();
@@ -197,14 +231,15 @@ async function writeToFile(text: string): Promise<void> {
     } catch {
       currentLogSize = 0;
     }
+
+    // 启动时如果 app.log 是昨天的，先归档再开始写入
+    if (logRotation === 'daily') {
+      await rotateDaily();
+      currentLogDate = getBeijingDate();
+    }
   }
 
   await rotateLogIfNeeded();
-
-  const today = getBeijingDate();
-  if (currentLogDate !== today) {
-    currentLogDate = today;
-  }
 
   const line = text + '\n';
   currentLogSize += Buffer.byteLength(line, 'utf8');
@@ -248,8 +283,18 @@ export function log(level: LogLevel, message: string, extra: Record<string, unkn
     text = formatTextLog(level, message, filteredExtra);
   }
 
-  // 写入文件
-  void writeToFile(text);
+  // 写入文件（异步，不阻塞）
+  const p = writeToFileImpl(text);
+  pendingWrites.push(p);
+
+  // 定期清理已完成的 promise，防止数组无限增长
+  if (++writesSincePrune >= PRUNE_INTERVAL) {
+    writesSincePrune = 0;
+    const snapshotLen = pendingWrites.length;
+    Promise.allSettled(pendingWrites).then(() => {
+      pendingWrites.splice(0, Math.min(snapshotLen, pendingWrites.length));
+    });
+  }
 
   // 输出到控制台
   if (level === 'error') {
@@ -262,6 +307,12 @@ export function log(level: LogLevel, message: string, extra: Record<string, unkn
 export function logDetailed(level: LogLevel, message: string, extra: Record<string, unknown> = {}): void {
   if (!detailedLogging) return;
   log(level, message, extra);
+}
+
+export async function flushLogs(): Promise<void> {
+  if (pendingWrites.length === 0) return;
+  await Promise.allSettled(pendingWrites);
+  pendingWrites.length = 0;
 }
 
 export function compactPreview(value: unknown, maxChars: number): string {

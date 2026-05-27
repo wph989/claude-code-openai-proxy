@@ -60,10 +60,8 @@ program
     } else {
       await writeProcessInfo({ pid: process.pid, port, host });
 
-      // cleanup on exit
+      // cleanup on exit（SIGTERM/SIGINT 由 server.ts 统一处理，含 flushLogs）
       process.on('exit', () => { void removeProcessInfo(); });
-      process.on('SIGINT', () => { void removeProcessInfo(); process.exit(0); });
-      process.on('SIGTERM', () => { void removeProcessInfo(); process.exit(0); });
 
       await startServer({
         host,

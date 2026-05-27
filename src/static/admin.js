@@ -8,8 +8,8 @@ const PAGE_SIZE = 10;
 
 // sort state per tab
 const sortState = {
-  providers: { field: 'provider_id', asc: true },
-  models: { field: 'client_model', asc: true },
+  providers: { field: null, asc: true },
+  models: { field: null, asc: true },
 };
 
 // ── DOM refs ──
@@ -136,6 +136,7 @@ function updatePreviewNow() {
 
 // ── Sorting ──
 function sortItems(items, field, asc) {
+  if (!field) return [...items];
   return [...items].sort((a, b) => {
     let va = a[field], vb = b[field];
     if (typeof va === 'boolean') { va = va ? 1 : 0; vb = vb ? 1 : 0; }
@@ -151,8 +152,12 @@ function sortItems(items, field, asc) {
 
 function setSort(tab, field) {
   const st = sortState[tab];
-  if (st.field === field) { st.asc = !st.asc; }
-  else { st.field = field; st.asc = true; }
+  if (st.field === field) {
+    if (st.asc) { st.asc = false; }
+    else { st.field = null; st.asc = true; }
+  } else {
+    st.field = field; st.asc = true;
+  }
   if (tab === 'providers') providerPage = 1;
   else modelPage = 1;
   renderTable();
@@ -173,9 +178,11 @@ function renderTable() {
   if (isProvider) providerPage = clampedPage;
   else modelPage = clampedPage;
 
+  const originalIdx = new Map();
+  items.forEach((item, i) => originalIdx.set(item, i));
   const idxMap = new Map();
   for (let i = 0; i < sorted.length; i++) {
-    idxMap.set(sorted[i], i);
+    idxMap.set(sorted[i], originalIdx.get(sorted[i]));
   }
 
   const providerIds = currentConfig.providers.map(p => p.provider_id).filter(Boolean);
@@ -240,6 +247,16 @@ tableContainer.addEventListener('click', (e) => {
     return;
   }
 
+  if (target.classList.contains('move-up-btn')) {
+    moveItem(parseInt(target.dataset.idx), -1);
+    return;
+  }
+
+  if (target.classList.contains('move-down-btn')) {
+    moveItem(parseInt(target.dataset.idx), 1);
+    return;
+  }
+
   if (target.classList.contains('delete-btn')) {
     if (!confirm('确定删除？此操作不可撤销。')) return;
     const idx = parseInt(target.dataset.idx);
@@ -267,7 +284,7 @@ function renderTableHead(fields, st, labels) {
   for (let i = 0; i < fields.length; i++) {
     const f = fields[i];
     const sorted = st.field === f ? ' sorted' : '';
-    const arrow = st.field === f ? (st.asc ? ' ▲' : ' ▼') : '';
+    const arrow = st.field === f ? (st.asc ? ' ▲' : ' ▼') : ' ⇅';
     h += `<th data-field="${f}" class="${sorted}">${labels[i]}<span class="sort-arrow">${arrow}</span></th>`;
   }
   h += '<th class="col-actions">操作</th></tr></thead>';
@@ -287,6 +304,8 @@ function renderProviderRow(p, idx) {
     <td class="col-strategy">${strat}</td>
     <td>${badge}</td>
     <td class="col-actions">
+      <button class="btn-icon move-up-btn" data-idx="${idx}">上移</button>
+      <button class="btn-icon move-down-btn" data-idx="${idx}">下移</button>
       <button class="btn-icon edit-btn" data-idx="${idx}">编辑</button>
       <button class="btn-icon danger delete-btn" data-idx="${idx}">删除</button>
     </td>
@@ -303,6 +322,8 @@ function renderModelRow(m, idx, providerIds) {
     <td>${esc(m.upstream_model)}</td>
     <td>${badge}</td>
     <td class="col-actions">
+      <button class="btn-icon move-up-btn" data-idx="${idx}">上移</button>
+      <button class="btn-icon move-down-btn" data-idx="${idx}">下移</button>
       <button class="btn-icon edit-btn" data-idx="${idx}">编辑</button>
       <button class="btn-icon danger delete-btn" data-idx="${idx}">删除</button>
     </td>
@@ -330,6 +351,15 @@ function changePage(dir) {
     modelPage = Math.max(1, Math.min(total, modelPage + dir));
   }
   renderTable();
+}
+
+function moveItem(idx, dir) {
+  const arr = currentTab === 'providers' ? currentConfig.providers : currentConfig.models;
+  const newIdx = idx + dir;
+  if (newIdx < 0 || newIdx >= arr.length) return;
+  [arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]];
+  renderTable();
+  updatePreviewNow();
 }
 
 function esc(s) {

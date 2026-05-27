@@ -95,6 +95,19 @@ export async function stopProcess(port?: number): Promise<string> {
 
   try {
     process.kill(info.pid, 'SIGTERM');
+
+    // 等待进程真正退出（最多等 5 秒），避免 PID 文件被过早清理
+    const waitForExit = async (): Promise<void> => {
+      for (let i = 0; i < 50; i++) {
+        try {
+          process.kill(info.pid, 0);
+          await new Promise(r => setTimeout(r, 100));
+        } catch {
+          return; // 进程已退出
+        }
+      }
+    };
+    await waitForExit();
     await removeProcessInfo();
 
     // also clean up port-specific file if exists

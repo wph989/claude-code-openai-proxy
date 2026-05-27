@@ -54,3 +54,4 @@ temp/
 *.tmp
 .pids
 local_test.md
+pids/
