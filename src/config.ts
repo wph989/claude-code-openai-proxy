@@ -63,6 +63,21 @@ ADMIN_AUTH_TOKEN=admin123
 LOG_LEVEL=info
 LOG_FORMAT=json
 LOG_DETAILED=false
+
+# 重试配置（429 限流响应时的指数退避重试）
+MAX_RETRIES=3
+RETRY_BASE_DELAY_MS=1000
+
+# 连接池配置（上游请求的连接池参数）
+MAX_SOCKETS=100
+KEEP_ALIVE_TIMEOUT=60000
+
+# 限流配置（保护服务不被过多请求压垮）
+RATE_LIMIT_MAX=100
+RATE_LIMIT_TIME_WINDOW=60000
+
+# 集群配置（多进程模式，0=自动检测 CPU 核心数）
+CLUSTER_WORKERS=0
 `;
     writeFileSync(USER_ENV_FILE, defaultEnv, 'utf-8');
   }
