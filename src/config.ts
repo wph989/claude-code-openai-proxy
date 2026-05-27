@@ -104,6 +104,8 @@ export interface AppSettings {
   retryBaseDelayMs: number;
   maxSockets: number;
   keepAliveTimeout: number;
+  rateLimitMax: number;
+  rateLimitTimeWindow: number;
 }
 
 function toNumber(raw: string | undefined, fallback: number): number {
@@ -156,5 +158,7 @@ export const settings: AppSettings = {
   maxRetries: toNumber(process.env.MAX_RETRIES, 3),
   retryBaseDelayMs: toNumber(process.env.RETRY_BASE_DELAY_MS, 1000),
   maxSockets: toNumber(process.env.MAX_SOCKETS, 100),
-  keepAliveTimeout: toNumber(process.env.KEEP_ALIVE_TIMEOUT, 60000)
+  keepAliveTimeout: toNumber(process.env.KEEP_ALIVE_TIMEOUT, 60000),
+  rateLimitMax: toNumber(process.env.RATE_LIMIT_MAX, 100),
+  rateLimitTimeWindow: toNumber(process.env.RATE_LIMIT_TIME_WINDOW, 60000)
 };

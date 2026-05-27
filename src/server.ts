@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
+import rateLimit from '@fastify/rate-limit';
 import { settings } from './config.js';
 import { RuntimeConfigManager } from './services/runtime-config.js';
 import { UpstreamService } from './services/upstream.js';
@@ -31,6 +32,18 @@ export async function createApp(configPath = settings.configFile): Promise<Fasti
   });
 
   await app.register(cookie);
+
+  await app.register(rateLimit, {
+    max: settings.rateLimitMax,
+    timeWindow: settings.rateLimitTimeWindow,
+    errorResponseBuilder: () => ({
+      type: 'error',
+      error: {
+        type: 'rate_limit_error',
+        message: '请求过于频繁，请稍后重试。'
+      }
+    })
+  });
 
   app.decorate('runtimeConfigManager', new RuntimeConfigManager(configPath));
   app.decorate('upstreamService', new UpstreamService());
