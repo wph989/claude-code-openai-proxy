@@ -1,16 +1,17 @@
-import { Agent } from 'undici';
+import { setGlobalDispatcher, Agent } from 'undici';
 import { settings } from '../config.js';
 import type { ResolvedProvider, ResolvedRoute } from '../models.js';
 import type { ApiKeyRotator } from './api-key-rotator.js';
 import { log } from '../utils/logger.js';
 
-// Create a shared undici agent with connection pool settings
+// 设置全局连接池配置
 const agent = new Agent({
   keepAliveTimeout: settings.keepAliveTimeout,
   keepAliveMaxTimeout: settings.keepAliveTimeout * 2,
   connections: settings.maxSockets,
   pipelining: 1
 });
+setGlobalDispatcher(agent);
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -77,7 +78,7 @@ export class UpstreamService {
     anthropicBeta?: string;
   }): { response: Promise<Response>; usedKey: string | undefined } {
     const apiKey = params.rotator?.pick();
-    const fetchParams: RequestInit & { dispatcher?: Agent } = {
+    const fetchParams: RequestInit = {
       method: 'POST',
       headers: this.buildHeadersWithKey({
         provider: params.provider,
@@ -88,7 +89,6 @@ export class UpstreamService {
         anthropicBeta: params.anthropicBeta,
       }),
       body: params.payload,
-      dispatcher: agent
     };
     if (params.timeoutMs) {
       fetchParams.signal = AbortSignal.timeout(params.timeoutMs);
