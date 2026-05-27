@@ -102,6 +102,8 @@ export interface AppSettings {
   logMaxSize?: number;
   maxRetries: number;
   retryBaseDelayMs: number;
+  maxSockets: number;
+  keepAliveTimeout: number;
 }
 
 function toNumber(raw: string | undefined, fallback: number): number {
@@ -152,5 +154,7 @@ export const settings: AppSettings = {
   logMaxFiles: toNumber(process.env.LOG_MAX_FILES, 30),
   logMaxSize: toNumber(process.env.LOG_MAX_SIZE, 50 * 1024 * 1024),
   maxRetries: toNumber(process.env.MAX_RETRIES, 3),
-  retryBaseDelayMs: toNumber(process.env.RETRY_BASE_DELAY_MS, 1000)
+  retryBaseDelayMs: toNumber(process.env.RETRY_BASE_DELAY_MS, 1000),
+  maxSockets: toNumber(process.env.MAX_SOCKETS, 100),
+  keepAliveTimeout: toNumber(process.env.KEEP_ALIVE_TIMEOUT, 60000)
 };
