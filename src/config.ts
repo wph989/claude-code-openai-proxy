@@ -100,6 +100,8 @@ export interface AppSettings {
   logRotation: LogRotation;
   logMaxFiles: number;
   logMaxSize?: number;
+  maxRetries: number;
+  retryBaseDelayMs: number;
 }
 
 function toNumber(raw: string | undefined, fallback: number): number {
@@ -148,5 +150,7 @@ export const settings: AppSettings = {
   logFile: process.env.LOG_FILE?.trim() || join(USER_LOG_DIR, 'app.log'),
   logRotation: validLogRotation(process.env.LOG_ROTATION),
   logMaxFiles: toNumber(process.env.LOG_MAX_FILES, 30),
-  logMaxSize: toNumber(process.env.LOG_MAX_SIZE, 50 * 1024 * 1024)
+  logMaxSize: toNumber(process.env.LOG_MAX_SIZE, 50 * 1024 * 1024),
+  maxRetries: toNumber(process.env.MAX_RETRIES, 3),
+  retryBaseDelayMs: toNumber(process.env.RETRY_BASE_DELAY_MS, 1000)
 };

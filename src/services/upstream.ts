@@ -1,6 +1,11 @@
 import { settings } from '../config.js';
 import type { ResolvedProvider, ResolvedRoute } from '../models.js';
 import type { ApiKeyRotator } from './api-key-rotator.js';
+import { log } from '../utils/logger.js';
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 /**
  * 上游请求服务：
@@ -146,23 +151,26 @@ export class UpstreamService {
       ? undefined
       : Math.max(1000, params.provider.timeout_seconds * 1000 || settings.requestTimeoutMs);
 
-    const { response, usedKey } = this.doFetch({
-      url: params.url,
-      provider: params.provider,
-      rotator: params.rotator,
-      payload: body,
-      timeoutMs,
-      requestId: params.requestId,
-      sessionId: params.sessionId,
-      anthropicVersion: params.anthropicVersion,
-      anthropicBeta: params.anthropicBeta,
-    });
+    let lastResponse: Response | null = null;
+    let usedKey: string | undefined;
 
-    const res = await response;
+    for (let attempt = 0; attempt <= settings.maxRetries; attempt++) {
+      // If not the first attempt, wait with exponential backoff
+      if (attempt > 0) {
+        const delay = Math.min(
+          settings.retryBaseDelayMs * Math.pow(2, attempt - 1),
+          30000 // Max 30 seconds
+        );
+        log('info', '重试请求（指数退避）', {
+          request_id: params.requestId,
+          attempt,
+          delay_ms: delay,
+          url: params.url
+        });
+        await sleep(delay);
+      }
 
-    if (res.status === 429 && params.rotator && usedKey && !params.rotator.allCoolingDown()) {
-      params.rotator.mark429(usedKey);
-      const { response: retryResponse } = this.doFetch({
+      const result = this.doFetch({
         url: params.url,
         provider: params.provider,
         rotator: params.rotator,
@@ -173,10 +181,27 @@ export class UpstreamService {
         anthropicVersion: params.anthropicVersion,
         anthropicBeta: params.anthropicBeta,
       });
-      return retryResponse;
+
+      lastResponse = await result.response;
+      usedKey = result.usedKey;
+
+      // If not rate limited, return immediately
+      if (lastResponse.status !== 429) {
+        return lastResponse;
+      }
+
+      // Mark the key as rate limited
+      if (params.rotator && usedKey) {
+        params.rotator.mark429(usedKey);
+      }
+
+      // If no more keys available, return the 429 response
+      if (!params.rotator || params.rotator.allCoolingDown()) {
+        return lastResponse;
+      }
     }
 
-    return res;
+    return lastResponse!;
   }
 
   async countTokensViaProviderResponse(params: {
