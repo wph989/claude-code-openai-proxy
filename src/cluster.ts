@@ -1,0 +1,69 @@
+import cluster from 'node:cluster';
+import os from 'node:os';
+import { log } from './utils/logger.js';
+
+export interface ClusterOptions {
+  workers: number;
+  startWorker: () => Promise<void>;
+}
+
+export async function startCluster(options: ClusterOptions): Promise<void> {
+  const numWorkers = options.workers > 0 ? options.workers : os.cpus().length;
+
+  if (cluster.isPrimary) {
+    log('info', '集群主进程启动', {
+      pid: process.pid,
+      workers: numWorkers
+    });
+
+    // Fork workers
+    for (let i = 0; i < numWorkers; i++) {
+      cluster.fork();
+    }
+
+    // Handle worker events
+    cluster.on('exit', (worker, code, signal) => {
+      log('warn', '工作进程退出', {
+        worker_pid: worker.process.pid,
+        code,
+        signal
+      });
+      // Replace dead worker
+      cluster.fork();
+    });
+
+    cluster.on('online', (worker) => {
+      log('info', '工作进程就绪', {
+        worker_pid: worker.process.pid
+      });
+    });
+
+    // Handle graceful shutdown
+    let shuttingDown = false;
+    const handleShutdown = async (signal: string) => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      log('info', '收到退出信号，准备关闭集群', { signal });
+
+      // Disconnect all workers
+      for (const id in cluster.workers) {
+        cluster.workers[id]?.disconnect();
+      }
+
+      // Wait for workers to exit
+      setTimeout(() => {
+        log('warn', '强制关闭未退出的工作进程');
+        for (const id in cluster.workers) {
+          cluster.workers[id]?.kill();
+        }
+        process.exit(0);
+      }, 10000);
+    };
+
+    process.once('SIGINT', () => void handleShutdown('SIGINT'));
+    process.once('SIGTERM', () => void handleShutdown('SIGTERM'));
+  } else {
+    // Worker process
+    await options.startWorker();
+  }
+}

@@ -33,6 +33,7 @@ program
   .option('--config <path>', '运行时模型配置文件路径', settings.configFile)
   .option('--dev', '强制开发模式（使用本地目录配置）', false)
   .option('-d, --daemon', '后台运行（守护进程模式）', false)
+  .option('-c, --cluster [workers]', '启用集群模式（可指定工作进程数，默认为 CPU 核心数）', false)
   .action(async (options) => {
     const port = Number(options.port || settings.port);
     const host = options.host || settings.host;
@@ -57,6 +58,23 @@ program
       console.log(`服务已在后台启动`);
       log('info', '服务已在后台启动', { pid: child.pid, port, host });
       process.exit(0);
+    } else if (options.cluster !== false) {
+      // Cluster mode
+      const workers = options.cluster === true ? 0 : Number(options.cluster);
+      await writeProcessInfo({ pid: process.pid, port, host });
+      process.on('exit', () => { void removeProcessInfo(); });
+
+      const { startCluster } = await import('./cluster.js');
+      await startCluster({
+        workers: Number.isFinite(workers) && workers > 0 ? workers : settings.clusterWorkers,
+        startWorker: async () => {
+          await startServer({
+            host,
+            port: Number.isFinite(port) ? port : settings.port,
+            configPath: options.config || settings.configFile
+          });
+        }
+      });
     } else {
       await writeProcessInfo({ pid: process.pid, port, host });
 
