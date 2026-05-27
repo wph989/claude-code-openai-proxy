@@ -114,7 +114,7 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
             content_block: { type: 'text', text: '' }
           });
         }
-    state.responseChunks += 1;
+        state.responseChunks += 1;
         writeSse(output, 'content_block_delta', {
           type: 'content_block_delta',
           index: state.textIndex,
