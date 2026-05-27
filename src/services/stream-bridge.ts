@@ -204,8 +204,6 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
     writeSse(output, 'message_stop', { type: 'message_stop' });
 
     log('info', '流式响应完成', {
-      request_id: metrics.requestId,
-      session_id: metrics.sessionId,
       provider_id: metrics.providerId,
       client_model: metrics.clientModel,
       upstream_model: metrics.upstreamModel,
@@ -216,8 +214,6 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
     });
   } catch (error) {
     log('error', '流式桥接失败', {
-      request_id: metrics.requestId,
-      session_id: metrics.sessionId,
       provider_id: metrics.providerId,
       client_model: metrics.clientModel,
       upstream_model: metrics.upstreamModel,

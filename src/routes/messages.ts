@@ -59,8 +59,6 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
         });
       }
       log('info', '根据上游响应获取输入 token 完成', {
-        request_id: requestId,
-        session_id: sessionId,
         provider_id: provider.provider_id,
         client_model: modelName,
         upstream_model: route.upstream_model,
@@ -91,8 +89,6 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
     const anthropicBeta = readHeader(request.headers['anthropic-beta']);
 
     log('info', '收到 Claude Code 请求', {
-      request_id: requestId,
-      session_id: sessionId,
       provider_id: provider.provider_id,
       provider_type: provider.provider_type,
       client_model: payload.model,
@@ -151,8 +147,6 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
       }
       const { body, usage } = openAIToAnthropicResponse(payload.model, data);
       log('info', '非流式响应完成', {
-        request_id: requestId,
-        session_id: sessionId,
         provider_id: provider.provider_id,
         client_model: payload.model,
         upstream_model: route.upstream_model,
@@ -248,8 +242,6 @@ async function handleAnthropicPassthrough(
     }
     if (data.model) data.model = payload.model;
     log('info', 'Anthropic 透传响应完成', {
-      request_id: requestId,
-      session_id: sessionId,
       provider_id: provider.provider_id,
       client_model: payload.model,
       upstream_model: route.upstream_model
@@ -311,14 +303,12 @@ async function pipeUpstreamSse(params: {
     }
 
     log('info', 'Anthropic 流式透传完成', {
-      request_id: requestId,
-      session_id: sessionId,
       provider_id: providerId,
       client_model: clientModel,
       upstream_model: upstreamModel
     });
   } catch (error) {
-    log('error', '流式透传失败', { request_id: requestId, error });
+    log('error', '流式透传失败', { error });
     output.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'api_error', message: '流式透传失败。' } })}\n\n`);
   } finally {
     output.end();

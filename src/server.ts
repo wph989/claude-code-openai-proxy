@@ -58,7 +58,7 @@ export async function createApp(configPath = settings.configFile): Promise<Fasti
 
   app.setErrorHandler((error: unknown, request, reply) => {
     const err = error instanceof Error ? error : new Error(String(error));
-    log('error', '服务处理失败', { request_id: request.requestId, error });
+    log('error', '服务处理失败', { error });
     void reply.code(500).send({
       type: 'error',
       error: {

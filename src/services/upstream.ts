@@ -172,7 +172,6 @@ export class UpstreamService {
           30000 // Max 30 seconds
         );
         log('info', '重试请求（指数退避）', {
-          request_id: params.requestId,
           attempt,
           delay_ms: delay,
           url: params.url

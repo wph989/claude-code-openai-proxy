@@ -44,8 +44,6 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
     };
 
     log('info', '收到 OpenAI Chat Completions 请求', {
-      request_id: requestId,
-      session_id: sessionId,
       provider_id: provider.provider_id,
       client_model: modelName,
       upstream_model: route.upstream_model,
@@ -68,8 +66,6 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
       }
       if (data.model) data.model = modelName;
       log('info', 'OpenAI 透传响应完成', {
-        request_id: requestId,
-        session_id: sessionId,
         provider_id: provider.provider_id,
         client_model: modelName,
         upstream_model: route.upstream_model
@@ -132,14 +128,12 @@ async function pipeOpenAISse(params: {
     }
 
     log('info', 'OpenAI 流式透传完成', {
-      request_id: requestId,
-      session_id: sessionId,
       provider_id: providerId,
       client_model: clientModel,
       upstream_model: upstreamModel
     });
   } catch (error) {
-    log('error', 'OpenAI 流式透传失败', { request_id: requestId, error });
+    log('error', 'OpenAI 流式透传失败', { error });
     output.write(`data: ${JSON.stringify({ error: { message: '流式透传失败。', type: 'api_error' } })}\n\n`);
     output.write('data: [DONE]\n\n');
   } finally {
