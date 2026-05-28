@@ -183,46 +183,30 @@ LOG_FORMAT=json         # json, pretty
 {
   "providers": [
     {
-      "provider_id": "ollama",
+      "provider_id": "openai-compatible",
       "provider_type": "openai_compatible",
-      "base_url": "http://localhost:11434/v1",
-      "api_key_env": null,
+      "base_url": "https://api.example.com/v1",
+      "api_key_env": "PROVIDER_API_KEY",
       "timeout_seconds": 300,
       "enabled": true,
       "headers": {},
-      "description": "本地 Ollama"
-    },
-    {
-      "provider_id": "nvidia",
-      "provider_type": "openai_compatible",
-      "base_url": "https://integrate.api.nvidia.com/v1",
-      "api_key_env": "NVIDIA_API_KEY",
-      "timeout_seconds": 300,
-      "enabled": true,
-      "headers": {},
-      "description": "NVIDIA NIM"
+      "description": "示例供应商"
     }
   ],
   "models": [
     {
-      "client_model": "claude-sonnet-4-6",
-      "provider_id": "ollama",
-      "upstream_model": "llama3.1:70b",
+      "client_model": "claude-model",
+      "provider_id": "openai-compatible",
+      "upstream_model": "your-upstream-model",
       "enabled": true,
       "extra_body": {},
-      "description": "本地大模型"
-    },
-    {
-      "client_model": "claude-haiku-4-5",
-      "provider_id": "nvidia",
-      "upstream_model": "meta/llama-3.1-8b-instruct",
-      "enabled": true,
-      "extra_body": {},
-      "description": "NVIDIA 轻量模型"
+      "description": "示例模型映射"
     }
   ],
-  "default_client_model": "claude-sonnet-4-6"
+  "default_client_model": "claude-model",
+  "proxy_auth_token": null
 }
+
 ```
 
 ## 接入 Claude Code
@@ -301,32 +285,6 @@ npm view claude-code-openai-proxy versions
 # 全局安装测试
 npm install -g claude-code-openai-proxy
 ccop --version
-```
-
-## 常见问题
-
-**Q: 端口被占用？**
-```bash
-ccop stop              # 先停止旧服务
-ccop start --port 8766 # 使用新端口
-```
-
-**Q: 如何查看日志？**
-```bash
-ccop status            # 查看 PID
-tail -f logs/*.jsonl   # 查看日志文件
-```
-
-**Q: 配置文件修改后不生效？**
-
-在 Web UI 中保存后自动热加载，无需重启服务。
-
-**Q: Windows 上守护进程不工作？**
-
-Windows 建议使用 `pm2`：
-```bash
-npm install -g pm2
-pm2 start dist/cli.js --name ccop -- start
 ```
 
 ## License
