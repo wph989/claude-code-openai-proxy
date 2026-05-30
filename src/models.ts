@@ -37,11 +37,22 @@ export enum KeyRotationStrategy {
   on_429 = 'on_429',
 }
 
+export interface ApiKeyEntry {
+  key: string;
+  enabled: boolean;
+  error_count: number;
+  disabled_at: number | null;
+  last_error_at: number | null;
+  last_error_message: string | null;
+  auto_disabled_at: number | null;
+  note?: string;
+}
+
 export interface ProviderConfig {
   provider_id: string;
   provider_type: 'openai_compatible' | 'anthropic';
   base_url: string;
-  api_key?: string | null;
+  api_key?: string | ApiKeyEntry[] | null;
   api_key_env?: string | null;
   key_rotation_strategy?: KeyRotationStrategy | null;
   timeout_seconds?: number;
@@ -79,7 +90,7 @@ export interface ResolvedProvider {
   provider_id: string;
   provider_type: 'openai_compatible' | 'anthropic';
   base_url: string;
-  api_keys: string[];
+  api_keys: ApiKeyEntry[];
   key_rotation_strategy: KeyRotationStrategy;
   timeout_seconds: number;
   stream_idle_timeout_seconds: number;
@@ -102,7 +113,7 @@ export function normalizeRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
     provider_id: String(item.provider_id || '').trim(),
     provider_type: normalizeProviderType(item.provider_type),
     base_url: String(item.base_url || '').trim(),
-    api_key: normalizeOptional(item.api_key),
+    api_key: normalizeApiKeyField(item.api_key),
     api_key_env: normalizeOptional(item.api_key_env),
     key_rotation_strategy: normalizeRotationStrategy(item.key_rotation_strategy),
     timeout_seconds: Number(item.timeout_seconds || 300),
@@ -186,6 +197,48 @@ function normalizeOptional(value: unknown): string | null {
   }
   const trimmed = value.trim();
   return trimmed || null;
+}
+
+function normalizeApiKeyField(value: unknown): string | ApiKeyEntry[] | null {
+  if (value == null) return null;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    return trimmed.split(',')
+      .map((k) => k.trim())
+      .filter((k) => k.length > 0)
+      .map((k) => ({
+        key: k,
+        enabled: true,
+        error_count: 0,
+        disabled_at: null,
+        last_error_at: null,
+        last_error_message: null,
+        auto_disabled_at: null
+      }));
+  }
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is Partial<ApiKeyEntry> => item && typeof item === 'object' && typeof (item as Partial<ApiKeyEntry>).key === 'string')
+      .map((item): ApiKeyEntry | null => {
+        const key = String(item.key || '').trim();
+        if (!key) return null;
+        const note = item.note ? String(item.note).trim() : '';
+        const base: ApiKeyEntry = {
+          key,
+          enabled: item.enabled !== false,
+          error_count: Number(item.error_count) || 0,
+          disabled_at: item.disabled_at ?? null,
+          last_error_at: item.last_error_at ?? null,
+          last_error_message: item.last_error_message ?? null,
+          auto_disabled_at: item.auto_disabled_at ?? null
+        };
+        if (note) base.note = note;
+        return base;
+      })
+      .filter((item): item is ApiKeyEntry => item !== null);
+  }
+  return null;
 }
 
 function normalizeHeaders(headers: Record<string, unknown>): Record<string, string> {

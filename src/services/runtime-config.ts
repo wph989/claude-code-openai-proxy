@@ -1,10 +1,11 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { settings } from '../config.js';
 import { setRuntimeProxyToken } from '../auth.js';
-import { ApiKeyRotator } from './api-key-rotator.js';
+import { ApiKeyRotator, type KeyStateChange } from './api-key-rotator.js';
 import {
   KeyRotationStrategy,
+  type ApiKeyEntry,
   type ProviderConfig,
   type ResolvedProvider,
   type ResolvedRoute,
@@ -19,11 +20,14 @@ import {
  * - 负责初始化配置文件
  * - 保存配置后立即热生效
  * - 对 provider_id / client_model / 引用关系做强校验
+ * - 管理 API Key 状态（错误计数、启用/禁用）并持久化
  */
 export class RuntimeConfigManager {
   private configPath: string;
   private config: RuntimeConfig = { providers: [], models: [], default_client_model: null };
   private rotators: Map<string, ApiKeyRotator> = new Map();
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  private persisting: Promise<void> | null = null;
 
   constructor(configPath = settings.configFile) {
     this.configPath = path.resolve(configPath);
@@ -137,12 +141,13 @@ export class RuntimeConfigManager {
     return { route: resolvedRoute, provider: resolvedProvider, rotator };
   }
 
-  private getOrCreateRotator(providerId: string, keys: string[], strategy: KeyRotationStrategy): ApiKeyRotator {
+  private getOrCreateRotator(providerId: string, keys: ApiKeyEntry[], strategy: KeyRotationStrategy): ApiKeyRotator {
     const existing = this.rotators.get(providerId);
     if (existing && keysEqual(existing.keys, keys) && existing.strategy === strategy) {
       return existing;
     }
     const rotator = new ApiKeyRotator(keys, strategy);
+    rotator.onChange = (key, patch) => this.onKeyStateChange(providerId, key, patch);
     this.rotators.set(providerId, rotator);
     return rotator;
   }
@@ -153,19 +158,253 @@ export class RuntimeConfigManager {
       const apiKeys = resolveApiKeys(provider);
       const strategy = provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin;
       if (apiKeys.length > 0) {
-        this.rotators.set(provider.provider_id, new ApiKeyRotator(apiKeys, strategy));
+        const rotator = new ApiKeyRotator(apiKeys, strategy);
+        rotator.onChange = (key, patch) => this.onKeyStateChange(provider.provider_id, key, patch);
+        this.rotators.set(provider.provider_id, rotator);
       }
     }
   }
+
+  private onKeyStateChange(providerId: string, key: string, patch: KeyStateChange): void {
+    const provider = this.config.providers.find((p) => p.provider_id === providerId);
+    if (!provider) return;
+
+    const keys = resolveApiKeys(provider);
+    const entry = keys.find((k) => k.key === key);
+    if (!entry) return;
+
+    Object.assign(entry, patch);
+    provider.api_key = keys;
+
+    this.schedulePersist();
+  }
+
+  private schedulePersist(): void {
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      void this.persistNow();
+    }, 500);
+  }
+
+  private async persistNow(): Promise<void> {
+    if (this.persisting) return this.persisting;
+    this.persisting = (async () => {
+      try {
+        const dir = path.dirname(this.configPath);
+        await mkdir(dir, { recursive: true });
+        const tmpPath = this.configPath + '.tmp';
+        await writeFile(tmpPath, JSON.stringify(this.config, null, 2) + '\n', 'utf-8');
+        await rename(tmpPath, this.configPath);
+      } catch (err) {
+        console.error('[config] 持久化配置失败:', err);
+      } finally {
+        this.persisting = null;
+      }
+    })();
+    return this.persisting;
+  }
+
+  getKeyStates(providerId: string): ApiKeyEntry[] {
+    const rotator = this.rotators.get(providerId);
+    if (!rotator) return [];
+    return rotator.getKeys();
+  }
+
+  async updateKeyState(providerId: string, keyIndex: number, patch: Partial<ApiKeyEntry>): Promise<void> {
+    const provider = this.config.providers.find((p) => p.provider_id === providerId);
+    if (!provider) throw new Error(`未找到供应商：${providerId}`);
+
+    const keys = resolveApiKeys(provider);
+    if (keyIndex < 0 || keyIndex >= keys.length) {
+      throw new Error(`无效的 key 索引：${keyIndex}`);
+    }
+
+    const entry = keys[keyIndex];
+    Object.assign(entry, patch);
+    provider.api_key = keys;
+
+    const rotator = this.rotators.get(providerId);
+    if (rotator) {
+      const rotatorKeys = rotator.getKeys();
+      const rotatorEntry = rotatorKeys.find((k) => k.key === entry.key);
+      if (rotatorEntry) {
+        Object.assign(rotatorEntry, patch);
+      }
+    }
+
+    await this.persistNow();
+  }
+
+  async enableKey(providerId: string, keyIndex: number): Promise<void> {
+    const rotator = this.rotators.get(providerId);
+    if (!rotator) throw new Error(`未找到供应商的 rotator：${providerId}`);
+
+    const keys = rotator.getKeys();
+    if (keyIndex < 0 || keyIndex >= keys.length) {
+      throw new Error(`无效的 key 索引：${keyIndex}`);
+    }
+
+    rotator.enableKey(keys[keyIndex].key);
+    await this.persistNow();
+  }
+
+  async disableKey(providerId: string, keyIndex: number): Promise<void> {
+    const rotator = this.rotators.get(providerId);
+    if (!rotator) throw new Error(`未找到供应商的 rotator：${providerId}`);
+
+    const keys = rotator.getKeys();
+    if (keyIndex < 0 || keyIndex >= keys.length) {
+      throw new Error(`无效的 key 索引：${keyIndex}`);
+    }
+
+    rotator.disableKey(keys[keyIndex].key);
+    await this.persistNow();
+  }
+
+  async resetKey(providerId: string, keyIndex: number): Promise<void> {
+    const rotator = this.rotators.get(providerId);
+    if (!rotator) throw new Error(`未找到供应商的 rotator：${providerId}`);
+
+    const keys = rotator.getKeys();
+    if (keyIndex < 0 || keyIndex >= keys.length) {
+      throw new Error(`无效的 key 索引：${keyIndex}`);
+    }
+
+    rotator.resetErrorCount(keys[keyIndex].key);
+    await this.persistNow();
+  }
+
+  async addKey(providerId: string, keyValue: string): Promise<ApiKeyEntry> {
+    const provider = this.config.providers.find((p) => p.provider_id === providerId);
+    if (!provider) throw new Error(`未找到供应商：${providerId}`);
+
+    const trimmed = keyValue.trim();
+    if (!trimmed) throw new Error('Key 值不能为空');
+
+    const keys = resolveApiKeys(provider);
+    if (keys.some((k) => k.key === trimmed)) {
+      throw new Error('该 Key 已存在');
+    }
+
+    const newKey: ApiKeyEntry = {
+      key: trimmed,
+      enabled: true,
+      error_count: 0,
+      disabled_at: null,
+      last_error_at: null,
+      last_error_message: null,
+      auto_disabled_at: null
+    };
+
+    keys.push(newKey);
+    provider.api_key = keys;
+
+    this.rebuildRotators();
+    await this.persistNow();
+
+    return newKey;
+  }
+
+  async resetAllKeys(providerId: string): Promise<number> {
+    const provider = this.config.providers.find((p) => p.provider_id === providerId);
+    if (!provider) throw new Error(`未找到供应商：${providerId}`);
+
+    const rotator = this.rotators.get(providerId);
+    const keys = rotator ? rotator.getKeys() : resolveApiKeys(provider);
+    let count = 0;
+    for (const entry of keys) {
+      entry.error_count = 0;
+      entry.enabled = true;
+      entry.disabled_at = null;
+      entry.auto_disabled_at = null;
+      entry.last_error_at = null;
+      entry.last_error_message = null;
+      count++;
+    }
+    provider.api_key = keys;
+    this.rebuildRotators();
+    await this.persistNow();
+    return count;
+  }
+
+  async addKeys(providerId: string, keyValues: string[]): Promise<{ added: string[]; skipped: string[] }> {
+    const provider = this.config.providers.find((p) => p.provider_id === providerId);
+    if (!provider) throw new Error(`未找到供应商：${providerId}`);
+
+    const keys = resolveApiKeys(provider);
+    const existingSet = new Set(keys.map((k) => k.key));
+    const added: string[] = [];
+    const skipped: string[] = [];
+
+    for (const raw of keyValues) {
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+      if (existingSet.has(trimmed)) {
+        skipped.push(trimmed);
+        continue;
+      }
+      const newKey: ApiKeyEntry = {
+        key: trimmed,
+        enabled: true,
+        error_count: 0,
+        disabled_at: null,
+        last_error_at: null,
+        last_error_message: null,
+        auto_disabled_at: null
+      };
+      keys.push(newKey);
+      existingSet.add(trimmed);
+      added.push(trimmed);
+    }
+
+    if (added.length > 0) {
+      provider.api_key = keys;
+      this.rebuildRotators();
+      await this.persistNow();
+    }
+
+    return { added, skipped };
+  }
+
+  async deleteKey(providerId: string, keyIndex: number): Promise<void> {
+    const provider = this.config.providers.find((p) => p.provider_id === providerId);
+    if (!provider) throw new Error(`未找到供应商：${providerId}`);
+
+    const keys = resolveApiKeys(provider);
+    if (keyIndex < 0 || keyIndex >= keys.length) {
+      throw new Error(`无效的 key 索引：${keyIndex}`);
+    }
+
+    keys.splice(keyIndex, 1);
+    provider.api_key = keys;
+
+    this.rebuildRotators();
+    await this.persistNow();
+  }
 }
 
-function resolveApiKeys(provider: ProviderConfig): string[] {
-  const keys: string[] = [];
+function resolveApiKeys(provider: ProviderConfig): ApiKeyEntry[] {
+  const keys: ApiKeyEntry[] = [];
 
   if (provider.api_key) {
-    for (const key of provider.api_key.split(',')) {
-      const trimmed = key.trim();
-      if (trimmed) keys.push(trimmed);
+    if (typeof provider.api_key === 'string') {
+      for (const key of provider.api_key.split(',')) {
+        const trimmed = key.trim();
+        if (trimmed) {
+          keys.push({
+            key: trimmed,
+            enabled: true,
+            error_count: 0,
+            disabled_at: null,
+            last_error_at: null,
+            last_error_message: null,
+            auto_disabled_at: null
+          });
+        }
+      }
+    } else if (Array.isArray(provider.api_key)) {
+      keys.push(...provider.api_key);
     }
   }
 
@@ -174,7 +413,17 @@ function resolveApiKeys(provider: ProviderConfig): string[] {
       const trimmed = envName.trim();
       if (trimmed) {
         const val = process.env[trimmed]?.trim();
-        if (val) keys.push(val);
+        if (val) {
+          keys.push({
+            key: val,
+            enabled: true,
+            error_count: 0,
+            disabled_at: null,
+            last_error_at: null,
+            last_error_message: null,
+            auto_disabled_at: null
+          });
+        }
       }
     }
   }
@@ -182,9 +431,9 @@ function resolveApiKeys(provider: ProviderConfig): string[] {
   return keys;
 }
 
-function keysEqual(a: string[], b: string[]): boolean {
+function keysEqual(a: ApiKeyEntry[], b: ApiKeyEntry[]): boolean {
   if (a.length !== b.length) return false;
-  return a.every((v, i) => v === b[i]);
+  return a.every((entry, i) => entry.key === b[i].key && entry.enabled === b[i].enabled);
 }
 
 function replaceEnv(value: string): string {

@@ -5,6 +5,8 @@ let editingIndex = -1;        // -1 = add new
 let providerPage = 1;
 let modelPage = 1;
 const PAGE_SIZE = 10;
+let expandedKeyProvider = null; // provider_id of expanded key panel
+let keyStates = {}; // { providerId: [ApiKeyEntry, ...] }
 
 // sort state per tab
 const sortState = {
@@ -29,6 +31,74 @@ const modalBody = $('#modal-body');
 const modalCancel = $('#modal-cancel');
 const modalConfirm = $('#modal-confirm');
 
+// ── Dialog 组件 ──
+const Dialog = {
+  overlay: null,
+  container: null,
+
+  init() {
+    if (this.overlay) return;
+    this.overlay = document.createElement('div');
+    this.overlay.className = 'dialog-overlay';
+    this.overlay.innerHTML = `
+      <div class="dialog-container">
+        <div class="dialog-header">
+          <span class="dialog-title"></span>
+          <button class="dialog-close" aria-label="关闭">×</button>
+        </div>
+        <div class="dialog-content"></div>
+        <div class="dialog-footer"></div>
+      </div>
+    `;
+    document.body.appendChild(this.overlay);
+    this.container = this.overlay.querySelector('.dialog-container');
+
+    this.overlay.addEventListener('click', (e) => {
+      if (e.target === this.overlay) this.hide();
+    });
+    this.overlay.querySelector('.dialog-close').addEventListener('click', () => this.hide());
+  },
+
+  show(title, content, buttons = []) {
+    this.init();
+    this.overlay.querySelector('.dialog-title').textContent = title;
+    this.overlay.querySelector('.dialog-content').innerHTML = content;
+
+    const footer = this.overlay.querySelector('.dialog-footer');
+    footer.innerHTML = '';
+
+    buttons.forEach(btn => {
+      const button = document.createElement('button');
+      button.className = `btn ${btn.class || ''}`;
+      button.textContent = btn.text;
+      button.addEventListener('click', () => {
+        if (btn.action) btn.action();
+        if (btn.close !== false) this.hide();
+      });
+      footer.appendChild(button);
+    });
+
+    this.overlay.classList.add('show');
+  },
+
+  hide() {
+    if (this.overlay) this.overlay.classList.remove('show');
+  },
+
+  confirm(title, message, onConfirm, confirmText = '确认', cancelText = '取消', confirmClass = 'btn-primary') {
+    this.show(title, `<p>${message}</p>`, [
+      { text: cancelText, class: 'btn-secondary' },
+      { text: confirmText, class: confirmClass, action: onConfirm }
+    ]);
+  },
+
+  alert(title, message, onClose) {
+    this.show(title, `<p>${message}</p>`, [
+      { text: '确定', class: 'btn-primary', action: onClose }
+    ]);
+  }
+};
+
 // ── Helpers ──
 function setStatus(text, isError) {
   statusBox.textContent = text;
@@ -48,6 +118,39 @@ function parseJsonSafe(text, fallback) {
 
 function strategyLabel(s) {
   return s === 'on_429' ? '遇429切换' : '轮询';
+}
+
+function maskKey(key) {
+  if (!key || key.length <= 10) return '••••••••';
+  return key.slice(0, 5) + '••••' + key.slice(-5);
+}
+
+function getKeyArray(provider) {
+  const ak = provider.api_key;
+  if (!ak) return [];
+  if (typeof ak === 'string') {
+    return ak.split(',').map(k => k.trim()).filter(Boolean).map(k => ({
+      key: k, enabled: true, error_count: 0, disabled_at: null,
+      last_error_at: null, last_error_message: null, auto_disabled_at: null
+    }));
+  }
+  if (Array.isArray(ak)) return ak;
+  return [];
+}
+
+function countKeyStats(keys) {
+  let enabled = 0, disabled = 0, totalErrors = 0;
+  for (const k of keys) {
+    if (k.enabled) enabled++; else disabled++;
+    totalErrors += (k.error_count || 0);
+  }
+  return { enabled, disabled, totalErrors };
+}
+
+function formatTime(ts) {
+  if (!ts) return '-';
+  const d = new Date(ts);
+  return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 // ── API ──
@@ -88,6 +191,34 @@ async function saveConfig() {
     setStatus(data.message || '保存成功');
   } catch (error) {
     setStatus('保存失败：' + error.message, true);
+  }
+}
+
+async function loadKeyStates(providerId) {
+  try {
+    const res = await fetch(`/api/keys/${encodeURIComponent(providerId)}`, { credentials: 'include' });
+    if (!res.ok) return [];
+    const data = await res.json();
+    keyStates[providerId] = data.keys || [];
+    return data.keys || [];
+  } catch {
+    return [];
+  }
+}
+
+async function keyAction(providerId, keyIndex, action) {
+  try {
+    const res = await fetch(`/api/keys/${encodeURIComponent(providerId)}/${keyIndex}/${action}`, {
+      method: 'PUT', credentials: 'include',
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.message || '操作失败');
+    setStatus(data.message || '操作成功');
+    await loadKeyStates(providerId);
+    await loadConfig();
+    renderKeyPanel(providerId);
+  } catch (err) {
+    setStatus('操作失败：' + err.message, true);
   }
 }
 
@@ -208,6 +339,9 @@ function renderTable() {
       const realIdx = idxMap.get(item);
       if (isProvider) {
         html += renderProviderRow(item, realIdx);
+        if (expandedKeyProvider === item.provider_id) {
+          html += renderKeyPanelHtml(item.provider_id);
+        }
       } else {
         html += renderModelRow(item, realIdx, providerIds);
       }
@@ -219,65 +353,6 @@ function renderTable() {
   html += '</div>';
   tableContainer.innerHTML = html;
 }
-
-// ── Event delegation for dynamic table content
-tableContainer.addEventListener('click', (e) => {
-  const target = e.target.closest('button');
-  if (!target) return;
-
-  const isProvider = currentTab === 'providers';
-
-  if (target.id === 'addBtn') {
-    openModal(currentTab, -1);
-    return;
-  }
-
-  if (target.id === 'prevPage') {
-    changePage(-1);
-    return;
-  }
-
-  if (target.id === 'nextPage') {
-    changePage(1);
-    return;
-  }
-
-  if (target.classList.contains('edit-btn')) {
-    openModal(currentTab, parseInt(target.dataset.idx));
-    return;
-  }
-
-  if (target.classList.contains('move-up-btn')) {
-    moveItem(parseInt(target.dataset.idx), -1);
-    return;
-  }
-
-  if (target.classList.contains('move-down-btn')) {
-    moveItem(parseInt(target.dataset.idx), 1);
-    return;
-  }
-
-  if (target.classList.contains('delete-btn')) {
-    if (!confirm('确定删除？此操作不可撤销。')) return;
-    const idx = parseInt(target.dataset.idx);
-    if (isProvider) {
-      currentConfig.providers.splice(idx, 1);
-    } else {
-      currentConfig.models.splice(idx, 1);
-    }
-    refreshDefaultModelSelect();
-    renderTable();
-    updatePreviewNow();
-    return;
-  }
-});
-
-tableContainer.addEventListener('click', (e) => {
-  const th = e.target.closest('.data-table th');
-  if (th && th.dataset.field) {
-    setSort(currentTab, th.dataset.field);
-  }
-});
 
 function renderTableHead(fields, st, labels) {
   let h = '<thead><tr>';
@@ -297,6 +372,12 @@ function renderProviderRow(p, idx) {
   const badge = p.enabled !== false
     ? '<span class="badge badge-on">启用</span>'
     : '<span class="badge badge-off">停用</span>';
+  const keys = getKeyArray(p);
+  const stats = countKeyStats(keys);
+  const keySummary = keys.length > 0
+    ? `<span class="key-summary">${stats.enabled}/${keys.length} 可用</span>${stats.disabled > 0 ? `<span class="badge badge-off" style="margin-left:6px">${stats.disabled} 禁用</span>` : ''}`
+    : '<span class="text-dim">无 Key</span>';
+  const isExpanded = expandedKeyProvider === p.provider_id;
   return `<tr>
     <td class="col-id">${esc(p.provider_id)}</td>
     <td>${typeLabel}</td>
@@ -304,12 +385,79 @@ function renderProviderRow(p, idx) {
     <td class="col-strategy">${strat}</td>
     <td>${badge}</td>
     <td class="col-actions">
+      <button class="btn-icon keys-btn" data-provider="${esc(p.provider_id)}" title="管理 API Keys">${isExpanded ? '收起 Keys' : 'Keys'} (${keys.length})</button>
       <button class="btn-icon move-up-btn" data-idx="${idx}">上移</button>
       <button class="btn-icon move-down-btn" data-idx="${idx}">下移</button>
       <button class="btn-icon edit-btn" data-idx="${idx}">编辑</button>
       <button class="btn-icon danger delete-btn" data-idx="${idx}">删除</button>
     </td>
   </tr>`;
+}
+
+function renderKeyPanelHtml(providerId) {
+  const keys = keyStates[providerId] || getKeyArray(currentConfig.providers.find(p => p.provider_id === providerId) || {});
+
+  let rows = '';
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const enabledBadge = k.enabled
+      ? '<span class="badge badge-on">启用</span>'
+      : (k.auto_disabled_at ? '<span class="badge badge-auto-off">自动禁用</span>' : '<span class="badge badge-off">手动禁用</span>');
+
+    const errorBadge = k.error_count > 0
+      ? `<span class="badge ${k.error_count >= 3 ? 'badge-warn' : 'badge-info'}">错误 ${k.error_count} 次</span>`
+      : '<span class="text-dim">无错误</span>';
+
+    let actions = '';
+    if (k.enabled) {
+      actions = `<button class="btn-icon danger key-action-btn" data-provider="${esc(providerId)}" data-idx="${i}" data-action="disable">禁用</button>`;
+    } else {
+      actions = `<button class="btn-icon key-action-btn" data-provider="${esc(providerId)}" data-idx="${i}" data-action="enable" style="color:var(--success);border-color:rgba(0,200,83,0.3)">启用</button>`;
+    }
+    actions += `<button class="btn-icon key-action-btn" data-provider="${esc(providerId)}" data-idx="${i}" data-action="reset">重置</button>`;
+    actions += `<button class="btn-icon danger key-delete-btn" data-provider="${esc(providerId)}" data-idx="${i}">删除</button>`;
+
+    const lastError = k.last_error_message
+      ? `<span class="key-error-detail" title="${esc(k.last_error_message)}">${esc(k.last_error_message)} · ${formatTime(k.last_error_at)}</span>`
+      : '';
+
+    const noteStr = k.note ? `<span class="key-note">${esc(k.note)}</span>` : '';
+
+    rows += `<tr class="key-detail-row">
+      <td class="key-col-index">${i + 1}</td>
+      <td class="key-col-key" title="${esc(k.key)}">${maskKey(k.key)} ${noteStr}</td>
+      <td class="key-col-status">${enabledBadge}</td>
+      <td class="key-col-errors">${errorBadge}${lastError ? '<br>' + lastError : ''}</td>
+      <td class="key-col-time">${k.auto_disabled_at ? formatTime(k.auto_disabled_at) : (k.disabled_at ? formatTime(k.disabled_at) : '-')}</td>
+      <td class="key-col-actions">${actions}</td>
+    </tr>`;
+  }
+
+  return `<tr class="key-panel-row"><td colspan="6">
+    <div class="key-panel">
+      <div class="key-panel-header">
+        <h3>API Keys — ${esc(providerId)}</h3>
+        <button class="btn btn-small key-reset-all-btn" data-provider="${esc(providerId)}">一键重置所有 Key</button>
+        <button class="btn btn-small key-refresh-btn" data-provider="${esc(providerId)}">刷新</button>
+      </div>
+      <div class="key-add-panel" style="margin-bottom:16px;">
+        <textarea class="key-add-input" data-provider="${esc(providerId)}" rows="2" placeholder="输入新 Key，支持多个（逗号或换行分隔）" style="width:100%;margin-bottom:8px;"></textarea>
+        <button class="btn btn-small key-add-btn" data-provider="${esc(providerId)}">添加 Key</button>
+      </div>
+      ${keys.length === 0 ? '<div class="key-panel-empty">暂无 API Key，请在上方输入框添加。</div>' : `
+      <table class="key-detail-table">
+        <thead><tr>
+          <th style="width:40px">#</th>
+          <th>Key</th>
+          <th style="width:120px">状态</th>
+          <th style="width:180px">错误</th>
+          <th style="width:140px">禁用时间</th>
+          <th style="width:160px" class="col-actions">操作</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`}
+    </div>
+  </td></tr>`;
 }
 
 function renderModelRow(m, idx, providerIds) {
@@ -362,10 +510,177 @@ function moveItem(idx, dir) {
   updatePreviewNow();
 }
 
+async function toggleKeyPanel(providerId) {
+  if (expandedKeyProvider === providerId) {
+    expandedKeyProvider = null;
+    renderTable();
+    return;
+  }
+  expandedKeyProvider = providerId;
+  await loadKeyStates(providerId);
+  renderTable();
+}
+
+async function renderKeyPanel(providerId) {
+  await loadKeyStates(providerId);
+  renderTable();
+}
+
 function esc(s) {
   if (!s) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+
+// ── Event delegation for dynamic table content
+tableContainer.addEventListener('click', (e) => {
+  const target = e.target.closest('button');
+  if (!target) return;
+
+  const isProvider = currentTab === 'providers';
+
+  if (target.id === 'addBtn') {
+    openModal(currentTab, -1);
+    return;
+  }
+
+  if (target.id === 'prevPage') {
+    changePage(-1);
+    return;
+  }
+
+  if (target.id === 'nextPage') {
+    changePage(1);
+    return;
+  }
+
+  if (target.classList.contains('keys-btn')) {
+    toggleKeyPanel(target.dataset.provider);
+    return;
+  }
+
+  if (target.classList.contains('key-refresh-btn')) {
+    renderKeyPanel(target.dataset.provider);
+    return;
+  }
+
+  if (target.classList.contains('key-add-btn')) {
+    const providerId = target.dataset.provider;
+    const input = tableContainer.querySelector(`.key-add-input[data-provider="${providerId}"]`);
+    const raw = input?.value || '';
+    const keys = raw.split(/[,，\n]+/).map(k => k.trim()).filter(Boolean);
+    if (keys.length === 0) {
+      Dialog.alert('提示', '请输入至少一个 Key 值');
+      return;
+    }
+    fetch(`/api/keys/${encodeURIComponent(providerId)}`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keys })
+    })
+    .then(res => res.json().then(data => ({ ok: res.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.message || data.error || '添加失败');
+      setStatus(data.message || `${keys.length} 个 Key 已添加到 ${providerId}`);
+      input.value = '';
+      renderKeyPanel(providerId);
+      loadConfig();
+    })
+    .catch(err => Dialog.alert('错误', '添加失败：' + err.message));
+    return;
+  }
+
+  if (target.classList.contains('key-reset-all-btn')) {
+    const providerId = target.dataset.provider;
+    Dialog.confirm('确认重置', `确定要重置 ${providerId} 的所有 Key 错误计数并重新启用吗？`, () => {
+      fetch(`/api/keys/${encodeURIComponent(providerId)}/reset-all`, {
+        method: 'PUT',
+        credentials: 'include'
+      })
+      .then(res => res.json().then(data => ({ ok: res.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.message || '重置失败');
+        setStatus(data.message || `${providerId} 所有 Key 已重置`);
+        renderKeyPanel(providerId);
+        loadConfig();
+      })
+      .catch(err => Dialog.alert('错误', '重置失败：' + err.message));
+    }, '确认重置', '取消', 'btn-warning');
+    return;
+  }
+
+  if (target.classList.contains('key-delete-btn')) {
+    const providerId = target.dataset.provider;
+    const keyIndex = parseInt(target.dataset.idx);
+    Dialog.confirm('确认删除', `确定要删除 ${providerId} 的第 ${keyIndex + 1} 个 Key 吗？`, () => {
+      fetch(`/api/keys/${encodeURIComponent(providerId)}/${keyIndex}`, {
+        method: 'DELETE',
+        credentials: 'include'
+      })
+      .then(res => res.json().then(data => ({ ok: res.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || '删除失败');
+        setStatus(`Key 已从 ${providerId} 删除`);
+        renderKeyPanel(providerId);
+        loadConfig();
+      })
+      .catch(err => Dialog.alert('错误', '删除失败：' + err.message));
+    }, '确认删除', '取消', 'btn-danger');
+    return;
+  }
+
+  if (target.classList.contains('key-action-btn')) {
+    const providerId = target.dataset.provider;
+    const keyIndex = parseInt(target.dataset.idx);
+    const action = target.dataset.action;
+    if (action === 'reset') {
+      Dialog.confirm('确认重置', `确定要重置该 Key 的错误计数并重新启用吗？`, () => {
+        keyAction(providerId, keyIndex, action);
+      });
+    } else {
+      keyAction(providerId, keyIndex, action);
+    }
+    return;
+  }
+
+  if (target.classList.contains('edit-btn')) {
+    openModal(currentTab, parseInt(target.dataset.idx));
+    return;
+  }
+
+  if (target.classList.contains('move-up-btn')) {
+    moveItem(parseInt(target.dataset.idx), -1);
+    return;
+  }
+
+  if (target.classList.contains('move-down-btn')) {
+    moveItem(parseInt(target.dataset.idx), 1);
+    return;
+  }
+
+  if (target.classList.contains('delete-btn')) {
+    const idx = parseInt(target.dataset.idx);
+    const itemName = isProvider ? currentConfig.providers[idx]?.provider_id : currentConfig.models[idx]?.client_model;
+    Dialog.confirm('确认删除', `确定要删除 "${itemName || '此项目'}" 吗？此操作不可撤销。`, () => {
+      if (isProvider) {
+        currentConfig.providers.splice(idx, 1);
+      } else {
+        currentConfig.models.splice(idx, 1);
+      }
+      refreshDefaultModelSelect();
+      renderTable();
+      updatePreviewNow();
+    }, '确认删除', '取消', 'btn-danger');
+    return;
+  }
+});
+
+tableContainer.addEventListener('click', (e) => {
+  const th = e.target.closest('.data-table th');
+  if (th && th.dataset.field) {
+    setSort(currentTab, th.dataset.field);
+  }
+});
 
 // ── Modal ──
 function openModal(tab, idx) {
@@ -394,10 +709,33 @@ function submitModal() {
   try {
     const item = isProvider ? collectProviderForm() : collectModelForm();
     if (editingIndex >= 0) {
-      if (isProvider) currentConfig.providers[editingIndex] = item;
+      if (isProvider) {
+        const existing = currentConfig.providers[editingIndex];
+        const existingKeys = getKeyArray(existing);
+        const newKeys = item.api_key;
+        if (Array.isArray(newKeys) && newKeys.length > 0) {
+          const existingKeyValues = new Set(existingKeys.map(k => k.key));
+          const toAppend = newKeys.filter(k => !existingKeyValues.has(k.key));
+          item.api_key = [...existingKeys, ...toAppend];
+          if (toAppend.length > 0) {
+            setStatus(`新增 ${toAppend.length} 个 Key，保留原有 ${existingKeys.length} 个`);
+          } else if (newKeys.length > 0) {
+            setStatus('输入的 Key 已存在，未做更改');
+          }
+        } else {
+          item.api_key = existingKeys.length > 0 ? existingKeys : null;
+        }
+        currentConfig.providers[editingIndex] = item;
+      }
       else currentConfig.models[editingIndex] = item;
     } else {
-      if (isProvider) currentConfig.providers.push(item);
+      if (isProvider) {
+        currentConfig.providers.push(item);
+        const newKeys = item.api_key;
+        if (Array.isArray(newKeys) && newKeys.length > 0) {
+          setStatus(`新增供应商，包含 ${newKeys.length} 个 Key`);
+        }
+      }
       else currentConfig.models.push(item);
     }
     closeModal();
@@ -405,12 +743,19 @@ function submitModal() {
     renderTable();
     updatePreviewNow();
   } catch (e) {
-    alert(e.message);
+    Dialog.alert('错误', e.message);
   }
 }
 
 function providerFormHtml(item) {
   const p = item || {};
+  const keys = getKeyArray(p);
+  const keyDisplay = keys.length > 0
+    ? `<div class="key-info-box"><span class="form-label">当前 API Keys</span><div class="key-list-preview">${keys.map((k, i) =>
+        `<div class="key-list-item ${k.enabled ? '' : 'key-disabled'}">${i + 1}. ${maskKey(k.key)} <span class="badge ${k.enabled ? 'badge-on' : 'badge-off'}">${k.enabled ? '启用' : '禁用'}</span> <span class="text-dim">错误: ${k.error_count || 0}</span></div>`
+      ).join('')}</div><p class="form-hint">在供应商列表的"Keys"面板中管理各 Key 的启用/禁用/重置。新增 Key 请在下方输入。</p></div>`
+    : '';
+
   return `
     <div class="form-grid">
       <div class="form-group">
@@ -434,11 +779,11 @@ function providerFormHtml(item) {
       </div>
       <div class="form-group">
         <span class="form-label">api_key_env</span>
-        <input id="mf-api_key_env" type="text" value="${esc(p.api_key_env)}" placeholder="多个 key 用逗号分隔" />
+        <input id="mf-api_key_env" type="text" value="${esc(p.api_key_env)}" placeholder="多个环境变量名用逗号分隔" />
       </div>
       <div class="form-group">
-        <span class="form-label">api_key（多个 key 用逗号分隔）</span>
-        <input id="mf-api_key" type="password" value="${esc(p.api_key)}" placeholder="留空则使用环境变量" />
+        <span class="form-label">新增 api_key（多个 key 用逗号分隔）</span>
+        <input id="mf-api_key" type="password" value="" placeholder="留空则保留现有 Key 不变" />
       </div>
       <div class="form-group">
         <span class="form-label">API Key 切换策略</span>
@@ -456,6 +801,7 @@ function providerFormHtml(item) {
         <input id="mf-stream_idle_timeout_seconds" type="number" min="1" value="${p.stream_idle_timeout_seconds||120}" />
       </div>
     </div>
+    ${keyDisplay}
     <div class="form-group">
       <label class="checkbox-wrapper">
         <input id="mf-enabled" type="checkbox" ${p.enabled!==false?'checked':''} />
@@ -512,11 +858,22 @@ function collectProviderForm() {
   const base_url = $('#mf-base_url').value.trim();
   if (!provider_id) throw new Error('provider_id 不能为空');
   if (!base_url) throw new Error('base_url 不能为空');
+
+  const newKeyInput = $('#mf-api_key').value.trim();
+  let apiKey = null;
+  if (newKeyInput) {
+    apiKey = newKeyInput.split(',').map(k => k.trim()).filter(Boolean).map(k => ({
+      key: k, enabled: true, error_count: 0, disabled_at: null,
+      last_error_at: null, last_error_message: null, auto_disabled_at: null
+    }));
+    if (apiKey.length === 0) apiKey = null;
+  }
+
   return {
     provider_id,
     provider_type: $('#mf-provider_type').value || 'openai_compatible',
     base_url,
-    api_key: $('#mf-api_key').value.trim() || null,
+    api_key: apiKey,
     api_key_env: $('#mf-api_key_env').value.trim() || null,
     key_rotation_strategy: $('#mf-key_rotation_strategy').value || 'round_robin',
     timeout_seconds: Number($('#mf-timeout_seconds').value || 300),
@@ -547,6 +904,7 @@ function collectModelForm() {
 // ── Tab switching ──
 function switchTab(tab) {
   currentTab = tab;
+  expandedKeyProvider = null;
   tabProviders.classList.toggle('active', tab === 'providers');
   tabModels.classList.toggle('active', tab === 'models');
   renderTable();

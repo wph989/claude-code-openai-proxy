@@ -89,4 +89,113 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
       }))
     };
   });
+
+  app.get('/api/keys/:providerId', async (request, reply) => {
+    if (!(await verifyAdminAuth(request, reply))) return;
+    const { providerId } = request.params as { providerId: string };
+    const keys = app.runtimeConfigManager.getKeyStates(providerId);
+    return { provider_id: providerId, keys };
+  });
+
+  app.put('/api/keys/:providerId/:keyIndex/enable', async (request, reply) => {
+    if (!(await verifyAdminAuth(request, reply))) return;
+    const { providerId, keyIndex } = request.params as { providerId: string; keyIndex: string };
+    const idx = parseInt(keyIndex, 10);
+    if (isNaN(idx) || idx < 0) {
+      return reply.code(400).send({ message: '无效的 keyIndex。' });
+    }
+    try {
+      await app.runtimeConfigManager.enableKey(providerId, idx);
+      return { message: 'Key 已启用。', provider_id: providerId, key_index: idx };
+    } catch (err) {
+      return reply.code(400).send({ message: err instanceof Error ? err.message : '启用失败。' });
+    }
+  });
+
+  app.put('/api/keys/:providerId/:keyIndex/disable', async (request, reply) => {
+    if (!(await verifyAdminAuth(request, reply))) return;
+    const { providerId, keyIndex } = request.params as { providerId: string; keyIndex: string };
+    const idx = parseInt(keyIndex, 10);
+    if (isNaN(idx) || idx < 0) {
+      return reply.code(400).send({ message: '无效的 keyIndex。' });
+    }
+    try {
+      await app.runtimeConfigManager.disableKey(providerId, idx);
+      return { message: 'Key 已禁用。', provider_id: providerId, key_index: idx };
+    } catch (err) {
+      return reply.code(400).send({ message: err instanceof Error ? err.message : '禁用失败。' });
+    }
+  });
+
+  app.put('/api/keys/:providerId/:keyIndex/reset', async (request, reply) => {
+    if (!(await verifyAdminAuth(request, reply))) return;
+    const { providerId, keyIndex } = request.params as { providerId: string; keyIndex: string };
+    const idx = parseInt(keyIndex, 10);
+    if (isNaN(idx) || idx < 0) {
+      return reply.code(400).send({ message: '无效的 keyIndex。' });
+    }
+    try {
+      await app.runtimeConfigManager.resetKey(providerId, idx);
+      return { message: 'Key 已重置并启用。', provider_id: providerId, key_index: idx };
+    } catch (err) {
+      return reply.code(400).send({ message: err instanceof Error ? err.message : '重置失败。' });
+    }
+  });
+
+  app.put('/api/keys/:providerId/reset-all', async (request, reply) => {
+    if (!(await verifyAdminAuth(request, reply))) return;
+    const { providerId } = request.params as { providerId: string };
+    try {
+      const count = await app.runtimeConfigManager.resetAllKeys(providerId);
+      return { message: `已重置 ${providerId} 的 ${count} 个 Key`, provider_id: providerId, count };
+    } catch (err) {
+      return reply.code(400).send({ message: err instanceof Error ? err.message : '重置失败。' });
+    }
+  });
+
+  app.post('/api/keys/:providerId', async (request, reply) => {
+    if (!(await verifyAdminAuth(request, reply))) return;
+    const { providerId } = request.params as { providerId: string };
+    const body = (request.body || {}) as { keys?: string[]; key?: string };
+    const keyValues = body.keys || (body.key ? [body.key] : []);
+
+    if (!Array.isArray(keyValues) || keyValues.length === 0) {
+      return reply.code(400).send({ message: '至少需要一个 Key 值。' });
+    }
+
+    try {
+      const result = await app.runtimeConfigManager.addKeys(providerId, keyValues);
+      const addedCount = result.added.length;
+      const skippedCount = result.skipped.length;
+
+      let message = `添加完成：`;
+      if (addedCount > 0) message += `新增 ${addedCount} 个`;
+      if (skippedCount > 0) message += `${addedCount > 0 ? '，' : ''}跳过 ${skippedCount} 个（已存在）`;
+      if (addedCount === 0 && skippedCount === 0) message = '没有有效的 Key 值';
+
+      return {
+        message,
+        provider_id: providerId,
+        added: result.added,
+        skipped: result.skipped
+      };
+    } catch (err) {
+      return reply.code(400).send({ message: err instanceof Error ? err.message : '添加失败。' });
+    }
+  });
+
+  app.delete('/api/keys/:providerId/:keyIndex', async (request, reply) => {
+    if (!(await verifyAdminAuth(request, reply))) return;
+    const { providerId, keyIndex } = request.params as { providerId: string; keyIndex: string };
+    const idx = parseInt(keyIndex, 10);
+    if (isNaN(idx) || idx < 0) {
+      return reply.code(400).send({ message: '无效的 keyIndex。' });
+    }
+    try {
+      await app.runtimeConfigManager.deleteKey(providerId, idx);
+      return { message: 'Key 已删除。', provider_id: providerId, key_index: idx };
+    } catch (err) {
+      return reply.code(400).send({ message: err instanceof Error ? err.message : '删除失败。' });
+    }
+  });
 }

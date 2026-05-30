@@ -122,6 +122,7 @@ export interface AppSettings {
   rateLimitMax: number;
   rateLimitTimeWindow: number;
   clusterWorkers: number;
+  keyMaxErrors: number;
 }
 
 function toNumber(raw: string | undefined, fallback: number): number {
@@ -177,5 +178,6 @@ export const settings: AppSettings = {
   keepAliveTimeout: toNumber(process.env.KEEP_ALIVE_TIMEOUT, 60000),
   rateLimitMax: toNumber(process.env.RATE_LIMIT_MAX, 100),
   rateLimitTimeWindow: toNumber(process.env.RATE_LIMIT_TIME_WINDOW, 60000),
-  clusterWorkers: (() => { const v = Number(process.env.CLUSTER_WORKERS); return Number.isFinite(v) && v >= 0 ? v : 0; })()
+  clusterWorkers: (() => { const v = Number(process.env.CLUSTER_WORKERS); return Number.isFinite(v) && v >= 0 ? v : 0; })(),
+  keyMaxErrors: toNumber(process.env.KEY_MAX_ERRORS, 5)
 };

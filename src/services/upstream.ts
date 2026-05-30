@@ -165,11 +165,10 @@ export class UpstreamService {
     let usedKey: string | undefined;
 
     for (let attempt = 0; attempt <= settings.maxRetries; attempt++) {
-      // If not the first attempt, wait with exponential backoff
       if (attempt > 0) {
         const delay = Math.min(
           settings.retryBaseDelayMs * Math.pow(2, attempt - 1),
-          30000 // Max 30 seconds
+          30000
         );
         log('info', '重试请求（指数退避）', {
           attempt,
@@ -177,6 +176,11 @@ export class UpstreamService {
           url: params.url
         });
         await sleep(delay);
+      }
+
+      if (params.rotator && !params.rotator.hasAvailableKey()) {
+        if (lastResponse) return lastResponse;
+        throw new Error(`供应商 ${params.provider.provider_id} 的所有 API Key 均不可用`);
       }
 
       const result = this.doFetch({
@@ -194,18 +198,17 @@ export class UpstreamService {
       lastResponse = await result.response;
       usedKey = result.usedKey;
 
-      // If not rate limited, return immediately
-      if (lastResponse.status !== 429) {
+      if (lastResponse.ok) {
         return lastResponse;
       }
 
-      // Mark the key as rate limited
       if (params.rotator && usedKey) {
-        params.rotator.mark429(usedKey);
+        const is429 = lastResponse.status === 429;
+        const errorText = `${lastResponse.status} ${lastResponse.statusText}`;
+        params.rotator.markError(usedKey, errorText, is429);
       }
 
-      // If no more keys available, return the 429 response
-      if (!params.rotator || params.rotator.allCoolingDown()) {
+      if (!params.rotator || params.rotator.allUnavailable()) {
         return lastResponse;
       }
     }

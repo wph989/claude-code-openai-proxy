@@ -23,6 +23,118 @@ body {
   min-height: 100vh;
 }
 
+/* ── Dialog ── */
+.dialog-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+
+.dialog-overlay.show {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.dialog-container {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-width: 400px;
+  max-width: 500px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  transform: scale(0.9);
+  transition: transform 0.2s;
+}
+
+.dialog-overlay.show .dialog-container {
+  transform: scale(1);
+}
+
+.dialog-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dialog-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.dialog-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+.dialog-close:hover {
+  background: var(--border);
+  color: var(--text);
+}
+
+.dialog-content {
+  padding: 24px;
+  color: var(--text);
+  line-height: 1.6;
+}
+
+.dialog-content p {
+  margin: 0;
+}
+
+.dialog-footer {
+  padding: 16px 24px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.btn-secondary {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.btn-secondary:hover {
+  background: var(--border);
+  border-color: var(--border-light);
+}
+
+.btn-warning {
+  background: #ff9800;
+  border: 1px solid #ff9800;
+  color: #fff;
+}
+
+.btn-warning:hover {
+  background: #f57c00;
+  border-color: #f57c00;
+}
+
 /* ── Header ── */
 .sticky-header {
   position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
@@ -159,6 +271,42 @@ body {
 }
 .badge-on { background: rgba(0,200,83,0.12); color: var(--success); border: 1px solid rgba(0,200,83,0.2); }
 .badge-off { background: rgba(255,68,68,0.08); color: #ff8888; border: 1px solid rgba(255,68,68,0.15); }
+.badge-auto-off { background: rgba(255,165,0,0.12); color: #ffaa44; border: 1px solid rgba(255,165,0,0.2); }
+.badge-warn { background: rgba(255,165,0,0.12); color: #ffaa44; border: 1px solid rgba(255,165,0,0.2); }
+.badge-info { background: rgba(100,150,255,0.1); color: #88aaff; border: 1px solid rgba(100,150,255,0.2); }
+.text-dim { color: var(--text-dim); font-size: 12px; }
+
+/* ── Key panel ── */
+.key-summary { font-size: 12px; color: var(--text-muted); font-family: "JetBrains Mono","SF Mono",Consolas,monospace; }
+.key-panel-row td { padding: 0 !important; background: var(--bg-elevated) !important; border-bottom: 2px solid var(--border) !important; }
+.key-panel { padding: 20px 28px; }
+.key-panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.key-panel-header h3 { font-family: "Playfair Display", serif; font-size: 16px; font-weight: 500; color: var(--text); }
+.key-panel-empty { padding: 24px; text-align: center; color: var(--text-dim); font-size: 14px; }
+.key-detail-table { width: 100%; border-collapse: collapse; }
+.key-detail-table th {
+  text-align: left; padding: 10px 16px; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted);
+  border-bottom: 1px solid var(--border); background: rgba(255,255,255,0.02);
+}
+.key-detail-table td {
+  padding: 12px 16px; font-size: 13px; border-bottom: 1px solid var(--border);
+  color: var(--text); vertical-align: middle;
+}
+.key-detail-table tr:hover td { background: rgba(255,255,255,0.02); }
+.key-col-index { color: var(--text-dim); font-family: monospace; text-align: center; }
+.key-col-key { font-family: "JetBrains Mono","SF Mono",Consolas,monospace; font-size: 13px; }
+.key-col-status { text-align: center; }
+.key-col-errors { font-size: 12px; }
+.key-col-time { font-size: 12px; color: var(--text-muted); font-family: monospace; }
+.key-col-actions { white-space: nowrap; text-align: right; }
+.key-error-detail { display: inline-block; font-size: 11px; color: #ffaa44; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.key-note { display: inline-block; margin-left: 8px; font-size: 11px; color: var(--text-dim); font-style: italic; }
+.key-list-preview { margin: 8px 0; max-height: 120px; overflow-y: auto; border: 1px solid var(--border); background: var(--bg-input); }
+.key-list-item { padding: 6px 12px; font-size: 13px; font-family: monospace; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+.key-list-item:last-child { border-bottom: none; }
+.key-list-item.key-disabled { opacity: 0.5; }
+.key-info-box { margin-top: 16px; padding: 16px; border: 1px solid var(--border); background: rgba(255,255,255,0.02); }
 
 /* ── Pagination ── */
 .pagination {
