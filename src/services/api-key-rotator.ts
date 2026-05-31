@@ -14,14 +14,15 @@ export type KeyStateChange = {
 export class ApiKeyRotator {
   private _keys: ApiKeyEntry[];
   private _strategy: KeyRotationStrategy;
+  private _autoDisable: boolean;
   private rrCounter: number = 0;
   private on429Index: number = 0;
-  private cooldowns: Map<number, number> = new Map();
   private _onChange?: (key: string, patch: KeyStateChange) => void;
 
-  constructor(keys: ApiKeyEntry[], strategy: KeyRotationStrategy) {
+  constructor(keys: ApiKeyEntry[], strategy: KeyRotationStrategy, autoDisable: boolean = true) {
     this._keys = keys;
     this._strategy = strategy;
+    this._autoDisable = autoDisable;
   }
 
   set onChange(fn: ((key: string, patch: KeyStateChange) => void) | undefined) {
@@ -44,13 +45,10 @@ export class ApiKeyRotator {
     if (this._keys.length === 0) return undefined;
 
     if (this._strategy === KeyRotationStrategy.on_429) {
-      const now = Date.now();
       for (let i = 0; i < this._keys.length; i++) {
         const idx = (this.on429Index + i) % this._keys.length;
         const entry = this._keys[idx];
-        if (!entry.enabled) continue;
-        const cooldownUntil = this.cooldowns.get(idx);
-        if (cooldownUntil == null || now >= cooldownUntil) {
+        if (entry.enabled) {
           this.on429Index = idx;
           return entry.key;
         }
@@ -69,7 +67,7 @@ export class ApiKeyRotator {
     return undefined;
   }
 
-  markError(key: string, errorMessage: string, is429: boolean): void {
+  markError(key: string, errorMessage: string): void {
     const idx = this._keys.findIndex((k) => k.key === key);
     if (idx === -1) return;
 
@@ -80,28 +78,36 @@ export class ApiKeyRotator {
       last_error_message: errorMessage
     };
 
-    if (is429 && this._strategy === KeyRotationStrategy.on_429) {
-      this.cooldowns.set(idx, Date.now() + 60_000);
-      this.on429Index = (idx + 1) % this._keys.length;
-    }
-
-    if (entry.error_count + 1 >= settings.keyMaxErrors && entry.enabled) {
+    if (settings.keyAutoDisable && this._autoDisable && entry.error_count + 1 >= settings.keyMaxErrors && entry.enabled) {
       patch.enabled = false;
       patch.auto_disabled_at = Date.now();
+    }
+
+    if (this._strategy === KeyRotationStrategy.on_429) {
+      this.on429Index = (idx + 1) % this._keys.length;
     }
 
     Object.assign(entry, patch);
     this._onChange?.(key, patch);
   }
 
+  markSuccess(key: string): void {
+    const idx = this._keys.findIndex((k) => k.key === key);
+    if (idx === -1) return;
+    const entry = this._keys[idx];
+    if (entry.error_count === 0 && entry.last_error_at === null) return;
+    const patch: KeyStateChange = {
+      error_count: 0,
+      last_error_at: null,
+      last_error_message: null
+    };
+    Object.assign(entry, patch);
+    this._onChange?.(key, patch);
+  }
+
   allUnavailable(): boolean {
     if (this._keys.length === 0) return true;
-    const now = Date.now();
-    return this._keys.every((entry, i) => {
-      if (!entry.enabled) return true;
-      const cooldownUntil = this.cooldowns.get(i);
-      return cooldownUntil != null && now < cooldownUntil;
-    });
+    return this._keys.every((entry) => !entry.enabled);
   }
 
   hasAvailableKey(): boolean {

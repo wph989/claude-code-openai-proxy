@@ -55,6 +55,7 @@ export interface ProviderConfig {
   api_key?: string | ApiKeyEntry[] | null;
   api_key_env?: string | null;
   key_rotation_strategy?: KeyRotationStrategy | null;
+  auto_disable_on_error?: boolean;
   timeout_seconds?: number;
   stream_idle_timeout_seconds?: number;
   enabled?: boolean;
@@ -76,6 +77,7 @@ export interface RuntimeConfig {
   models: ModelRouteConfig[];
   default_client_model?: string | null;
   proxy_auth_token?: string | null;
+  key_max_errors?: number | null;
 }
 
 export interface RuntimeConfigSummary {
@@ -92,6 +94,7 @@ export interface ResolvedProvider {
   base_url: string;
   api_keys: ApiKeyEntry[];
   key_rotation_strategy: KeyRotationStrategy;
+  auto_disable_on_error: boolean;
   timeout_seconds: number;
   stream_idle_timeout_seconds: number;
   enabled: boolean;
@@ -116,6 +119,7 @@ export function normalizeRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
     api_key: normalizeApiKeyField(item.api_key),
     api_key_env: normalizeOptional(item.api_key_env),
     key_rotation_strategy: normalizeRotationStrategy(item.key_rotation_strategy),
+    auto_disable_on_error: item.auto_disable_on_error !== false,
     timeout_seconds: Number(item.timeout_seconds || 300),
     stream_idle_timeout_seconds: Number(item.stream_idle_timeout_seconds || 120),
     enabled: item.enabled !== false,
@@ -136,7 +140,8 @@ export function normalizeRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
     providers,
     models,
     default_client_model: normalizeOptional(raw.default_client_model),
-    proxy_auth_token: normalizeOptional(raw.proxy_auth_token)
+    proxy_auth_token: normalizeOptional(raw.proxy_auth_token),
+    key_max_errors: normalizeOptionalNumber(raw.key_max_errors)
   };
 }
 
@@ -271,4 +276,10 @@ function findDuplicates(values: string[]): string[] {
 function normalizeProviderType(value: unknown): 'openai_compatible' | 'anthropic' {
   if (value === 'anthropic') return 'anthropic';
   return 'openai_compatible';
+}
+
+function normalizeOptionalNumber(value: unknown): number | null {
+  if (value == null) return null;
+  const num = Number(value);
+  return Number.isFinite(num) && num > 0 ? num : null;
 }

@@ -51,6 +51,7 @@ export class RuntimeConfigManager {
     const raw = JSON.parse(text) as RuntimeConfig;
     this.config = validateRuntimeConfig(raw);
     setRuntimeProxyToken(this.config.proxy_auth_token ?? null);
+    applyGlobalSettings(this.config);
     this.rebuildRotators();
     return this.getConfig();
   }
@@ -69,6 +70,7 @@ export class RuntimeConfigManager {
     await writeFile(this.configPath, JSON.stringify(validated, null, 2) + '\n', 'utf-8');
     this.config = validated;
     setRuntimeProxyToken(this.config.proxy_auth_token ?? null);
+    applyGlobalSettings(this.config);
     this.rebuildRotators();
     return this.getConfig();
   }
@@ -114,7 +116,8 @@ export class RuntimeConfigManager {
     }
 
     const apiKeys = resolveApiKeys(provider);
-    const rotator = this.getOrCreateRotator(provider.provider_id, apiKeys, provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin);
+    const autoDisable = provider.auto_disable_on_error !== false;
+    const rotator = this.getOrCreateRotator(provider.provider_id, apiKeys, provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin, autoDisable);
 
     const resolvedProvider: ResolvedProvider = {
       provider_id: provider.provider_id,
@@ -122,6 +125,7 @@ export class RuntimeConfigManager {
       base_url: replaceEnv(provider.base_url),
       api_keys: apiKeys,
       key_rotation_strategy: provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin,
+      auto_disable_on_error: autoDisable,
       timeout_seconds: provider.timeout_seconds || 300,
       stream_idle_timeout_seconds: provider.stream_idle_timeout_seconds || 120,
       enabled: !!provider.enabled,
@@ -141,12 +145,12 @@ export class RuntimeConfigManager {
     return { route: resolvedRoute, provider: resolvedProvider, rotator };
   }
 
-  private getOrCreateRotator(providerId: string, keys: ApiKeyEntry[], strategy: KeyRotationStrategy): ApiKeyRotator {
+  private getOrCreateRotator(providerId: string, keys: ApiKeyEntry[], strategy: KeyRotationStrategy, autoDisable: boolean): ApiKeyRotator {
     const existing = this.rotators.get(providerId);
     if (existing && keysEqual(existing.keys, keys) && existing.strategy === strategy) {
       return existing;
     }
-    const rotator = new ApiKeyRotator(keys, strategy);
+    const rotator = new ApiKeyRotator(keys, strategy, autoDisable);
     rotator.onChange = (key, patch) => this.onKeyStateChange(providerId, key, patch);
     this.rotators.set(providerId, rotator);
     return rotator;
@@ -157,8 +161,9 @@ export class RuntimeConfigManager {
     for (const provider of this.config.providers) {
       const apiKeys = resolveApiKeys(provider);
       const strategy = provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin;
+      const autoDisable = provider.auto_disable_on_error !== false;
       if (apiKeys.length > 0) {
-        const rotator = new ApiKeyRotator(apiKeys, strategy);
+        const rotator = new ApiKeyRotator(apiKeys, strategy, autoDisable);
         rotator.onChange = (key, patch) => this.onKeyStateChange(provider.provider_id, key, patch);
         this.rotators.set(provider.provider_id, rotator);
       }
@@ -451,6 +456,12 @@ function normalizeHeaders(headers: Record<string, string>): Record<string, strin
     result[key.trim()] = String(value).trim();
   }
   return result;
+}
+
+function applyGlobalSettings(config: RuntimeConfig): void {
+  if (config.key_max_errors != null && config.key_max_errors > 0) {
+    settings.keyMaxErrors = config.key_max_errors;
+  }
 }
 
 export function buildDefaultRuntimeConfig(): RuntimeConfig {

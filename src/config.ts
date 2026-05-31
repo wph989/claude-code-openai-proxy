@@ -68,6 +68,11 @@ LOG_DETAILED=false
 MAX_RETRIES=3
 RETRY_BASE_DELAY_MS=1000
 
+# API Key 错误自动禁用（累计错误达到 KEY_MAX_ERRORS 次后自动禁用，true=启用，false=禁用此功能）
+# 部分供应商不稳定时可设为 false，或在 config.json 的 provider 中设置 auto_disable_on_error: false
+KEY_AUTO_DISABLE=true
+KEY_MAX_ERRORS=5
+
 # 连接池配置（上游请求的连接池参数）
 MAX_SOCKETS=100
 KEEP_ALIVE_TIMEOUT=60000
@@ -123,6 +128,7 @@ export interface AppSettings {
   rateLimitTimeWindow: number;
   clusterWorkers: number;
   keyMaxErrors: number;
+  keyAutoDisable: boolean;
 }
 
 function toNumber(raw: string | undefined, fallback: number): number {
@@ -179,5 +185,6 @@ export const settings: AppSettings = {
   rateLimitMax: toNumber(process.env.RATE_LIMIT_MAX, 100),
   rateLimitTimeWindow: toNumber(process.env.RATE_LIMIT_TIME_WINDOW, 60000),
   clusterWorkers: (() => { const v = Number(process.env.CLUSTER_WORKERS); return Number.isFinite(v) && v >= 0 ? v : 0; })(),
-  keyMaxErrors: toNumber(process.env.KEY_MAX_ERRORS, 5)
+  keyMaxErrors: toNumber(process.env.KEY_MAX_ERRORS, 5),
+  keyAutoDisable: toBoolean(process.env.KEY_AUTO_DISABLE, true)
 };

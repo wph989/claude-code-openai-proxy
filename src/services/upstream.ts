@@ -199,13 +199,15 @@ export class UpstreamService {
       usedKey = result.usedKey;
 
       if (lastResponse.ok) {
+        if (params.rotator && usedKey) {
+          params.rotator.markSuccess(usedKey);
+        }
         return lastResponse;
       }
 
       if (params.rotator && usedKey) {
-        const is429 = lastResponse.status === 429;
         const errorText = `${lastResponse.status} ${lastResponse.statusText}`;
-        params.rotator.markError(usedKey, errorText, is429);
+        params.rotator.markError(usedKey, errorText);
       }
 
       if (!params.rotator || params.rotator.allUnavailable()) {

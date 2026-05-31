@@ -83,6 +83,15 @@
             <select id="defaultClientModel"><option value="">未设置</option></select>
           </div>
         </div>
+        <div class="config-row" style="margin-top:24px">
+          <div>
+            <span class="form-label">Key 最大错误次数</span>
+            <p class="form-hint">API Key 累计错误达到此次数后自动禁用（需开启自动禁用功能）。0 或不填则使用环境变量 KEY_MAX_ERRORS 的值（默认 5）。</p>
+          </div>
+          <div>
+            <input id="keyMaxErrors" type="number" min="1" placeholder="默认 5" />
+          </div>
+        </div>
       </div>
     </div>
 

@@ -22,6 +22,7 @@ const summaryWrap = $('#summary');
 const preview = $('#jsonPreview');
 const defaultClientModel = $('#defaultClientModel');
 const proxyAuthTokenInput = $('#proxyAuthToken');
+const keyMaxErrorsInput = $('#keyMaxErrors');
 const tabProviders = $('#tab-providers');
 const tabModels = $('#tab-models');
 const tableContainer = $('#table-container');
@@ -162,20 +163,27 @@ async function loadConfig() {
   currentConfig = data.config;
   renderSummary(data.summary);
   proxyAuthTokenInput.value = currentConfig.proxy_auth_token || '';
+  keyMaxErrorsInput.value = currentConfig.key_max_errors || '';
   refreshDefaultModelSelect();
   renderTable();
   updatePreviewNow();
   setStatus('配置已加载');
 }
 
+function buildPayload() {
+  const keyMaxErrorsVal = parseInt(keyMaxErrorsInput.value, 10);
+  return {
+    ...currentConfig,
+    default_client_model: defaultClientModel.value || null,
+    proxy_auth_token: proxyAuthTokenInput.value.trim() || null,
+    key_max_errors: Number.isFinite(keyMaxErrorsVal) && keyMaxErrorsVal > 0 ? keyMaxErrorsVal : null,
+  };
+}
+
 async function saveConfig() {
   try {
     setStatus('正在保存配置...');
-    const payload = {
-      ...currentConfig,
-      default_client_model: defaultClientModel.value || null,
-      proxy_auth_token: proxyAuthTokenInput.value.trim() || null,
-    };
+    const payload = buildPayload();
     const res = await fetch('/api/config', {
       method: 'PUT', credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -246,23 +254,13 @@ let updatePreviewTimer = null;
 function updatePreview() {
   clearTimeout(updatePreviewTimer);
   updatePreviewTimer = setTimeout(() => {
-    const payload = {
-      ...currentConfig,
-      default_client_model: defaultClientModel.value || null,
-      proxy_auth_token: proxyAuthTokenInput.value.trim() || null,
-    };
-    preview.textContent = JSON.stringify(payload, null, 2);
+    preview.textContent = JSON.stringify(buildPayload(), null, 2);
   }, 300);
 }
 
 function updatePreviewNow() {
   clearTimeout(updatePreviewTimer);
-  const payload = {
-    ...currentConfig,
-    default_client_model: defaultClientModel.value || null,
-    proxy_auth_token: proxyAuthTokenInput.value.trim() || null,
-  };
-  preview.textContent = JSON.stringify(payload, null, 2);
+  preview.textContent = JSON.stringify(buildPayload(), null, 2);
 }
 
 // ── Sorting ──
@@ -793,6 +791,12 @@ function providerFormHtml(item) {
         </select>
       </div>
       <div class="form-group">
+        <label class="checkbox-wrapper">
+          <input id="mf-auto_disable_on_error" type="checkbox" ${p.auto_disable_on_error!==false?'checked':''} />
+          <span class="checkbox-label">错误累计自动禁用 Key（部分不稳定供应商可关闭此功能，调用成功后错误计数自动清零）</span>
+        </label>
+      </div>
+      <div class="form-group">
         <span class="form-label">timeout_seconds</span>
         <input id="mf-timeout_seconds" type="number" min="1" value="${p.timeout_seconds||300}" />
       </div>
@@ -879,6 +883,7 @@ function collectProviderForm() {
     timeout_seconds: Number($('#mf-timeout_seconds').value || 300),
     stream_idle_timeout_seconds: Number($('#mf-stream_idle_timeout_seconds').value || 120),
     enabled: $('#mf-enabled').checked,
+    auto_disable_on_error: $('#mf-auto_disable_on_error').checked,
     headers: parseJsonSafe($('#mf-headers').value, {}),
     description: $('#mf-description').value.trim(),
   };
@@ -926,6 +931,7 @@ $('#logoutBtn').addEventListener('click', async () => {
 });
 defaultClientModel.addEventListener('change', updatePreview);
 proxyAuthTokenInput.addEventListener('input', updatePreview);
+keyMaxErrorsInput.addEventListener('input', updatePreview);
 
 // ── Init ──
 ensureSession().then(loadConfig).catch(e => setStatus(e.message, true));
