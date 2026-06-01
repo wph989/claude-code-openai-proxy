@@ -97,6 +97,14 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     return { provider_id: providerId, keys };
   });
 
+  app.get('/api/keys/:providerId/export', async (request, reply) => {
+    if (!(await verifyAdminAuth(request, reply))) return;
+    const { providerId } = request.params as { providerId: string };
+    const keys = app.runtimeConfigManager.getKeyStates(providerId);
+    const text = keys.map((k) => k.key).join('\n');
+    void reply.type('text/plain; charset=utf-8').header('content-disposition', `attachment; filename="${providerId}-keys.txt"`).send(text);
+  });
+
   app.put('/api/keys/:providerId/:keyIndex/enable', async (request, reply) => {
     if (!(await verifyAdminAuth(request, reply))) return;
     const { providerId, keyIndex } = request.params as { providerId: string; keyIndex: string };
@@ -181,6 +189,22 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
       };
     } catch (err) {
       return reply.code(400).send({ message: err instanceof Error ? err.message : '添加失败。' });
+    }
+  });
+
+  app.put('/api/keys/:providerId/:keyIndex/note', async (request, reply) => {
+    if (!(await verifyAdminAuth(request, reply))) return;
+    const { providerId, keyIndex } = request.params as { providerId: string; keyIndex: string };
+    const idx = parseInt(keyIndex, 10);
+    if (isNaN(idx) || idx < 0) {
+      return reply.code(400).send({ message: '无效的 keyIndex。' });
+    }
+    const body = (request.body || {}) as { note?: string };
+    try {
+      await app.runtimeConfigManager.updateKeyState(providerId, idx, { note: String(body.note ?? '').trim() || undefined });
+      return { message: '备注已更新。', provider_id: providerId, key_index: idx };
+    } catch (err) {
+      return reply.code(400).send({ message: err instanceof Error ? err.message : '更新备注失败。' });
     }
   });
 

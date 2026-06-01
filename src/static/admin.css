@@ -302,6 +302,11 @@ body {
 .key-col-actions { white-space: nowrap; text-align: right; }
 .key-error-detail { display: inline-block; font-size: 11px; color: #ffaa44; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .key-note { display: inline-block; margin-left: 8px; font-size: 11px; color: var(--text-dim); font-style: italic; }
+.key-note-input { width: 100%; padding: 4px 8px; font-size: 12px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 4px; outline: none; }
+.key-note-input:focus { border-color: var(--border-focus); }
+.key-col-note { min-width: 120px; }
+.toggle-enabled { cursor: pointer; user-select: none; transition: opacity 0.15s; }
+.toggle-enabled:hover { opacity: 0.7; }
 .key-list-preview { margin: 8px 0; max-height: 120px; overflow-y: auto; border: 1px solid var(--border); background: var(--bg-input); }
 .key-list-item { padding: 6px 12px; font-size: 13px; font-family: monospace; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
 .key-list-item:last-child { border-bottom: none; }

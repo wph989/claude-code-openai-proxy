@@ -433,7 +433,15 @@ function resolveApiKeys(provider: ProviderConfig): ApiKeyEntry[] {
     }
   }
 
-  return keys;
+  const seen = new Set<string>();
+  const unique: ApiKeyEntry[] = [];
+  for (const entry of keys) {
+    if (!seen.has(entry.key)) {
+      seen.add(entry.key);
+      unique.push(entry);
+    }
+  }
+  return unique;
 }
 
 function keysEqual(a: ApiKeyEntry[], b: ApiKeyEntry[]): boolean {

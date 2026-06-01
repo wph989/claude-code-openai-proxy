@@ -368,8 +368,8 @@ function renderProviderRow(p, idx) {
   const strat = strategyLabel(p.key_rotation_strategy);
   const typeLabel = p.provider_type === 'anthropic' ? 'Anthropic' : 'OpenAI';
   const badge = p.enabled !== false
-    ? '<span class="badge badge-on">启用</span>'
-    : '<span class="badge badge-off">停用</span>';
+    ? `<span class="badge badge-on toggle-enabled" data-idx="${idx}" data-type="provider" title="点击停用">启用</span>`
+    : `<span class="badge badge-off toggle-enabled" data-idx="${idx}" data-type="provider" title="点击启用">停用</span>`;
   const keys = getKeyArray(p);
   const stats = countKeyStats(keys);
   const keySummary = keys.length > 0
@@ -399,31 +399,30 @@ function renderKeyPanelHtml(providerId) {
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i];
     const enabledBadge = k.enabled
-      ? '<span class="badge badge-on">启用</span>'
-      : (k.auto_disabled_at ? '<span class="badge badge-auto-off">自动禁用</span>' : '<span class="badge badge-off">手动禁用</span>');
+      ? `<span class="badge badge-on toggle-enabled" data-type="key" data-provider="${esc(providerId)}" data-idx="${i}" title="点击禁用">启用</span>`
+      : (k.auto_disabled_at
+        ? `<span class="badge badge-auto-off toggle-enabled" data-type="key" data-provider="${esc(providerId)}" data-idx="${i}" title="点击启用">自动禁用</span>`
+        : `<span class="badge badge-off toggle-enabled" data-type="key" data-provider="${esc(providerId)}" data-idx="${i}" title="点击启用">手动禁用</span>`);
 
     const errorBadge = k.error_count > 0
       ? `<span class="badge ${k.error_count >= 3 ? 'badge-warn' : 'badge-info'}">错误 ${k.error_count} 次</span>`
       : '<span class="text-dim">无错误</span>';
 
-    let actions = '';
-    if (k.enabled) {
-      actions = `<button class="btn-icon danger key-action-btn" data-provider="${esc(providerId)}" data-idx="${i}" data-action="disable">禁用</button>`;
-    } else {
-      actions = `<button class="btn-icon key-action-btn" data-provider="${esc(providerId)}" data-idx="${i}" data-action="enable" style="color:var(--success);border-color:rgba(0,200,83,0.3)">启用</button>`;
-    }
-    actions += `<button class="btn-icon key-action-btn" data-provider="${esc(providerId)}" data-idx="${i}" data-action="reset">重置</button>`;
+    let actions = `<button class="btn-icon key-action-btn" data-provider="${esc(providerId)}" data-idx="${i}" data-action="reset">重置</button>`;
     actions += `<button class="btn-icon danger key-delete-btn" data-provider="${esc(providerId)}" data-idx="${i}">删除</button>`;
 
     const lastError = k.last_error_message
       ? `<span class="key-error-detail" title="${esc(k.last_error_message)}">${esc(k.last_error_message)} · ${formatTime(k.last_error_at)}</span>`
       : '';
 
-    const noteStr = k.note ? `<span class="key-note">${esc(k.note)}</span>` : '';
+    const noteStr = k.note ? `<span class="key-note" title="${esc(k.note)}">${esc(k.note)}</span>` : '';
 
     rows += `<tr class="key-detail-row">
       <td class="key-col-index">${i + 1}</td>
       <td class="key-col-key" title="${esc(k.key)}">${maskKey(k.key)} ${noteStr}</td>
+      <td class="key-col-note">
+        <input class="key-note-input" data-provider="${esc(providerId)}" data-idx="${i}" value="${esc(k.note || '')}" placeholder="备注..." />
+      </td>
       <td class="key-col-status">${enabledBadge}</td>
       <td class="key-col-errors">${errorBadge}${lastError ? '<br>' + lastError : ''}</td>
       <td class="key-col-time">${k.auto_disabled_at ? formatTime(k.auto_disabled_at) : (k.disabled_at ? formatTime(k.disabled_at) : '-')}</td>
@@ -435,6 +434,7 @@ function renderKeyPanelHtml(providerId) {
     <div class="key-panel">
       <div class="key-panel-header">
         <h3>API Keys — ${esc(providerId)}</h3>
+        <button class="btn btn-small key-export-btn" data-provider="${esc(providerId)}">导出所有 Key</button>
         <button class="btn btn-small key-reset-all-btn" data-provider="${esc(providerId)}">一键重置所有 Key</button>
         <button class="btn btn-small key-refresh-btn" data-provider="${esc(providerId)}">刷新</button>
       </div>
@@ -447,6 +447,7 @@ function renderKeyPanelHtml(providerId) {
         <thead><tr>
           <th style="width:40px">#</th>
           <th>Key</th>
+          <th style="width:140px">备注</th>
           <th style="width:120px">状态</th>
           <th style="width:180px">错误</th>
           <th style="width:140px">禁用时间</th>
@@ -460,8 +461,8 @@ function renderKeyPanelHtml(providerId) {
 
 function renderModelRow(m, idx, providerIds) {
   const badge = m.enabled !== false
-    ? '<span class="badge badge-on">启用</span>'
-    : '<span class="badge badge-off">停用</span>';
+    ? `<span class="badge badge-on toggle-enabled" data-idx="${idx}" data-type="model" title="点击停用">启用</span>`
+    : `<span class="badge badge-off toggle-enabled" data-idx="${idx}" data-type="model" title="点击启用">停用</span>`;
   return `<tr>
     <td class="col-model">${esc(m.client_model)}</td>
     <td>${esc(m.provider_id)}</td>
@@ -529,8 +530,53 @@ function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// ── Event delegation for dynamic table content
+tableContainer.addEventListener('change', (e) => {
+  const input = e.target;
+  if (input.classList.contains('key-note-input')) {
+    const providerId = input.dataset.provider;
+    const keyIndex = parseInt(input.dataset.idx, 10);
+    const note = input.value.trim();
+    fetch(`/api/keys/${encodeURIComponent(providerId)}/${keyIndex}/note`, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note })
+    })
+    .then(res => res.json().then(data => ({ ok: res.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.message || '更新失败');
+      renderKeyPanel(providerId);
+      loadConfig();
+    })
+    .catch(err => Dialog.alert('错误', '备注更新失败：' + err.message));
+    return;
+  }
+});
 tableContainer.addEventListener('click', (e) => {
+  // handle toggle-enabled clicks on span/button
+  const toggleTarget = e.target.closest('.toggle-enabled');
+  if (toggleTarget) {
+    const type = toggleTarget.dataset.type;
+    const idx = parseInt(toggleTarget.dataset.idx);
+    if (type === 'provider' || type === 'model') {
+      const arr = type === 'provider' ? currentConfig.providers : currentConfig.models;
+      if (idx >= 0 && idx < arr.length) {
+        arr[idx].enabled = arr[idx].enabled === false ? true : false;
+        renderTable();
+        updatePreviewNow();
+      }
+    } else if (type === 'key') {
+      const providerId = toggleTarget.dataset.provider;
+      const keyIndex = parseInt(toggleTarget.dataset.idx);
+      const keys = keyStates[providerId];
+      if (keys && keys[keyIndex]) {
+        const action = keys[keyIndex].enabled ? 'disable' : 'enable';
+        keyAction(providerId, keyIndex, action);
+      }
+    }
+    return;
+  }
+
   const target = e.target.closest('button');
   if (!target) return;
 
@@ -558,6 +604,12 @@ tableContainer.addEventListener('click', (e) => {
 
   if (target.classList.contains('key-refresh-btn')) {
     renderKeyPanel(target.dataset.provider);
+    return;
+  }
+
+  if (target.classList.contains('key-export-btn')) {
+    const providerId = target.dataset.provider;
+    window.open(`/api/keys/${encodeURIComponent(providerId)}/export`, '_blank');
     return;
   }
 
