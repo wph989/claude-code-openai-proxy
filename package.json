@@ -1,6 +1,6 @@
 {
   "name": "claude-code-openai-proxy",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Claude Code 多供应商代理（TypeScript 版），对外暴露 Anthropic Messages 接口，对内转发到 OpenAI-compatible 上游。",
   "type": "module",
   "main": "dist/server.js",
