@@ -17,10 +17,17 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// 转发时需要剥离的 hop-by-hop 头和 auth 头（auth 由上游 key 替换）
+const HEADERS_TO_STRIP = new Set([
+  'host', 'connection', 'keep-alive', 'transfer-encoding',
+  'content-length', 'te', 'trailer', 'upgrade',
+  'proxy-authorization', 'proxy-connection',
+  'authorization', 'x-api-key',
+]);
+
 /**
  * 上游请求服务：
- * - 统一构造 OpenAI-compatible 请求
- * - 流式请求自动打开 include_usage，便于从供应商响应中提取 token
+ * - 保留原始请求 headers 和 body，仅替换 auth、model 等必要字段
  * - 支持多 API Key 轮询和 429 自动切换
  */
 export class UpstreamService {
@@ -37,12 +44,21 @@ export class UpstreamService {
     apiKey?: string;
     requestId: string;
     sessionId: string;
+    incomingHeaders?: Record<string, string | string[] | undefined>;
     anthropicVersion?: string;
     anthropicBeta?: string;
   }): Headers {
     const headers = new Headers();
+
+    if (params.incomingHeaders) {
+      for (const [key, value] of Object.entries(params.incomingHeaders)) {
+        if (value == null) continue;
+        if (HEADERS_TO_STRIP.has(key.toLowerCase())) continue;
+        headers.set(key, Array.isArray(value) ? value.join(', ') : value);
+      }
+    }
+
     headers.set('content-type', 'application/json');
-    headers.set('accept', 'application/json');
     headers.set('x-request-id', params.requestId);
     headers.set('x-claude-code-session-id', params.sessionId);
 
@@ -74,6 +90,7 @@ export class UpstreamService {
     timeoutMs?: number;
     requestId: string;
     sessionId: string;
+    incomingHeaders?: Record<string, string | string[] | undefined>;
     anthropicVersion?: string;
     anthropicBeta?: string;
   }): { response: Promise<Response>; usedKey: string | undefined } {
@@ -85,6 +102,7 @@ export class UpstreamService {
         apiKey,
         requestId: params.requestId,
         sessionId: params.sessionId,
+        incomingHeaders: params.incomingHeaders,
         anthropicVersion: params.anthropicVersion,
         anthropicBeta: params.anthropicBeta,
       }),
@@ -96,21 +114,6 @@ export class UpstreamService {
     return { response: fetch(params.url, fetchParams), usedKey: apiKey };
   }
 
-  buildPayload(route: ResolvedRoute, payload: Record<string, unknown>): Record<string, unknown> {
-    const merged: Record<string, unknown> = {
-      ...payload,
-      model: route.upstream_model,
-      ...route.extra_body
-    };
-    if (merged.stream === true) {
-      merged.stream_options = {
-        include_usage: true,
-        ...(isPlainObject(merged.stream_options) ? merged.stream_options as Record<string, unknown> : {})
-      };
-    }
-    return merged;
-  }
-
   async postChatCompletions(params: {
     provider: ResolvedProvider;
     route: ResolvedRoute;
@@ -118,6 +121,7 @@ export class UpstreamService {
     payload: Record<string, unknown>;
     requestId: string;
     sessionId: string;
+    incomingHeaders?: Record<string, string | string[] | undefined>;
     anthropicVersion?: string;
     anthropicBeta?: string;
   }): Promise<Response> {
@@ -134,6 +138,7 @@ export class UpstreamService {
     payload: Record<string, unknown>;
     requestId: string;
     sessionId: string;
+    incomingHeaders?: Record<string, string | string[] | undefined>;
     anthropicVersion?: string;
     anthropicBeta?: string;
   }): Promise<Response> {
@@ -151,13 +156,13 @@ export class UpstreamService {
     url: string;
     requestId: string;
     sessionId: string;
+    incomingHeaders?: Record<string, string | string[] | undefined>;
     anthropicVersion?: string;
     anthropicBeta?: string;
   }): Promise<Response> {
-    const payload = this.buildPayload(params.route, params.payload);
-    const body = JSON.stringify(payload);
+    const body = JSON.stringify(params.payload);
 
-    const timeoutMs = payload.stream === true
+    const timeoutMs = params.payload.stream === true
       ? undefined
       : Math.max(1000, params.provider.timeout_seconds * 1000 || settings.requestTimeoutMs);
 
@@ -191,6 +196,7 @@ export class UpstreamService {
         timeoutMs,
         requestId: params.requestId,
         sessionId: params.sessionId,
+        incomingHeaders: params.incomingHeaders,
         anthropicVersion: params.anthropicVersion,
         anthropicBeta: params.anthropicBeta,
       });

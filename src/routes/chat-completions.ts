@@ -42,6 +42,12 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
       model: route.upstream_model,
       ...route.extra_body
     };
+    if (upstreamPayload.stream === true) {
+      upstreamPayload.stream_options = {
+        include_usage: true,
+        ...(isPlainObject(upstreamPayload.stream_options) ? upstreamPayload.stream_options as Record<string, unknown> : {})
+      };
+    }
 
     log('info', '收到 OpenAI Chat Completions 请求', {
       provider_id: provider.provider_id,
@@ -56,7 +62,8 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
       rotator,
       payload: upstreamPayload,
       requestId,
-      sessionId
+      sessionId,
+      incomingHeaders: request.headers as Record<string, string | string[] | undefined>
     });
 
     if (payload.stream !== true) {
@@ -139,4 +146,8 @@ async function pipeOpenAISse(params: {
   } finally {
     output.end();
   }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }

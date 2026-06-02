@@ -105,6 +105,7 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
         rotator,
         requestId,
         sessionId,
+        incomingHeaders: request.headers as Record<string, string | string[] | undefined>,
         anthropicVersion,
         anthropicBeta
       });
@@ -129,6 +130,9 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
     if (tools?.length) {
       openAIPayload.tools = tools;
     }
+    if (openAIPayload.stream === true) {
+      openAIPayload.stream_options = { include_usage: true };
+    }
 
     if (payload.stream !== true) {
       const upstreamResponse = await app.upstreamService.postChatCompletions({
@@ -138,6 +142,7 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
         payload: openAIPayload,
         requestId,
         sessionId,
+        incomingHeaders: request.headers as Record<string, string | string[] | undefined>,
         anthropicVersion,
         anthropicBeta
       });
@@ -165,6 +170,7 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
       payload: openAIPayload,
       requestId,
       sessionId,
+      incomingHeaders: request.headers as Record<string, string | string[] | undefined>,
       anthropicVersion,
       anthropicBeta
     });
@@ -205,24 +211,18 @@ async function handleAnthropicPassthrough(
     rotator: unknown;
     requestId: string;
     sessionId: string;
+    incomingHeaders?: Record<string, string | string[] | undefined>;
     anthropicVersion?: string;
     anthropicBeta?: string;
   }
 ): Promise<unknown> {
-  const { payload, route, provider, rotator, requestId, sessionId, anthropicVersion, anthropicBeta } = params;
+  const { payload, route, provider, rotator, requestId, sessionId, incomingHeaders, anthropicVersion, anthropicBeta } = params;
 
   const upstreamPayload: Record<string, unknown> = {
+    ...(payload as unknown as Record<string, unknown>),
     model: route.upstream_model,
-    messages: payload.messages,
-    max_tokens: payload.max_tokens ?? 4096,
-    stream: payload.stream === true,
     ...route.extra_body
   };
-  if (payload.system) upstreamPayload.system = payload.system;
-  if (payload.temperature != null) upstreamPayload.temperature = payload.temperature;
-  if (payload.top_p != null) upstreamPayload.top_p = payload.top_p;
-  if (payload.stop_sequences?.length) upstreamPayload.stop_sequences = payload.stop_sequences;
-  if (payload.tools?.length) upstreamPayload.tools = payload.tools;
 
   const upstreamResponse = await app.upstreamService.postMessages({
     provider: provider as Parameters<typeof app.upstreamService.postMessages>[0]['provider'],
@@ -231,6 +231,7 @@ async function handleAnthropicPassthrough(
     payload: upstreamPayload,
     requestId,
     sessionId,
+    incomingHeaders,
     anthropicVersion,
     anthropicBeta
   });
