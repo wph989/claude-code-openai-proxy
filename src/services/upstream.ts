@@ -2,7 +2,6 @@ import { setGlobalDispatcher, Agent } from 'undici';
 import { settings } from '../config.js';
 import type { ResolvedProvider, ResolvedRoute } from '../models.js';
 import type { ApiKeyRotator } from './api-key-rotator.js';
-import { log } from '../utils/logger.js';
 
 // 设置全局连接池配置
 const agent = new Agent({
@@ -12,10 +11,6 @@ const agent = new Agent({
   pipelining: 1
 });
 setGlobalDispatcher(agent);
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
 
 // 转发时需要剥离的 hop-by-hop 头和 auth 头（auth 由上游 key 替换）
 const HEADERS_TO_STRIP = new Set([
@@ -166,62 +161,44 @@ export class UpstreamService {
       ? undefined
       : Math.max(1000, params.provider.timeout_seconds * 1000 || settings.requestTimeoutMs);
 
-    let lastResponse: Response | null = null;
-    let usedKey: string | undefined;
+    if (params.rotator && !params.rotator.hasAvailableKey()) {
+      throw new Error(`供应商 ${params.provider.provider_id} 的所有 API Key 均不可用`);
+    }
 
-    for (let attempt = 0; attempt <= settings.maxRetries; attempt++) {
-      if (attempt > 0) {
-        const delay = Math.min(
-          settings.retryBaseDelayMs * Math.pow(2, attempt - 1),
-          30000
-        );
-        log('info', '重试请求（指数退避）', {
-          attempt,
-          delay_ms: delay,
-          url: params.url
-        });
-        await sleep(delay);
-      }
+    const result = this.doFetch({
+      url: params.url,
+      provider: params.provider,
+      rotator: params.rotator,
+      payload: body,
+      timeoutMs,
+      requestId: params.requestId,
+      sessionId: params.sessionId,
+      incomingHeaders: params.incomingHeaders,
+      anthropicVersion: params.anthropicVersion,
+      anthropicBeta: params.anthropicBeta,
+    });
 
-      if (params.rotator && !params.rotator.hasAvailableKey()) {
-        if (lastResponse) return lastResponse;
-        throw new Error(`供应商 ${params.provider.provider_id} 的所有 API Key 均不可用`);
-      }
+    const response = await result.response;
+    const usedKey = result.usedKey;
 
-      const result = this.doFetch({
-        url: params.url,
-        provider: params.provider,
-        rotator: params.rotator,
-        payload: body,
-        timeoutMs,
-        requestId: params.requestId,
-        sessionId: params.sessionId,
-        incomingHeaders: params.incomingHeaders,
-        anthropicVersion: params.anthropicVersion,
-        anthropicBeta: params.anthropicBeta,
-      });
-
-      lastResponse = await result.response;
-      usedKey = result.usedKey;
-
-      if (lastResponse.ok) {
-        if (params.rotator && usedKey) {
-          params.rotator.markSuccess(usedKey);
-        }
-        return lastResponse;
-      }
-
+    if (response.ok) {
       if (params.rotator && usedKey) {
-        const errorText = `${lastResponse.status} ${lastResponse.statusText}`;
-        params.rotator.markError(usedKey, errorText);
+        params.rotator.markSuccess(usedKey);
       }
+      return response;
+    }
 
-      if (!params.rotator || params.rotator.allUnavailable()) {
-        return lastResponse;
+    if (params.rotator && usedKey) {
+      const bodyText = await readResponseText(response);
+      const errorText = summarizeUpstreamError(response, bodyText);
+      if (isQuotaLimitError(bodyText)) {
+        params.rotator.markQuotaError(usedKey, errorText);
+      } else {
+        params.rotator.markError(usedKey, errorText);
       }
     }
 
-    return lastResponse!;
+    return response;
   }
 
   async countTokensViaProviderResponse(params: {
@@ -311,6 +288,48 @@ export async function safeJson(response: Response): Promise<Record<string, unkno
   } catch {
     return { raw: text };
   }
+}
+
+export function isQuotaLimitError(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return [
+    'quota',
+    'rate limit',
+    'rate_limit',
+    'ratelimit',
+    'limit exceeded',
+    'exceeded limit',
+    'too many requests',
+    'insufficient quota',
+    'usage limit',
+    'billing hard limit',
+    '限额',
+    '限流',
+    '配额',
+    '额度',
+    '超限',
+    '超过限制',
+    '请求过多',
+    '频率限制',
+    '余额不足',
+    '用量不足',
+    '用量已达'
+  ].some((keyword) => normalized.includes(keyword));
+}
+
+async function readResponseText(response: Response): Promise<string> {
+  try {
+    return await response.clone().text();
+  } catch {
+    return '';
+  }
+}
+
+function summarizeUpstreamError(response: Response, bodyText: string): string {
+  const detail = bodyText.trim().replace(/\s+/g, ' ').slice(0, settings.maxResponseBodyChars);
+  return detail
+    ? `${response.status} ${response.statusText}: ${detail}`
+    : `${response.status} ${response.statusText}`;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -64,10 +64,6 @@ LOG_LEVEL=info
 LOG_FORMAT=json
 LOG_DETAILED=false
 
-# 重试配置（429 限流响应时的指数退避重试）
-MAX_RETRIES=3
-RETRY_BASE_DELAY_MS=1000
-
 # API Key 错误自动禁用（累计错误达到 KEY_MAX_ERRORS 次后自动禁用，true=启用，false=禁用此功能）
 # 部分供应商不稳定时可设为 false，或在 config.json 的 provider 中设置 auto_disable_on_error: false
 KEY_AUTO_DISABLE=true
@@ -120,8 +116,6 @@ export interface AppSettings {
   logRotation: LogRotation;
   logMaxFiles: number;
   logMaxSize?: number;
-  maxRetries: number;
-  retryBaseDelayMs: number;
   maxSockets: number;
   keepAliveTimeout: number;
   rateLimitMax: number;
@@ -178,8 +172,6 @@ export const settings: AppSettings = {
   logRotation: validLogRotation(process.env.LOG_ROTATION),
   logMaxFiles: toNumber(process.env.LOG_MAX_FILES, 30),
   logMaxSize: toNumber(process.env.LOG_MAX_SIZE, 50 * 1024 * 1024),
-  maxRetries: toNumber(process.env.MAX_RETRIES, 3),
-  retryBaseDelayMs: toNumber(process.env.RETRY_BASE_DELAY_MS, 1000),
   maxSockets: toNumber(process.env.MAX_SOCKETS, 100),
   keepAliveTimeout: toNumber(process.env.KEEP_ALIVE_TIMEOUT, 60000),
   rateLimitMax: toNumber(process.env.RATE_LIMIT_MAX, 100),

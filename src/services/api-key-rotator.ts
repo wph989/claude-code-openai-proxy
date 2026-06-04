@@ -9,6 +9,7 @@ export type KeyStateChange = {
   last_error_at?: number | null;
   last_error_message?: string | null;
   auto_disabled_at?: number | null;
+  note?: string;
 };
 
 export class ApiKeyRotator {
@@ -17,6 +18,7 @@ export class ApiKeyRotator {
   private _autoDisable: boolean;
   private rrCounter: number = 0;
   private on429Index: number = 0;
+  private activeIndex: number | null = null;
   private _onChange?: (key: string, patch: KeyStateChange) => void;
 
   constructor(keys: ApiKeyEntry[], strategy: KeyRotationStrategy, autoDisable: boolean = true) {
@@ -56,11 +58,17 @@ export class ApiKeyRotator {
       return undefined;
     }
 
+    if (this.activeIndex != null && this._keys[this.activeIndex]?.enabled) {
+      return this._keys[this.activeIndex].key;
+    }
+
+    const start = this.activeIndex == null ? this.rrCounter : this.activeIndex + 1;
     for (let i = 0; i < this._keys.length; i++) {
-      const idx = (this.rrCounter + i) % this._keys.length;
+      const idx = (start + i) % this._keys.length;
       const entry = this._keys[idx];
       if (entry.enabled) {
-        this.rrCounter = idx + 1;
+        this.activeIndex = idx;
+        this.rrCounter = idx;
         return entry.key;
       }
     }
@@ -87,6 +95,29 @@ export class ApiKeyRotator {
       this.on429Index = (idx + 1) % this._keys.length;
     }
 
+    Object.assign(entry, patch);
+    this._onChange?.(key, patch);
+  }
+
+  markQuotaError(key: string, errorMessage: string): void {
+    const idx = this._keys.findIndex((k) => k.key === key);
+    if (idx === -1) return;
+
+    const entry = this._keys[idx];
+    const now = Date.now();
+    const patch: KeyStateChange = {
+      enabled: false,
+      error_count: entry.error_count + 1,
+      last_error_at: now,
+      last_error_message: errorMessage,
+      auto_disabled_at: now
+    };
+    if (!entry.note) {
+      patch.note = `auto disabled: ${errorMessage}`;
+    }
+    if (this._strategy === KeyRotationStrategy.on_429) {
+      this.on429Index = (idx + 1) % this._keys.length;
+    }
     Object.assign(entry, patch);
     this._onChange?.(key, patch);
   }
@@ -127,13 +158,20 @@ export class ApiKeyRotator {
     this._onChange?.(key, patch);
   }
 
-  disableKey(key: string): void {
+  disableKey(key: string, reason?: string): void {
     const entry = this._keys.find((k) => k.key === key);
     if (!entry) return;
     const patch: KeyStateChange = {
       enabled: false,
       disabled_at: Date.now()
     };
+    if (reason) {
+      patch.last_error_at = Date.now();
+      patch.last_error_message = reason;
+      if (!entry.note) {
+        patch.note = reason;
+      }
+    }
     Object.assign(entry, patch);
     this._onChange?.(key, patch);
   }
