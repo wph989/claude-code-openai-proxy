@@ -5,7 +5,7 @@ import { settings } from '../config.js';
 import type { AnthropicMessagesRequest, CountTokensRequest } from '../models.js';
 import { bridgeOpenAIStreamToAnthropic } from '../services/stream-bridge.js';
 import { anthropicToOpenAIMessages, anthropicToolsToOpenAI, openAIToAnthropicResponse } from '../services/transformers.js';
-import { safeJson } from '../services/upstream.js';
+import { releaseUpstreamResponse, safeJson } from '../services/upstream.js';
 import { createId } from '../utils/id.js';
 import { log, logDetailed } from '../utils/logger.js';
 
@@ -312,6 +312,7 @@ async function pipeUpstreamSse(params: {
     log('error', '流式透传失败', { error });
     output.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'api_error', message: '流式透传失败。' } })}\n\n`);
   } finally {
+    releaseUpstreamResponse(upstreamResponse);
     output.end();
   }
 }

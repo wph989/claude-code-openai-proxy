@@ -1,7 +1,9 @@
 import { setGlobalDispatcher, Agent } from 'undici';
 import { settings } from '../config.js';
 import type { ResolvedProvider, ResolvedRoute } from '../models.js';
-import type { ApiKeyRotator } from './api-key-rotator.js';
+import type { ApiKeyRotator, KeyLease } from './api-key-rotator.js';
+
+const responseLeases = new WeakMap<Response, { rotator: ApiKeyRotator; lease: KeyLease }>();
 
 // 设置全局连接池配置
 const agent = new Agent({
@@ -77,7 +79,7 @@ export class UpstreamService {
     return headers;
   }
 
-  private doFetch(params: {
+  private async doFetch(params: {
     url: string;
     provider: ResolvedProvider;
     rotator?: ApiKeyRotator;
@@ -88,8 +90,9 @@ export class UpstreamService {
     incomingHeaders?: Record<string, string | string[] | undefined>;
     anthropicVersion?: string;
     anthropicBeta?: string;
-  }): { response: Promise<Response>; usedKey: string | undefined } {
-    const apiKey = params.rotator?.pick();
+  }): Promise<{ response: Response; lease: KeyLease | undefined }> {
+    const lease = params.rotator ? await params.rotator.acquire() : undefined;
+    const apiKey = lease?.key;
     const fetchParams: RequestInit = {
       method: 'POST',
       headers: this.buildHeadersWithKey({
@@ -106,7 +109,15 @@ export class UpstreamService {
     if (params.timeoutMs) {
       fetchParams.signal = AbortSignal.timeout(params.timeoutMs);
     }
-    return { response: fetch(params.url, fetchParams), usedKey: apiKey };
+    try {
+      return { response: await fetch(params.url, fetchParams), lease };
+    } catch (error) {
+      if (params.rotator && lease) {
+        params.rotator.markNetworkError(lease.key, error instanceof Error ? error.message : String(error));
+        params.rotator.release(lease);
+      }
+      throw error;
+    }
   }
 
   async postChatCompletions(params: {
@@ -165,7 +176,7 @@ export class UpstreamService {
       throw new Error(`供应商 ${params.provider.provider_id} 的所有 API Key 均不可用`);
     }
 
-    const result = this.doFetch({
+    const result = await this.doFetch({
       url: params.url,
       provider: params.provider,
       rotator: params.rotator,
@@ -178,12 +189,19 @@ export class UpstreamService {
       anthropicBeta: params.anthropicBeta,
     });
 
-    const response = await result.response;
-    const usedKey = result.usedKey;
+    const response = result.response;
+    const usedKey = result.lease?.key;
 
     if (response.ok) {
       if (params.rotator && usedKey) {
         params.rotator.markSuccess(usedKey);
+      }
+      if (params.rotator && result.lease) {
+        if (params.payload.stream === true) {
+          responseLeases.set(response, { rotator: params.rotator, lease: result.lease });
+        } else {
+          params.rotator.release(result.lease);
+        }
       }
       return response;
     }
@@ -191,10 +209,16 @@ export class UpstreamService {
     if (params.rotator && usedKey) {
       const bodyText = await readResponseText(response);
       const errorText = summarizeUpstreamError(response, bodyText);
-      if (isQuotaLimitError(bodyText)) {
+      const classification = classifyUpstreamError(response.status, response.statusText, bodyText);
+      if (classification.category === 'hard_limit') {
         params.rotator.markQuotaError(usedKey, errorText);
+      } else if (classification.category === 'rate_limit') {
+        params.rotator.markRateLimited(usedKey, errorText);
       } else {
         params.rotator.markError(usedKey, errorText);
+      }
+      if (result.lease) {
+        params.rotator.release(result.lease);
       }
     }
 
@@ -257,7 +281,7 @@ export class UpstreamService {
       ...params.route.extra_body
     });
 
-    const { response } = this.doFetch({
+    const result = await this.doFetch({
       url,
       provider: params.provider,
       rotator: params.rotator,
@@ -268,16 +292,35 @@ export class UpstreamService {
       anthropicBeta: params.anthropicBeta,
     });
 
-    const res = await response;
-    const data = await safeJson(res);
-    if (!res.ok) {
-      throw new Error(`上游 token 统计失败：${JSON.stringify(data)}`);
+    try {
+      const data = await safeJson(result.response);
+      if (!result.response.ok) {
+        if (params.rotator && result.lease) {
+          const errorText = summarizeUpstreamError(result.response, JSON.stringify(data));
+          const classification = classifyUpstreamError(result.response.status, result.response.statusText, JSON.stringify(data));
+          if (classification.category === 'hard_limit') {
+            params.rotator.markQuotaError(result.lease.key, errorText);
+          } else if (classification.category === 'rate_limit') {
+            params.rotator.markRateLimited(result.lease.key, errorText);
+          } else {
+            params.rotator.markError(result.lease.key, errorText);
+          }
+        }
+        throw new Error(`上游 token 统计失败：${JSON.stringify(data)}`);
+      }
+      if (params.rotator && result.lease) {
+        params.rotator.markSuccess(result.lease.key);
+      }
+      const inputTokens = Number(data.input_tokens ?? NaN);
+      if (!Number.isFinite(inputTokens)) {
+        throw new Error('上游响应中不存在 input_tokens');
+      }
+      return Math.trunc(inputTokens);
+    } finally {
+      if (params.rotator && result.lease) {
+        params.rotator.release(result.lease);
+      }
     }
-    const inputTokens = Number(data.input_tokens ?? NaN);
-    if (!Number.isFinite(inputTokens)) {
-      throw new Error('上游响应中不存在 input_tokens');
-    }
-    return Math.trunc(inputTokens);
   }
 }
 
@@ -291,30 +334,82 @@ export async function safeJson(response: Response): Promise<Record<string, unkno
 }
 
 export function isQuotaLimitError(text: string): boolean {
-  const normalized = text.toLowerCase();
-  return [
+  return classifyUpstreamError(400, '', text).category === 'hard_limit';
+}
+
+export function classifyUpstreamError(status: number, statusText: string, bodyText: string): { category: 'hard_limit' | 'rate_limit' | 'transient'; reason: string } {
+  const normalized = bodyText.toLowerCase();
+  const tokenLimit = [
+    'token-limit',
+    'token limit',
+    'context length',
+    'maximum context length',
+    'max tokens',
+    'tokens too long',
+    '请求 token',
+    '上下文长度',
+    '最大上下文',
+    '输入过长'
+  ];
+  if (tokenLimit.some((keyword) => normalized.includes(keyword))) {
+    return { category: 'rate_limit', reason: 'temporary token or request limit' };
+  }
+
+  const hardLimit = [
     'quota',
-    'rate limit',
-    'rate_limit',
-    'ratelimit',
-    'limit exceeded',
-    'exceeded limit',
-    'too many requests',
+    'insufficient_quota',
     'insufficient quota',
-    'usage limit',
     'billing hard limit',
+    'usage limit',
+    'invalid api key',
+    'invalid_api_key',
+    'unauthorized key',
+    'incorrect api key',
+    'api key is invalid',
+    'account banned',
+    'account suspended',
     '限额',
-    '限流',
     '配额',
     '额度',
     '超限',
     '超过限制',
-    '请求过多',
-    '频率限制',
     '余额不足',
     '用量不足',
-    '用量已达'
-  ].some((keyword) => normalized.includes(keyword));
+    '用量已达',
+    '账单硬限制',
+    '账单限制',
+    '封禁',
+    '账号封禁',
+    '账号停用',
+    '账号异常'
+  ];
+  if (hardLimit.some((keyword) => normalized.includes(keyword))) {
+    return { category: 'hard_limit', reason: 'hard limit or invalid key' };
+  }
+
+  const rateLimit = [
+    'rate limit',
+    'rate_limit',
+    'ratelimit',
+    'too many requests',
+    '限流',
+    '请求过多',
+    '频率限制'
+  ];
+  if (status === 429 || rateLimit.some((keyword) => normalized.includes(keyword))) {
+    return { category: 'rate_limit', reason: 'temporary rate limit' };
+  }
+  if (status === 401 || status === 403) {
+    return { category: 'hard_limit', reason: statusText || 'unauthorized' };
+  }
+  return { category: 'transient', reason: statusText || 'transient upstream error' };
+}
+
+export function releaseUpstreamResponse(response: Response): void {
+  const lease = responseLeases.get(response);
+  if (!lease) return;
+  lease.rotator.release(lease.lease);
+  responseLeases.delete(response);
 }
 
 async function readResponseText(response: Response): Promise<string> {

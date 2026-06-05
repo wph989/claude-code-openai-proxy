@@ -1,6 +1,7 @@
 import { PassThrough } from 'node:stream';
 import { log } from '../utils/logger.js';
 import { mapFinishReason } from './transformers.js';
+import { releaseUpstreamResponse } from './upstream.js';
 
 interface StreamMetrics {
   requestId: string;
@@ -227,6 +228,7 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
       }
     });
   } finally {
+    releaseUpstreamResponse(upstreamResponse);
     output.end();
   }
 }

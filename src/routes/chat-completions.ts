@@ -2,7 +2,7 @@ import { PassThrough } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { verifyProxyAuth } from '../auth.js';
 import { settings } from '../config.js';
-import { safeJson } from '../services/upstream.js';
+import { releaseUpstreamResponse, safeJson } from '../services/upstream.js';
 import { log } from '../utils/logger.js';
 
 export async function registerChatCompletionsRoutes(app: FastifyInstance): Promise<void> {
@@ -144,6 +144,7 @@ async function pipeOpenAISse(params: {
     output.write(`data: ${JSON.stringify({ error: { message: '流式透传失败。', type: 'api_error' } })}\n\n`);
     output.write('data: [DONE]\n\n');
   } finally {
+    releaseUpstreamResponse(upstreamResponse);
     output.end();
   }
 }

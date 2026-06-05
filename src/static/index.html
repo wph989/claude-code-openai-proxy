@@ -92,6 +92,42 @@
             <input id="keyMaxErrors" type="number" min="1" placeholder="默认 5" />
           </div>
         </div>
+        <div class="config-row" style="margin-top:24px">
+          <div>
+            <span class="form-label">防封模式</span>
+            <p class="form-hint">全局默认策略，供应商可在 JSON 中用 anti_ban 覆盖。</p>
+          </div>
+          <div>
+            <select id="antiBanMode">
+              <option value="conservative">保守模式（默认）</option>
+              <option value="throughput">吞吐模式</option>
+            </select>
+          </div>
+        </div>
+        <div class="config-row" style="margin-top:24px">
+          <div>
+            <span class="form-label">Key 防封阈值</span>
+            <p class="form-hint">控制每个 Key 的并发、最小请求间隔，以及普通 429 后的随机延迟范围。</p>
+          </div>
+          <div class="form-grid">
+            <div class="form-group">
+              <span class="form-label">最大并发</span>
+              <input id="antiBanMaxConcurrent" type="number" min="1" placeholder="1" />
+            </div>
+            <div class="form-group">
+              <span class="form-label">最小间隔 ms</span>
+              <input id="antiBanMinInterval" type="number" min="0" placeholder="1000" />
+            </div>
+            <div class="form-group">
+              <span class="form-label">429 延迟最小 ms</span>
+              <input id="antiBanDelayMin" type="number" min="0" placeholder="5000" />
+            </div>
+            <div class="form-group">
+              <span class="form-label">429 延迟最大 ms</span>
+              <input id="antiBanDelayMax" type="number" min="0" placeholder="10000" />
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 

@@ -5,6 +5,7 @@ import { setRuntimeProxyToken } from '../auth.js';
 import { ApiKeyRotator, type KeyStateChange } from './api-key-rotator.js';
 import {
   KeyRotationStrategy,
+  type AntiBanConfig,
   type ApiKeyEntry,
   type ProviderConfig,
   type ResolvedProvider,
@@ -117,7 +118,8 @@ export class RuntimeConfigManager {
 
     const apiKeys = resolveApiKeys(provider);
     const autoDisable = provider.auto_disable_on_error !== false;
-    const rotator = this.getOrCreateRotator(provider.provider_id, apiKeys, provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin, autoDisable);
+    const antiBan = resolveAntiBanConfig(provider.anti_ban);
+    const rotator = this.getOrCreateRotator(provider.provider_id, apiKeys, provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin, autoDisable, antiBan);
 
     const resolvedProvider: ResolvedProvider = {
       provider_id: provider.provider_id,
@@ -130,6 +132,7 @@ export class RuntimeConfigManager {
       stream_idle_timeout_seconds: provider.stream_idle_timeout_seconds || 120,
       enabled: !!provider.enabled,
       headers: normalizeHeaders(provider.headers || {}),
+      anti_ban: antiBan,
       description: provider.description || ''
     };
 
@@ -145,12 +148,12 @@ export class RuntimeConfigManager {
     return { route: resolvedRoute, provider: resolvedProvider, rotator };
   }
 
-  private getOrCreateRotator(providerId: string, keys: ApiKeyEntry[], strategy: KeyRotationStrategy, autoDisable: boolean): ApiKeyRotator {
+  private getOrCreateRotator(providerId: string, keys: ApiKeyEntry[], strategy: KeyRotationStrategy, autoDisable: boolean, antiBan: Required<AntiBanConfig>): ApiKeyRotator {
     const existing = this.rotators.get(providerId);
-    if (existing && keysEqual(existing.keys, keys) && existing.strategy === strategy) {
+    if (existing && keysEqual(existing.keys, keys) && existing.strategy === strategy && antiBanEqual(existing.antiBan, antiBan)) {
       return existing;
     }
-    const rotator = new ApiKeyRotator(keys, strategy, autoDisable);
+    const rotator = new ApiKeyRotator(keys, strategy, autoDisable, antiBan);
     rotator.onChange = (key, patch) => this.onKeyStateChange(providerId, key, patch);
     this.rotators.set(providerId, rotator);
     return rotator;
@@ -162,8 +165,9 @@ export class RuntimeConfigManager {
       const apiKeys = resolveApiKeys(provider);
       const strategy = provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin;
       const autoDisable = provider.auto_disable_on_error !== false;
+      const antiBan = resolveAntiBanConfig(provider.anti_ban);
       if (apiKeys.length > 0) {
-        const rotator = new ApiKeyRotator(apiKeys, strategy, autoDisable);
+        const rotator = new ApiKeyRotator(apiKeys, strategy, autoDisable, antiBan);
         rotator.onChange = (key, patch) => this.onKeyStateChange(provider.provider_id, key, patch);
         this.rotators.set(provider.provider_id, rotator);
       }
@@ -210,10 +214,10 @@ export class RuntimeConfigManager {
     return this.persisting;
   }
 
-  getKeyStates(providerId: string): ApiKeyEntry[] {
+  getKeyStates(providerId: string) {
     const rotator = this.rotators.get(providerId);
     if (!rotator) return [];
-    return rotator.getKeys();
+    return rotator.getKeyStatuses();
   }
 
   async updateKeyState(providerId: string, keyIndex: number, patch: Partial<ApiKeyEntry>): Promise<void> {
@@ -449,6 +453,29 @@ function keysEqual(a: ApiKeyEntry[], b: ApiKeyEntry[]): boolean {
   return a.every((entry, i) => entry.key === b[i].key && entry.enabled === b[i].enabled);
 }
 
+function antiBanEqual(a: Required<AntiBanConfig>, b: Required<AntiBanConfig>): boolean {
+  return a.mode === b.mode
+    && a.max_concurrent === b.max_concurrent
+    && a.min_interval_ms === b.min_interval_ms
+    && a.rate_limit_delay_min_ms === b.rate_limit_delay_min_ms
+    && a.rate_limit_delay_max_ms === b.rate_limit_delay_max_ms;
+}
+
+function resolveAntiBanConfig(config?: AntiBanConfig): Required<AntiBanConfig> {
+  const mode = config?.mode ?? settings.antiBanMode;
+  const defaults = mode === 'throughput'
+    ? { max_concurrent: 3, min_interval_ms: 100, rate_limit_delay_min_ms: 1000, rate_limit_delay_max_ms: 3000 }
+    : { max_concurrent: 1, min_interval_ms: 1000, rate_limit_delay_min_ms: 5000, rate_limit_delay_max_ms: 10000 };
+  const delayMin = Math.max(0, Math.trunc(config?.rate_limit_delay_min_ms ?? settings.key429DelayMinMs ?? defaults.rate_limit_delay_min_ms));
+  return {
+    mode,
+    max_concurrent: Math.max(1, Math.trunc(config?.max_concurrent ?? settings.keyMaxConcurrent ?? defaults.max_concurrent)),
+    min_interval_ms: Math.max(0, Math.trunc(config?.min_interval_ms ?? settings.keyMinIntervalMs ?? defaults.min_interval_ms)),
+    rate_limit_delay_min_ms: delayMin,
+    rate_limit_delay_max_ms: Math.max(delayMin, Math.trunc(config?.rate_limit_delay_max_ms ?? settings.key429DelayMaxMs ?? defaults.rate_limit_delay_max_ms))
+  };
+}
+
 function replaceEnv(value: string): string {
   const trimmed = String(value || '').trim();
   if (trimmed.startsWith('${') && trimmed.endsWith('}')) {
@@ -470,6 +497,12 @@ function applyGlobalSettings(config: RuntimeConfig): void {
   if (config.key_max_errors != null && config.key_max_errors > 0) {
     settings.keyMaxErrors = config.key_max_errors;
   }
+  const antiBan = resolveAntiBanConfig(config.anti_ban);
+  settings.antiBanMode = antiBan.mode;
+  settings.keyMaxConcurrent = antiBan.max_concurrent;
+  settings.keyMinIntervalMs = antiBan.min_interval_ms;
+  settings.key429DelayMinMs = antiBan.rate_limit_delay_min_ms;
+  settings.key429DelayMaxMs = antiBan.rate_limit_delay_max_ms;
 }
 
 export function buildDefaultRuntimeConfig(): RuntimeConfig {
@@ -497,6 +530,13 @@ export function buildDefaultRuntimeConfig(): RuntimeConfig {
       }
     ],
     default_client_model: 'claude-model',
-    proxy_auth_token: null
+    proxy_auth_token: null,
+    anti_ban: {
+      mode: 'conservative',
+      max_concurrent: 1,
+      min_interval_ms: 1000,
+      rate_limit_delay_min_ms: 5000,
+      rate_limit_delay_max_ms: 10000
+    }
   });
 }

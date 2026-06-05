@@ -1,5 +1,5 @@
 // ── State ──
-let currentConfig = { providers: [], models: [], default_client_model: null, proxy_auth_token: null };
+let currentConfig = { providers: [], models: [], default_client_model: null, proxy_auth_token: null, anti_ban: null };
 let currentTab = 'providers';
 let editingIndex = -1;        // -1 = add new
 let providerPage = 1;
@@ -23,6 +23,11 @@ const preview = $('#jsonPreview');
 const defaultClientModel = $('#defaultClientModel');
 const proxyAuthTokenInput = $('#proxyAuthToken');
 const keyMaxErrorsInput = $('#keyMaxErrors');
+const antiBanModeInput = $('#antiBanMode');
+const antiBanMaxConcurrentInput = $('#antiBanMaxConcurrent');
+const antiBanMinIntervalInput = $('#antiBanMinInterval');
+const antiBanDelayMinInput = $('#antiBanDelayMin');
+const antiBanDelayMaxInput = $('#antiBanDelayMax');
 const tabProviders = $('#tab-providers');
 const tabModels = $('#tab-models');
 const tableContainer = $('#table-container');
@@ -154,6 +159,62 @@ function formatTime(ts) {
   return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+function keyStatusLabel(status, key) {
+  if (!key.enabled) return key.auto_disabled_at ? '自动禁用' : '已禁用';
+  if (status === 'delayed') return '延迟中';
+  return '可用';
+}
+
+function keyErrorCategoryLabel(category) {
+  const labels = {
+    hard_limit: '硬限额',
+    rate_limit: '限流',
+    transient: '临时错误',
+    network: '网络错误'
+  };
+  return labels[category] || category || '';
+}
+
+function keyRuntimeReason(key) {
+  if (key.disabled_reason) return keyErrorCategoryLabel(key.last_error_category) || '不可用';
+  if (key.status === 'delayed' && key.next_available_at) return `临时限流，等待至 ${formatTime(key.next_available_at)}`;
+  if (key.last_error_category) return keyErrorCategoryLabel(key.last_error_category);
+  return '';
+}
+
+function antiBanDefaults(mode) {
+  return mode === 'throughput'
+    ? { mode: 'throughput', max_concurrent: 3, min_interval_ms: 100, rate_limit_delay_min_ms: 1000, rate_limit_delay_max_ms: 3000 }
+    : { mode: 'conservative', max_concurrent: 1, min_interval_ms: 1000, rate_limit_delay_min_ms: 5000, rate_limit_delay_max_ms: 10000 };
+}
+
+function readAntiBanConfig() {
+  const mode = antiBanModeInput.value === 'throughput' ? 'throughput' : 'conservative';
+  const defaults = antiBanDefaults(mode);
+  const maxConcurrent = parseInt(antiBanMaxConcurrentInput.value, 10);
+  const minInterval = parseInt(antiBanMinIntervalInput.value, 10);
+  const delayMin = parseInt(antiBanDelayMinInput.value, 10);
+  const delayMax = parseInt(antiBanDelayMaxInput.value, 10);
+  const normalizedDelayMin = Number.isFinite(delayMin) && delayMin >= 0 ? delayMin : defaults.rate_limit_delay_min_ms;
+  return {
+    mode,
+    max_concurrent: Number.isFinite(maxConcurrent) && maxConcurrent > 0 ? maxConcurrent : defaults.max_concurrent,
+    min_interval_ms: Number.isFinite(minInterval) && minInterval >= 0 ? minInterval : defaults.min_interval_ms,
+    rate_limit_delay_min_ms: normalizedDelayMin,
+    rate_limit_delay_max_ms: Number.isFinite(delayMax) && delayMax >= normalizedDelayMin ? delayMax : Math.max(normalizedDelayMin, defaults.rate_limit_delay_max_ms)
+  };
+}
+
+function fillAntiBanConfig(config) {
+  const mode = config?.mode === 'throughput' ? 'throughput' : 'conservative';
+  const defaults = antiBanDefaults(mode);
+  antiBanModeInput.value = mode;
+  antiBanMaxConcurrentInput.value = config?.max_concurrent ?? defaults.max_concurrent;
+  antiBanMinIntervalInput.value = config?.min_interval_ms ?? defaults.min_interval_ms;
+  antiBanDelayMinInput.value = config?.rate_limit_delay_min_ms ?? defaults.rate_limit_delay_min_ms;
+  antiBanDelayMaxInput.value = config?.rate_limit_delay_max_ms ?? defaults.rate_limit_delay_max_ms;
+}
+
 // ── API ──
 async function loadConfig() {
   setStatus('正在加载配置...');
@@ -164,6 +225,7 @@ async function loadConfig() {
   renderSummary(data.summary);
   proxyAuthTokenInput.value = currentConfig.proxy_auth_token || '';
   keyMaxErrorsInput.value = currentConfig.key_max_errors || '';
+  fillAntiBanConfig(currentConfig.anti_ban);
   refreshDefaultModelSelect();
   renderTable();
   updatePreviewNow();
@@ -177,6 +239,7 @@ function buildPayload() {
     default_client_model: defaultClientModel.value || null,
     proxy_auth_token: proxyAuthTokenInput.value.trim() || null,
     key_max_errors: Number.isFinite(keyMaxErrorsVal) && keyMaxErrorsVal > 0 ? keyMaxErrorsVal : null,
+    anti_ban: readAntiBanConfig(),
   };
 }
 
@@ -398,11 +461,15 @@ function renderKeyPanelHtml(providerId) {
   let rows = '';
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i];
-    const enabledBadge = k.enabled
-      ? `<span class="badge badge-on toggle-enabled" data-type="key" data-provider="${esc(providerId)}" data-idx="${i}" title="点击禁用">启用</span>`
-      : (k.auto_disabled_at
-        ? `<span class="badge badge-auto-off toggle-enabled" data-type="key" data-provider="${esc(providerId)}" data-idx="${i}" title="点击启用">自动禁用</span>`
-        : `<span class="badge badge-off toggle-enabled" data-type="key" data-provider="${esc(providerId)}" data-idx="${i}" title="点击启用">手动禁用</span>`);
+    const status = k.status || (k.enabled ? 'available' : 'disabled');
+    const statusLabel = keyStatusLabel(status, k);
+    const enabledBadge = !k.enabled
+      ? (k.auto_disabled_at
+        ? `<span class="badge badge-auto-off toggle-enabled" data-type="key" data-provider="${esc(providerId)}" data-idx="${i}" title="点击启用">${statusLabel}</span>`
+        : `<span class="badge badge-off toggle-enabled" data-type="key" data-provider="${esc(providerId)}" data-idx="${i}" title="点击启用">${statusLabel}</span>`)
+      : (status === 'delayed'
+        ? `<span class="badge badge-warn toggle-enabled" data-type="key" data-provider="${esc(providerId)}" data-idx="${i}" title="点击禁用">${statusLabel}</span>`
+        : `<span class="badge badge-on toggle-enabled" data-type="key" data-provider="${esc(providerId)}" data-idx="${i}" title="点击禁用">${statusLabel}</span>`);
 
     const errorBadge = k.error_count > 0
       ? `<span class="badge ${k.error_count >= 3 ? 'badge-warn' : 'badge-info'}">错误 ${k.error_count} 次</span>`
@@ -414,6 +481,10 @@ function renderKeyPanelHtml(providerId) {
     const lastError = k.last_error_message
       ? `<span class="key-error-detail" title="${esc(k.last_error_message)}">${esc(k.last_error_message)} · ${formatTime(k.last_error_at)}</span>`
       : '';
+    const runtimeReason = keyRuntimeReason(k);
+    const runtimeInfo = runtimeReason
+      ? `<span class="key-runtime-reason" title="${esc(k.last_error_message || k.disabled_reason || runtimeReason)}">${esc(runtimeReason)}</span>`
+      : '<span class="text-dim">-</span>';
 
     const noteStr = k.note ? `<span class="key-note" title="${esc(k.note)}">${esc(k.note)}</span>` : '';
 
@@ -425,6 +496,7 @@ function renderKeyPanelHtml(providerId) {
       </td>
       <td class="key-col-status">${enabledBadge}</td>
       <td class="key-col-errors">${errorBadge}${lastError ? '<br>' + lastError : ''}</td>
+      <td class="key-col-runtime">${runtimeInfo}</td>
       <td class="key-col-time">${k.auto_disabled_at ? formatTime(k.auto_disabled_at) : (k.disabled_at ? formatTime(k.disabled_at) : '-')}</td>
       <td class="key-col-actions">${actions}</td>
     </tr>`;
@@ -445,13 +517,14 @@ function renderKeyPanelHtml(providerId) {
       ${keys.length === 0 ? '<div class="key-panel-empty">暂无 API Key，请在上方输入框添加。</div>' : `
       <table class="key-detail-table">
         <thead><tr>
-          <th style="width:40px">#</th>
-          <th>Key</th>
-          <th style="width:140px">备注</th>
-          <th style="width:120px">状态</th>
-          <th style="width:180px">错误</th>
-          <th style="width:140px">禁用时间</th>
-          <th style="width:160px" class="col-actions">操作</th>
+          <th class="key-th-index">#</th>
+          <th class="key-th-key">Key</th>
+          <th class="key-th-note">备注</th>
+          <th class="key-th-status">状态</th>
+          <th class="key-th-errors">错误</th>
+          <th class="key-th-runtime">运行状态</th>
+          <th class="key-th-time">禁用时间</th>
+          <th class="key-th-actions col-actions">操作</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`}
@@ -775,6 +848,7 @@ function submitModal() {
         } else {
           item.api_key = existingKeys.length > 0 ? existingKeys : null;
         }
+        if (existing.anti_ban) item.anti_ban = existing.anti_ban;
         currentConfig.providers[editingIndex] = item;
       }
       else currentConfig.models[editingIndex] = item;
@@ -984,6 +1058,14 @@ $('#logoutBtn').addEventListener('click', async () => {
 defaultClientModel.addEventListener('change', updatePreview);
 proxyAuthTokenInput.addEventListener('input', updatePreview);
 keyMaxErrorsInput.addEventListener('input', updatePreview);
+antiBanModeInput.addEventListener('change', () => {
+  fillAntiBanConfig(antiBanDefaults(antiBanModeInput.value));
+  updatePreviewNow();
+});
+antiBanMaxConcurrentInput.addEventListener('input', updatePreview);
+antiBanMinIntervalInput.addEventListener('input', updatePreview);
+antiBanDelayMinInput.addEventListener('input', updatePreview);
+antiBanDelayMaxInput.addEventListener('input', updatePreview);
 
 // ── Init ──
 ensureSession().then(loadConfig).catch(e => setStatus(e.message, true));

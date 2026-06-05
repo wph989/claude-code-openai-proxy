@@ -283,7 +283,7 @@ body {
 .key-panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .key-panel-header h3 { font-family: "Playfair Display", serif; font-size: 16px; font-weight: 500; color: var(--text); }
 .key-panel-empty { padding: 24px; text-align: center; color: var(--text-dim); font-size: 14px; }
-.key-detail-table { width: 100%; border-collapse: collapse; }
+.key-detail-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .key-detail-table th {
   text-align: left; padding: 10px 16px; font-size: 11px; font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted);
@@ -294,13 +294,23 @@ body {
   color: var(--text); vertical-align: middle;
 }
 .key-detail-table tr:hover td { background: rgba(255,255,255,0.02); }
-.key-col-index { color: var(--text-dim); font-family: monospace; text-align: center; }
-.key-col-key { font-family: "JetBrains Mono","SF Mono",Consolas,monospace; font-size: 13px; }
-.key-col-status { text-align: center; }
+.key-th-index, .key-col-index { width: 44px; text-align: center; }
+.key-th-key, .key-col-key { width: 31%; }
+.key-th-note, .key-col-note { width: 14%; }
+.key-th-status, .key-col-status { width: 105px; text-align: center; }
+.key-th-errors, .key-col-errors { width: 190px; }
+.key-th-runtime, .key-col-runtime { width: 210px; }
+.key-th-time, .key-col-time { width: 150px; }
+.key-th-actions, .key-col-actions { width: 120px; }
+.key-col-index { color: var(--text-dim); font-family: monospace; }
+.key-col-key { font-family: "JetBrains Mono","SF Mono",Consolas,monospace; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.key-col-status .badge { min-width: 64px; justify-content: center; }
 .key-col-errors { font-size: 12px; }
-.key-col-time { font-size: 12px; color: var(--text-muted); font-family: monospace; }
+.key-col-runtime { font-size: 12px; color: var(--text-muted); line-height: 1.6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.key-col-time { font-size: 12px; color: var(--text-muted); font-family: monospace; white-space: nowrap; }
 .key-col-actions { white-space: nowrap; text-align: right; }
 .key-error-detail { display: inline-block; font-size: 11px; color: #ffaa44; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.key-runtime-reason { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ffaa44; cursor: help; }
 .key-note { display: inline-block; margin-left: 8px; font-size: 11px; color: var(--text-dim); font-style: italic; }
 .key-note-input { width: 100%; padding: 4px 8px; font-size: 12px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 4px; outline: none; }
 .key-note-input:focus { border-color: var(--border-focus); }

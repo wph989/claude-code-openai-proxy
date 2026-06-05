@@ -37,6 +37,16 @@ export enum KeyRotationStrategy {
   on_429 = 'on_429',
 }
 
+export type AntiBanMode = 'conservative' | 'throughput';
+
+export interface AntiBanConfig {
+  mode?: AntiBanMode;
+  max_concurrent?: number;
+  min_interval_ms?: number;
+  rate_limit_delay_min_ms?: number;
+  rate_limit_delay_max_ms?: number;
+}
+
 export interface ApiKeyEntry {
   key: string;
   enabled: boolean;
@@ -60,6 +70,7 @@ export interface ProviderConfig {
   stream_idle_timeout_seconds?: number;
   enabled?: boolean;
   headers?: Record<string, string>;
+  anti_ban?: AntiBanConfig;
   description?: string;
 }
 
@@ -78,6 +89,7 @@ export interface RuntimeConfig {
   default_client_model?: string | null;
   proxy_auth_token?: string | null;
   key_max_errors?: number | null;
+  anti_ban?: AntiBanConfig;
 }
 
 export interface RuntimeConfigSummary {
@@ -99,6 +111,7 @@ export interface ResolvedProvider {
   stream_idle_timeout_seconds: number;
   enabled: boolean;
   headers: Record<string, string>;
+  anti_ban: Required<AntiBanConfig>;
   description: string;
 }
 
@@ -124,6 +137,7 @@ export function normalizeRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
     stream_idle_timeout_seconds: Number(item.stream_idle_timeout_seconds || 120),
     enabled: item.enabled !== false,
     headers: normalizeHeaders(item.headers || {}),
+    anti_ban: normalizeAntiBanConfig(item.anti_ban),
     description: String(item.description || '').trim()
   }));
 
@@ -141,7 +155,8 @@ export function normalizeRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
     models,
     default_client_model: normalizeOptional(raw.default_client_model),
     proxy_auth_token: normalizeOptional(raw.proxy_auth_token),
-    key_max_errors: normalizeOptionalNumber(raw.key_max_errors)
+    key_max_errors: normalizeOptionalNumber(raw.key_max_errors),
+    anti_ban: normalizeAntiBanConfig(raw.anti_ban)
   };
 }
 
@@ -254,6 +269,23 @@ function normalizeHeaders(headers: Record<string, unknown>): Record<string, stri
   return result;
 }
 
+function normalizeAntiBanConfig(value: unknown): AntiBanConfig | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const result: AntiBanConfig = {};
+  if (value.mode === 'conservative' || value.mode === 'throughput') {
+    result.mode = value.mode;
+  }
+  const maxConcurrent = normalizeOptionalNumber(value.max_concurrent);
+  if (maxConcurrent != null) result.max_concurrent = Math.trunc(maxConcurrent);
+  const minInterval = normalizeNonNegativeNumber(value.min_interval_ms);
+  if (minInterval != null) result.min_interval_ms = minInterval;
+  const delayMin = normalizeNonNegativeNumber(value.rate_limit_delay_min_ms);
+  if (delayMin != null) result.rate_limit_delay_min_ms = delayMin;
+  const delayMax = normalizeNonNegativeNumber(value.rate_limit_delay_max_ms);
+  if (delayMax != null) result.rate_limit_delay_max_ms = delayMax;
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 function normalizeRotationStrategy(value: unknown): KeyRotationStrategy {
   if (value === KeyRotationStrategy.round_robin || value === KeyRotationStrategy.on_429) {
     return value;
@@ -282,4 +314,10 @@ function normalizeOptionalNumber(value: unknown): number | null {
   if (value == null) return null;
   const num = Number(value);
   return Number.isFinite(num) && num > 0 ? num : null;
+}
+
+function normalizeNonNegativeNumber(value: unknown): number | null {
+  if (value == null) return null;
+  const num = Number(value);
+  return Number.isFinite(num) && num >= 0 ? num : null;
 }
