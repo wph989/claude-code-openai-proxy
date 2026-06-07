@@ -3,6 +3,7 @@ import type { HealthTracker } from './health-tracker.js';
 export interface KeySelector {
   pick(candidates: string[]): string | undefined;
   notifyKeyUnavailable(key: string): void;
+  currentKey(): string | undefined;
 }
 
 export class StickySelector implements KeySelector {
@@ -27,6 +28,10 @@ export class StickySelector implements KeySelector {
     if (this.activeKey === key) {
       this.activeKey = undefined;
     }
+  }
+
+  currentKey(): string | undefined {
+    return this.activeKey;
   }
 
   private bestByScore(candidates: string[]): string {
@@ -66,5 +71,9 @@ export class BalancedSelector implements KeySelector {
 
   notifyKeyUnavailable(_key: string): void {
     // BalancedSelector 无内部状态需要清理
+  }
+
+  currentKey(): string | undefined {
+    return undefined;
   }
 }

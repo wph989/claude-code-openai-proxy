@@ -271,6 +271,36 @@ test('plain 429 delays the next use of the key without disabling it', async () =
   rotator.release(second);
 });
 
+test('acquire rejects when only temporarily delayed keys exceed the deadline', async () => {
+  const rotator = new ApiKeyRotator([keyEntry('key-a')], KeyRotationStrategy.round_robin, true, ab({
+    rate_limit_delay_min_ms: 50,
+    rate_limit_delay_max_ms: 50
+  }));
+
+  rotator.markRateLimited('key-a', '429 Too Many Requests');
+
+  await assert.rejects(
+    () => rotator.acquire({ deadline: Date.now() + 10 }),
+    /等待可用 API Key 超时/
+  );
+});
+
+test('acquire waits for the earliest delayed key when the deadline allows it', async () => {
+  const rotator = new ApiKeyRotator([keyEntry('key-a')], KeyRotationStrategy.round_robin, true, ab({
+    rate_limit_delay_min_ms: 25,
+    rate_limit_delay_max_ms: 25
+  }));
+
+  rotator.markRateLimited('key-a', '429 Too Many Requests');
+  const startedAt = Date.now();
+  const lease = await rotator.acquire({ deadline: Date.now() + 100 });
+  const elapsed = Date.now() - startedAt;
+
+  assert.ok(elapsed >= 20, `expected acquire to wait for cooldown, got ${elapsed}ms`);
+  assert.equal(lease.key, 'key-a');
+  rotator.release(lease);
+});
+
 test('repeated markRateLimited within cooldown window does not extend nextAvailableAt', () => {
   const rotator = new ApiKeyRotator([keyEntry('key-a')], KeyRotationStrategy.round_robin, true, ab({
     rate_limit_delay_min_ms: 5000,
@@ -287,13 +317,45 @@ test('repeated markRateLimited within cooldown window does not extend nextAvaila
   assert.equal(afterRepeats, firstNext, 'cooldown end time must not be pushed forward by repeated 429s');
 });
 
+test('sticky_on_cooldown wait keeps waiting for the sticky key instead of falling through', async () => {
+  const rotator = new ApiKeyRotator([keyEntry('key-a'), keyEntry('key-b')], KeyRotationStrategy.round_robin, true, ab({
+    key_selection: 'sticky',
+    sticky_on_cooldown: 'wait',
+    rate_limit_delay_min_ms: 25,
+    rate_limit_delay_max_ms: 25
+  }));
+
+  assert.equal(rotator.pick(), 'key-a');
+  rotator.markRateLimited('key-a', '429 Too Many Requests');
+
+  const startedAt = Date.now();
+  const lease = await rotator.acquire({ deadline: Date.now() + 100 });
+  const elapsed = Date.now() - startedAt;
+
+  assert.ok(elapsed >= 20, `expected sticky wait to honor cooldown, got ${elapsed}ms`);
+  assert.equal(lease.key, 'key-a');
+  rotator.release(lease);
+});
+
+test('sticky selector re-evaluates after network errors instead of reusing the same key', () => {
+  const rotator = new ApiKeyRotator([keyEntry('key-a'), keyEntry('key-b')], KeyRotationStrategy.round_robin, true, ab({
+    key_selection: 'sticky'
+  }));
+
+  assert.equal(rotator.pick(), 'key-a');
+  rotator.markError('key-a', 'socket hang up', 'network');
+
+  assert.equal(rotator.pick(), 'key-b');
+});
+
 test('error classifier separates hard quota errors from temporary rate limits', () => {
   assert.equal(classifyUpstreamError(429, 'Too Many Requests', 'rate limit reached').category, 'rate_limit');
   assert.equal(classifyUpstreamError(429, 'Too Many Requests', 'insufficient quota').category, 'hard_limit');
   // quota 类必须优先于 token-limit：实际 NVIDIA 等上游 429 错误体里两者都可能出现。
   assert.equal(classifyUpstreamError(429, 'Too Many Requests', 'insufficient_quota token-limit').category, 'hard_limit');
   assert.equal(classifyUpstreamError(429, 'Too Many Requests', '{"error":{"code":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details"}}').category, 'hard_limit');
-  assert.equal(classifyUpstreamError(429, 'Too Many Requests', 'context length exceeded').category, 'rate_limit');
+  assert.equal(classifyUpstreamError(429, 'Too Many Requests', 'context length exceeded').category, 'request_limit');
+  assert.equal(classifyUpstreamError(400, 'Bad Request', 'input tokens too long').category, 'request_limit');
   assert.equal(classifyUpstreamError(401, 'Unauthorized', 'invalid api key').category, 'hard_limit');
   assert.equal(classifyUpstreamError(500, 'Internal Server Error', 'server exploded').category, 'transient');
 });

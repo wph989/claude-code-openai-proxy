@@ -12,6 +12,10 @@ export type KeyLease = {
   key: string;
 };
 
+export type AcquireOptions = {
+  deadline?: number;
+};
+
 export type KeyRuntimeStatus = ApiKeyEntry & {
   status: 'available' | 'delayed' | 'disabled' | 'busy';
   active_requests: number;
@@ -111,6 +115,9 @@ export class ApiKeyRotator {
 
   private eligibleKeys(): string[] {
     const now = Date.now();
+    if (this.shouldWaitForStickyCooldown(now)) {
+      return [];
+    }
     const result: string[] = [];
     for (const entry of this._keys) {
       if (!entry.enabled) continue;
@@ -125,18 +132,33 @@ export class ApiKeyRotator {
     return result;
   }
 
-  async acquire(): Promise<KeyLease> {
+  private shouldWaitForStickyCooldown(now: number): boolean {
+    if (this._antiBan.sticky_on_cooldown !== 'wait') return false;
+    const activeKey = this.selector.currentKey();
+    if (!activeKey) return false;
+    const entry = this.entryFor(activeKey);
+    if (!entry?.enabled) return false;
+    if (this.quotaGuard.isBlocked(activeKey)) return false;
+    const state = this.getRuntimeState(activeKey);
+    // wait 模式只针对 429 冷却：其他不可用原因（禁用/配额）仍允许重新选择。
+    return state.nextAvailableAt != null && state.nextAvailableAt > now;
+  }
+
+  async acquire(options: AcquireOptions = {}): Promise<KeyLease> {
     while (true) {
+      const now = Date.now();
       if (this.allUnavailable()) {
         throw new Error('没有可用的 API Key');
       }
+      if (options.deadline != null && now >= options.deadline) {
+        throw new Error('等待可用 API Key 超时');
+      }
       const key = this.pick();
       if (!key) {
-        await sleep(5);
+        await sleep(this.nextAcquireSleepMs(now, options.deadline));
         continue;
       }
       const state = this.getRuntimeState(key);
-      const now = Date.now();
       state.activeRequests++;
       state.activeLeaseStarts.push(now);
       state.lastSentAt = now;
@@ -145,6 +167,31 @@ export class ApiKeyRotator {
       }
       return { key };
     }
+  }
+
+  private nextAcquireSleepMs(now: number, deadline?: number): number {
+    const nextAt = this.nextTemporaryAvailableAt(now);
+    const fallback = now + 5;
+    const wakeAt = Math.max(now + 1, Math.min(nextAt ?? fallback, fallback));
+    if (deadline == null) return wakeAt - now;
+    return Math.max(1, Math.min(wakeAt, deadline) - now);
+  }
+
+  private nextTemporaryAvailableAt(now: number): number | null {
+    let nextAt: number | null = null;
+    for (const entry of this._keys) {
+      if (!entry.enabled) continue;
+      if (this.quotaGuard.isBlocked(entry.key)) continue;
+      const state = this.getRuntimeState(entry.key);
+      this.sweepLeakedLeases(state, now);
+      if (state.nextAvailableAt != null && state.nextAvailableAt > now) {
+        nextAt = minNullable(nextAt, state.nextAvailableAt);
+      }
+      if (state.lastSentAt != null && (state.lastSentAt + this._antiBan.min_interval_ms) > now) {
+        nextAt = minNullable(nextAt, state.lastSentAt + this._antiBan.min_interval_ms);
+      }
+    }
+    return nextAt;
   }
 
   release(lease: KeyLease | string | undefined): void {
@@ -176,6 +223,8 @@ export class ApiKeyRotator {
     Object.assign(entry, patch);
     this._onChange?.(key, patch);
     this.tracker.recordError(key);
+    // transient/network 说明当前 key 或链路刚失败过，sticky 模式继续咬住它会放大中断概率。
+    this.selector.notifyKeyUnavailable(key);
   }
 
   markQuotaError(key: string, errorMessage: string): void {
@@ -414,6 +463,10 @@ export class ApiKeyRotator {
 function randomBetween(min: number, max: number): number {
   if (max <= min) return min;
   return min + Math.floor(Math.random() * (max - min + 1));
+}
+
+function minNullable(a: number | null, b: number): number {
+  return a == null ? b : Math.min(a, b);
 }
 
 function sleep(ms: number): Promise<void> {

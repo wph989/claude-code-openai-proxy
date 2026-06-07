@@ -10,6 +10,8 @@ interface ResponseMeta {
   lease?: KeyLease;
 }
 
+type UpstreamErrorCategory = 'hard_limit' | 'rate_limit' | 'transient' | 'request_limit';
+
 const responseMeta = new WeakMap<Response, ResponseMeta>();
 
 const agent = new Agent({
@@ -90,13 +92,14 @@ export class UpstreamService {
     rotator?: ApiKeyRotator;
     payload: string;
     timeoutMs?: number;
+    acquireDeadline?: number;
     requestId: string;
     sessionId: string;
     incomingHeaders?: Record<string, string | string[] | undefined>;
     anthropicVersion?: string;
     anthropicBeta?: string;
   }): Promise<{ response: Response; lease: KeyLease | undefined }> {
-    const lease = params.rotator ? await params.rotator.acquire() : undefined;
+    const lease = params.rotator ? await params.rotator.acquire({ deadline: params.acquireDeadline }) : undefined;
     const apiKey = lease?.key;
     const fetchParams: RequestInit = {
       method: 'POST',
@@ -189,18 +192,39 @@ export class UpstreamService {
         throw new Error(`供应商 ${params.provider.provider_id} 的所有 API Key 均不可用`);
       }
 
-      const result = await this.doFetch({
-        url: params.url,
-        provider: params.provider,
-        rotator: params.rotator,
-        payload: body,
-        timeoutMs,
-        requestId: params.requestId,
-        sessionId: params.sessionId,
-        incomingHeaders: params.incomingHeaders,
-        anthropicVersion: params.anthropicVersion,
-        anthropicBeta: params.anthropicBeta,
-      });
+      let result: { response: Response; lease: KeyLease | undefined };
+      try {
+        result = await this.doFetch({
+          url: params.url,
+          provider: params.provider,
+          rotator: params.rotator,
+          payload: body,
+          timeoutMs,
+          acquireDeadline: deadline,
+          requestId: params.requestId,
+          sessionId: params.sessionId,
+          incomingHeaders: params.incomingHeaders,
+          anthropicVersion: params.anthropicVersion,
+          anthropicBeta: params.anthropicBeta,
+        });
+      } catch (error) {
+        if (isAcquireTimeout(error)) {
+          return lastResponse ?? new Response('waiting for available API Key timed out', { status: 503, statusText: 'Service Unavailable' });
+        }
+        if (retry.retry_on_transient) {
+          log('warn', '上游网络错误，准备按 transient 策略重试', {
+            provider_id: params.provider.provider_id,
+            attempt: attempt + 1,
+            max_attempts: retry.max_attempts,
+            error: error instanceof Error ? error.message : String(error)
+          });
+          if (attempt < retry.max_attempts - 1 && Date.now() < deadline) {
+            continue;
+          }
+          return lastResponse ?? new Response(error instanceof Error ? error.message : String(error), { status: 502, statusText: 'Bad Gateway' });
+        }
+        throw error;
+      }
 
       const response = result.response;
       const usedKey = result.lease?.key;
@@ -240,7 +264,7 @@ export class UpstreamService {
           params.rotator.markQuotaError(usedKey, errorText);
         } else if (classification.category === 'rate_limit') {
           params.rotator.markRateLimited(usedKey, errorText);
-        } else {
+        } else if (classification.category === 'transient') {
           params.rotator.markError(usedKey, errorText);
         }
         if (result.lease) params.rotator.release(result.lease);
@@ -249,6 +273,7 @@ export class UpstreamService {
       lastResponse = response;
 
       if (classification.category === 'hard_limit') return response;
+      if (classification.category === 'request_limit') return response;
       if (classification.category === 'rate_limit' && !retry.retry_on_rate_limit) return response;
       if (classification.category === 'transient' && !retry.retry_on_transient) return response;
     }
@@ -317,6 +342,7 @@ export class UpstreamService {
       provider: params.provider,
       rotator: params.rotator,
       payload: body,
+      acquireDeadline: Date.now() + params.provider.timeout_seconds * 1000,
       requestId: params.requestId,
       sessionId: params.sessionId,
       anthropicVersion: params.anthropicVersion,
@@ -333,7 +359,7 @@ export class UpstreamService {
             params.rotator.markQuotaError(result.lease.key, errorText);
           } else if (classification.category === 'rate_limit') {
             params.rotator.markRateLimited(result.lease.key, errorText);
-          } else {
+          } else if (classification.category === 'transient') {
             params.rotator.markError(result.lease.key, errorText);
           }
         }
@@ -368,7 +394,7 @@ export function isQuotaLimitError(text: string): boolean {
   return classifyUpstreamError(400, '', text).category === 'hard_limit';
 }
 
-export function classifyUpstreamError(status: number, statusText: string, bodyText: string): { category: 'hard_limit' | 'rate_limit' | 'transient'; reason: string } {
+export function classifyUpstreamError(status: number, statusText: string, bodyText: string): { category: UpstreamErrorCategory; reason: string } {
   const normalized = bodyText.toLowerCase();
 
   // hardLimit 必须最先判：quota / insufficient / 账号封禁 等是真正不可恢复，
@@ -408,7 +434,7 @@ export function classifyUpstreamError(status: number, statusText: string, bodyTe
     return { category: 'hard_limit', reason: 'hard limit or invalid key' };
   }
 
-  // 上下文 / 输入过长：临时错误（重试同样会失败但不是 key 的问题），归 rate_limit 让上层换 key。
+  // 上下文 / 输入过长不是 key 的问题，换 key 只会额外消耗配额并污染健康分。
   const tokenLimit = [
     'token-limit',
     'token limit',
@@ -422,7 +448,7 @@ export function classifyUpstreamError(status: number, statusText: string, bodyTe
     '输入过长'
   ];
   if (tokenLimit.some((keyword) => normalized.includes(keyword))) {
-    return { category: 'rate_limit', reason: 'temporary token or request limit' };
+    return { category: 'request_limit', reason: 'request token or context limit' };
   }
 
   const rateLimit = [
@@ -464,6 +490,10 @@ function summarizeUpstreamError(response: Response, bodyText: string): string {
   return detail
     ? `${response.status} ${response.statusText}: ${detail}`
     : `${response.status} ${response.statusText}`;
+}
+
+function isAcquireTimeout(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('等待可用 API Key 超时');
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

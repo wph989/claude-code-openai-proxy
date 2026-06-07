@@ -465,4 +465,51 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
     const usageAfter = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
     expect(usageAfter.usage['p1:CHATUSE001']).toEqual({ requests_used: 1, tokens_used: 18 });
   });
+
+  it('Anthropic 非流式透传成功后释放 key lease 并记录 usage', async () => {
+    const cfgPath = path.join(tmp, 'runtime_models.json');
+    writeConfig(cfgPath, {
+      providers: [{
+        provider_id: 'p1',
+        provider_type: 'anthropic',
+        base_url: 'https://example.com/v1',
+        api_key: [{ id: 'ANTHUSE001', key: 'sk-1', quota: { max_requests: 10, max_tokens: 1000, soft_stop_threshold: 1 } }],
+        timeout_seconds: 300,
+        enabled: true,
+        headers: {},
+        anti_ban: { min_interval_ms: 0, retry: { max_attempts: 1 } }
+      }],
+      models: [{ client_model: 'm', provider_id: 'p1', upstream_model: 'u', enabled: true }],
+      default_client_model: 'm'
+    });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      id: 'msg-1',
+      type: 'message',
+      role: 'assistant',
+      model: 'u',
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 5, output_tokens: 7 }
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+
+    const app = await createApp(cfgPath);
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/messages',
+        payload: { model: 'm', messages: [{ role: 'user', content: 'hi' }], max_tokens: 32 }
+      });
+      expect(response.statusCode).toBe(200);
+      expect(app.runtimeConfigManager.getKeyStates('p1')[0].active_requests).toBe(0);
+      await app.runtimeConfigManager.shutdown();
+    } finally {
+      await app.close();
+      globalThis.fetch = originalFetch;
+    }
+
+    const usageAfter = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
+    expect(usageAfter.usage['p1:ANTHUSE001']).toEqual({ requests_used: 1, tokens_used: 12 });
+  });
 });

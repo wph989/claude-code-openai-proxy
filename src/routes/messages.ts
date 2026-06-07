@@ -253,6 +253,7 @@ async function handleAnthropicPassthrough(
       return reply.code(upstreamResponse.status).send(data);
     }
     if (data.model) data.model = payload.model;
+    releaseUpstreamResponse(upstreamResponse, { requests: 1, tokens: extractAnthropicUsageTokens(data.usage) });
     log('info', 'Anthropic 透传响应完成', {
       provider_id: provider.provider_id,
       client_model: payload.model,
@@ -344,4 +345,19 @@ function readHeader(value: string | string[] | undefined): string | undefined {
     return value[0];
   }
   return value;
+}
+
+function extractAnthropicUsageTokens(value: unknown): number {
+  if (!isPlainObject(value)) return 0;
+  // Anthropic 原生响应没有 total_tokens 字段，只能用输入/输出相加来驱动本地配额守护。
+  return toInt(value.input_tokens) + toInt(value.output_tokens);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function toInt(value: unknown): number {
+  const num = Number(value ?? 0);
+  return Number.isFinite(num) && num > 0 ? Math.trunc(num) : 0;
 }
