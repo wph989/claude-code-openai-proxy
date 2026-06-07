@@ -5,7 +5,28 @@
       "provider_type": "openai_compatible",
       "base_url": "https://api.example.com/v1",
       "api_key_env": "PROVIDER_API_KEY",
+      "api_key": [
+        {
+          "id": "EXAMPLE001",
+          "key": "sk-example-key-1",
+          "enabled": true,
+          "note": "示例：演示 per-key 配额（仅用于本地软停用，不影响上游真实计费）",
+          "quota": {
+            "max_requests": 1000,
+            "max_tokens": null,
+            "soft_stop_threshold": 0.95
+          }
+        },
+        {
+          "id": "EXAMPLE002",
+          "key": "sk-example-key-2",
+          "enabled": true
+        }
+      ],
+      "key_rotation_strategy": "round_robin",
+      "auto_disable_on_error": true,
       "timeout_seconds": 300,
+      "stream_idle_timeout_seconds": 120,
       "enabled": true,
       "headers": {},
       "description": "示例供应商"
@@ -22,5 +43,12 @@
     }
   ],
   "default_client_model": "claude-model",
-  "proxy_auth_token": null
+  "proxy_auth_token": null,
+  "anti_ban": {
+    "mode": "conservative",
+    "key_selection": "sticky",
+    "sticky_on_cooldown": "fallthrough",
+    "retry": { "max_attempts": 3, "max_total_ms": 30000 }
+  }
 }
+

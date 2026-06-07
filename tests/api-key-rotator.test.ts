@@ -1,12 +1,15 @@
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import test from 'node:test';
-import type { ApiKeyEntry } from '../src/models.js';
+import type { ApiKeyEntry, AntiBanConfig } from '../src/models.js';
 import { KeyRotationStrategy, normalizeRuntimeConfig } from '../src/models.js';
+import type { KeyUsage } from '../src/models.js';
 import { ApiKeyRotator } from '../src/services/api-key-rotator.js';
 import { UpstreamService, classifyUpstreamError, isQuotaLimitError, releaseUpstreamResponse } from '../src/services/upstream.js';
+import { resolveAntiBanConfig } from '../src/services/anti-ban-config.js';
 
 function keyEntry(key: string): ApiKeyEntry {
   return {
+    id: `id-${key}`,
     key,
     enabled: true,
     error_count: 0,
@@ -15,6 +18,18 @@ function keyEntry(key: string): ApiKeyEntry {
     last_error_message: null,
     auto_disabled_at: null
   };
+}
+
+function ab(partial: AntiBanConfig = {}) {
+  return resolveAntiBanConfig({
+    mode: 'conservative',
+    max_concurrent: 1,
+    min_interval_ms: 0,
+    rate_limit_delay_min_ms: 0,
+    rate_limit_delay_max_ms: 0,
+    retry: { max_attempts: 1, max_total_ms: 30000, retry_on_rate_limit: false, retry_on_transient: false },
+    ...partial
+  });
 }
 
 function provider(keys: ApiKeyEntry[]) {
@@ -30,13 +45,7 @@ function provider(keys: ApiKeyEntry[]) {
     enabled: true,
     headers: {},
     description: '',
-    anti_ban: {
-      mode: 'conservative' as const,
-      max_concurrent: 1,
-      min_interval_ms: 0,
-      rate_limit_delay_min_ms: 0,
-      rate_limit_delay_max_ms: 0
-    }
+    anti_ban: ab()
   };
 }
 
@@ -54,7 +63,9 @@ function route() {
 test('round_robin strategy keeps using the first selected key while it remains enabled', () => {
   const rotator = new ApiKeyRotator(
     [keyEntry('key-a'), keyEntry('key-b'), keyEntry('key-c')],
-    KeyRotationStrategy.round_robin
+    KeyRotationStrategy.round_robin,
+    true,
+    ab()
   );
 
   assert.equal(rotator.pick(), 'key-a');
@@ -65,7 +76,9 @@ test('round_robin strategy keeps using the first selected key while it remains e
 test('round_robin strategy moves to the next enabled key when the sticky key is disabled', () => {
   const rotator = new ApiKeyRotator(
     [keyEntry('key-a'), keyEntry('key-b'), keyEntry('key-c')],
-    KeyRotationStrategy.round_robin
+    KeyRotationStrategy.round_robin,
+    true,
+    ab()
   );
 
   assert.equal(rotator.pick(), 'key-a');
@@ -78,7 +91,9 @@ test('round_robin strategy moves to the next enabled key when the sticky key is 
 test('quota error disables the used key immediately and records the reason', () => {
   const rotator = new ApiKeyRotator(
     [keyEntry('key-a'), keyEntry('key-b')],
-    KeyRotationStrategy.round_robin
+    KeyRotationStrategy.round_robin,
+    true,
+    ab()
   );
 
   rotator.markQuotaError('key-a', 'HTTP 429: quota limit exceeded');
@@ -99,7 +114,7 @@ test('detects quota and limit errors from English and Chinese response bodies', 
 
 test('upstream returns the first non-2xx response without exponential retry', async () => {
   const service = new UpstreamService();
-  const rotator = new ApiKeyRotator([keyEntry('key-a'), keyEntry('key-b')], KeyRotationStrategy.round_robin);
+  const rotator = new ApiKeyRotator([keyEntry('key-a'), keyEntry('key-b')], KeyRotationStrategy.round_robin, true, ab());
   const originalFetch = globalThis.fetch;
   let calls = 0;
 
@@ -127,7 +142,7 @@ test('upstream returns the first non-2xx response without exponential retry', as
 
 test('upstream quota response disables the used key immediately', async () => {
   const service = new UpstreamService();
-  const rotator = new ApiKeyRotator([keyEntry('key-a'), keyEntry('key-b')], KeyRotationStrategy.round_robin);
+  const rotator = new ApiKeyRotator([keyEntry('key-a'), keyEntry('key-b')], KeyRotationStrategy.round_robin, true, ab());
   const originalFetch = globalThis.fetch;
 
   globalThis.fetch = (async () => {
@@ -157,15 +172,9 @@ test('upstream quota response disables the used key immediately', async () => {
   }
 });
 
-test('upstream token-limit quota wording delays the key without disabling it', async () => {
+test('upstream insufficient_quota body auto-disables the key (hard limit wins over token-limit URL fragment)', async () => {
   const service = new UpstreamService();
-  const rotator = new ApiKeyRotator([keyEntry('key-a'), keyEntry('key-b')], KeyRotationStrategy.round_robin, true, {
-    mode: 'conservative',
-    max_concurrent: 1,
-    min_interval_ms: 0,
-    rate_limit_delay_min_ms: 0,
-    rate_limit_delay_max_ms: 0
-  });
+  const rotator = new ApiKeyRotator([keyEntry('key-a'), keyEntry('key-b')], KeyRotationStrategy.round_robin, true, ab());
   const originalFetch = globalThis.fetch;
 
   globalThis.fetch = (async () => {
@@ -194,24 +203,19 @@ test('upstream token-limit quota wording delays the key without disabling it', a
 
     assert.equal(response.status, 429);
     const [first] = rotator.getKeyStatuses();
-    assert.equal(first.enabled, true);
-    assert.equal(first.status, 'available');
-    assert.equal(first.last_error_category, 'rate_limit');
-    assert.equal(first.note, undefined);
-    assert.match(first.last_error_message || '', /token-limit/);
+    // insufficient_quota 必须命中 hard_limit，把 key 自动禁用——URL 里 #token-limit 不能干扰判定。
+    assert.equal(first.enabled, false);
+    assert.equal(first.status, 'disabled');
+    assert.equal(first.last_error_category, 'hard_limit');
+    assert.ok(first.auto_disabled_at, 'auto_disabled_at should be set');
+    assert.match(first.last_error_message || '', /insufficient_quota/);
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
 test('conservative scheduler allows only one active request per key', async () => {
-  const rotator = new ApiKeyRotator([keyEntry('key-a')], KeyRotationStrategy.round_robin, true, {
-    mode: 'conservative',
-    max_concurrent: 1,
-    min_interval_ms: 0,
-    rate_limit_delay_min_ms: 0,
-    rate_limit_delay_max_ms: 0
-  });
+  const rotator = new ApiKeyRotator([keyEntry('key-a')], KeyRotationStrategy.round_robin, true, ab());
 
   const first = await rotator.acquire();
   let secondResolved = false;
@@ -230,13 +234,7 @@ test('conservative scheduler allows only one active request per key', async () =
 });
 
 test('scheduler waits for the configured minimum interval before reusing a key', async () => {
-  const rotator = new ApiKeyRotator([keyEntry('key-a')], KeyRotationStrategy.round_robin, true, {
-    mode: 'conservative',
-    max_concurrent: 1,
-    min_interval_ms: 25,
-    rate_limit_delay_min_ms: 0,
-    rate_limit_delay_max_ms: 0
-  });
+  const rotator = new ApiKeyRotator([keyEntry('key-a')], KeyRotationStrategy.round_robin, true, ab({ min_interval_ms: 25 }));
 
   const first = await rotator.acquire();
   rotator.release(first);
@@ -250,13 +248,10 @@ test('scheduler waits for the configured minimum interval before reusing a key',
 });
 
 test('plain 429 delays the next use of the key without disabling it', async () => {
-  const rotator = new ApiKeyRotator([keyEntry('key-a')], KeyRotationStrategy.round_robin, true, {
-    mode: 'conservative',
-    max_concurrent: 1,
-    min_interval_ms: 0,
+  const rotator = new ApiKeyRotator([keyEntry('key-a')], KeyRotationStrategy.round_robin, true, ab({
     rate_limit_delay_min_ms: 25,
     rate_limit_delay_max_ms: 25
-  });
+  }));
 
   const first = await rotator.acquire();
   rotator.release(first);
@@ -276,10 +271,29 @@ test('plain 429 delays the next use of the key without disabling it', async () =
   rotator.release(second);
 });
 
+test('repeated markRateLimited within cooldown window does not extend nextAvailableAt', () => {
+  const rotator = new ApiKeyRotator([keyEntry('key-a')], KeyRotationStrategy.round_robin, true, ab({
+    rate_limit_delay_min_ms: 5000,
+    rate_limit_delay_max_ms: 5000
+  }));
+
+  rotator.markRateLimited('key-a', 'first 429');
+  const firstNext = rotator.getKeyStatuses()[0].next_available_at!;
+  assert.ok(firstNext, 'first rate-limit should set nextAvailableAt');
+
+  rotator.markRateLimited('key-a', 'second 429 still in cooldown');
+  rotator.markRateLimited('key-a', 'third 429 still in cooldown');
+  const afterRepeats = rotator.getKeyStatuses()[0].next_available_at!;
+  assert.equal(afterRepeats, firstNext, 'cooldown end time must not be pushed forward by repeated 429s');
+});
+
 test('error classifier separates hard quota errors from temporary rate limits', () => {
   assert.equal(classifyUpstreamError(429, 'Too Many Requests', 'rate limit reached').category, 'rate_limit');
   assert.equal(classifyUpstreamError(429, 'Too Many Requests', 'insufficient quota').category, 'hard_limit');
-  assert.equal(classifyUpstreamError(429, 'Too Many Requests', 'insufficient_quota token-limit').category, 'rate_limit');
+  // quota 类必须优先于 token-limit：实际 NVIDIA 等上游 429 错误体里两者都可能出现。
+  assert.equal(classifyUpstreamError(429, 'Too Many Requests', 'insufficient_quota token-limit').category, 'hard_limit');
+  assert.equal(classifyUpstreamError(429, 'Too Many Requests', '{"error":{"code":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details"}}').category, 'hard_limit');
+  assert.equal(classifyUpstreamError(429, 'Too Many Requests', 'context length exceeded').category, 'rate_limit');
   assert.equal(classifyUpstreamError(401, 'Unauthorized', 'invalid api key').category, 'hard_limit');
   assert.equal(classifyUpstreamError(500, 'Internal Server Error', 'server exploded').category, 'transient');
 });
@@ -308,13 +322,7 @@ test('runtime config normalizes global anti-ban settings for frontend configurat
 
 test('upstream fetch rejection releases the active request and records the network error', async () => {
   const service = new UpstreamService();
-  const rotator = new ApiKeyRotator([keyEntry('key-a')], KeyRotationStrategy.round_robin, true, {
-    mode: 'conservative',
-    max_concurrent: 1,
-    min_interval_ms: 0,
-    rate_limit_delay_min_ms: 0,
-    rate_limit_delay_max_ms: 0
-  });
+  const rotator = new ApiKeyRotator([keyEntry('key-a')], KeyRotationStrategy.round_robin, true, ab());
   const originalFetch = globalThis.fetch;
 
   globalThis.fetch = (async () => {
@@ -342,13 +350,7 @@ test('upstream fetch rejection releases the active request and records the netwo
 
 test('streaming upstream response keeps the lease until the stream is released', async () => {
   const service = new UpstreamService();
-  const rotator = new ApiKeyRotator([keyEntry('key-a')], KeyRotationStrategy.round_robin, true, {
-    mode: 'conservative',
-    max_concurrent: 1,
-    min_interval_ms: 0,
-    rate_limit_delay_min_ms: 0,
-    rate_limit_delay_max_ms: 0
-  });
+  const rotator = new ApiKeyRotator([keyEntry('key-a')], KeyRotationStrategy.round_robin, true, ab());
   const originalFetch = globalThis.fetch;
 
   globalThis.fetch = (async () => {
@@ -378,13 +380,7 @@ test('streaming upstream response keeps the lease until the stream is released',
 
 test('anthropic count_tokens classifies plain 429 as rate limit without disabling the key', async () => {
   const service = new UpstreamService();
-  const rotator = new ApiKeyRotator([keyEntry('key-a')], KeyRotationStrategy.round_robin, true, {
-    mode: 'conservative',
-    max_concurrent: 1,
-    min_interval_ms: 0,
-    rate_limit_delay_min_ms: 0,
-    rate_limit_delay_max_ms: 0
-  });
+  const rotator = new ApiKeyRotator([keyEntry('key-a')], KeyRotationStrategy.round_robin, true, ab());
   const originalFetch = globalThis.fetch;
 
   globalThis.fetch = (async () => {
@@ -415,4 +411,83 @@ test('anthropic count_tokens classifies plain 429 as rate limit without disablin
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('balanced selection mode picks across all enabled keys', async () => {
+  const rotator = new ApiKeyRotator(
+    [keyEntry('a'), keyEntry('b'), keyEntry('c')],
+    KeyRotationStrategy.round_robin,
+    true,
+    ab({ key_selection: 'balanced' })
+  );
+  const seen = new Set();
+  for (let i = 0; i < 200; i++) {
+    const k = rotator.pick();
+    if (k) seen.add(k);
+  }
+  assert.ok(seen.size >= 2, 'balanced should reach >=2 keys, got ' + seen.size);
+});
+
+test('recordUsage notifies usageListener; soft-stop blocks key without disabling it', () => {
+  const entry: ApiKeyEntry = {
+    ...keyEntry('quota-key'),
+    quota: { max_requests: 10, max_tokens: null, soft_stop_threshold: 0.9 }
+  };
+  const rotator = new ApiKeyRotator([entry, keyEntry('spare')], KeyRotationStrategy.round_robin, true, ab());
+  const updates: Array<{ key: string; ratio: number }> = [];
+  rotator.setUsageListener((key, _usage: KeyUsage, ratio) => updates.push({ key, ratio }));
+
+  for (let i = 0; i < 9; i++) rotator.recordUsage('quota-key', 1, 0);
+
+  assert.equal(updates.length, 9);
+  assert.ok(updates[updates.length - 1].ratio >= 0.9);
+  const [first] = rotator.getKeys();
+  assert.equal(first.enabled, true);
+  const status = rotator.getKeyStatuses()[0];
+  assert.equal(status.quota_blocked, true);
+  assert.match(status.quota_reason || '', /配额/);
+  assert.equal(rotator.pick(), 'spare');
+});
+
+test('hydrateUsage restores prior usage and is reflected in getQuotaSnapshot', () => {
+  const entry: ApiKeyEntry = {
+    ...keyEntry('hk'),
+    quota: { max_requests: 100, max_tokens: null, soft_stop_threshold: 0.95 }
+  };
+  const rotator = new ApiKeyRotator([entry], KeyRotationStrategy.round_robin, true, ab());
+  rotator.hydrateUsage('hk', { requests_used: 50, tokens_used: 0 });
+  const snap = rotator.getQuotaSnapshot('hk');
+  assert.equal(snap.usage.requests_used, 50);
+  assert.equal(snap.blocked, false);
+});
+
+test('hydrateUsage past soft_stop_threshold blocks the key so acquire fails fast', async () => {
+  const entry: ApiKeyEntry = {
+    ...keyEntry('hk'),
+    quota: { max_requests: 100, max_tokens: null, soft_stop_threshold: 0.9 }
+  };
+  const rotator = new ApiKeyRotator([entry], KeyRotationStrategy.round_robin, true, ab());
+
+  rotator.hydrateUsage('hk', { requests_used: 95, tokens_used: 0 });
+
+  const status = rotator.getKeyStatuses()[0];
+  assert.equal(status.enabled, true);
+  assert.equal(status.quota_blocked, true);
+  assert.equal(rotator.pick(), undefined);
+});
+
+test('setKeyQuota updates the live rotator without resetting health state', () => {
+  const entry: ApiKeyEntry = {
+    ...keyEntry('hk'),
+    quota: { max_requests: 100, max_tokens: null, soft_stop_threshold: 0.9 }
+  };
+  const rotator = new ApiKeyRotator([entry], KeyRotationStrategy.round_robin, true, ab());
+  rotator.markRateLimited('hk', '429 rate limit');
+  const scoreBefore = rotator.getHealthScore('hk');
+  assert.ok(scoreBefore < 1.0);
+
+  rotator.setKeyQuota('hk', { max_requests: 500, max_tokens: null, soft_stop_threshold: 0.95 });
+
+  assert.equal(rotator.getQuotaSnapshot('hk').quota?.max_requests, 500);
+  assert.equal(rotator.getHealthScore('hk'), scoreBefore);
 });

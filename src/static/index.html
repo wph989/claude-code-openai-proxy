@@ -62,11 +62,14 @@
 
     <!-- Global Config -->
     <div class="card">
-      <div class="card-header"><h2 class="section-title">全局配置</h2></div>
+      <div class="card-header">
+        <h2 class="section-title">全局配置</h2>
+        <p class="card-subtitle">代理服务的鉴权、默认模型与 Key 自动禁用阈值。</p>
+      </div>
       <div class="card-body">
         <div class="config-row">
           <div>
-            <span class="form-label">代理鉴权 Token</span>
+            <span class="form-label">代理鉴权 Token <span class="field-key">proxy_auth_token</span></span>
             <p class="form-hint">启用后，Claude Code 需要在请求中携带 Token 才能访问代理服务。</p>
           </div>
           <div>
@@ -74,60 +77,225 @@
             <p class="form-hint">配置后请求需携带 Authorization: Bearer token 或 X-API-Key 头</p>
           </div>
         </div>
-        <div class="config-row" style="margin-top:24px">
+        <div class="config-row">
           <div>
-            <span class="form-label">默认客户端模型</span>
+            <span class="form-label">默认客户端模型 <span class="field-key">default_client_model</span></span>
             <p class="form-hint">未指定 model 参数时使用的默认模型。</p>
           </div>
           <div>
             <select id="defaultClientModel"><option value="">未设置</option></select>
           </div>
         </div>
-        <div class="config-row" style="margin-top:24px">
+        <div class="config-row">
           <div>
-            <span class="form-label">Key 最大错误次数</span>
+            <span class="form-label">Key 自动禁用阈值 <span class="field-key">key_max_errors</span></span>
             <p class="form-hint">API Key 累计错误达到此次数后自动禁用（需开启自动禁用功能）。0 或不填则使用环境变量 KEY_MAX_ERRORS 的值（默认 5）。</p>
           </div>
           <div>
             <input id="keyMaxErrors" type="number" min="1" placeholder="默认 5" />
           </div>
         </div>
-        <div class="config-row" style="margin-top:24px">
-          <div>
-            <span class="form-label">防封模式</span>
-            <p class="form-hint">全局默认策略，供应商可在 JSON 中用 anti_ban 覆盖。</p>
+      </div>
+    </div>
+
+    <!-- Anti-ban Config -->
+    <div class="card">
+      <div class="card-header">
+        <h2 class="section-title">防封策略</h2>
+        <p class="card-subtitle">滑动窗口健康分 + 智能选择器 + 代理内有预算重试 + 本地配额守护。保存即热更新，无需重启。</p>
+      </div>
+      <div class="card-body">
+
+        <!-- 子节 1：基础节流 -->
+        <div class="config-section">
+          <div class="config-section-title">
+            <span class="ssec-title">基础节流</span>
+            <span class="ssec-meta">每个 Key 的并发、间隔与 429 后退避</span>
           </div>
-          <div>
-            <select id="antiBanMode">
-              <option value="conservative">保守模式（默认）</option>
-              <option value="throughput">吞吐模式</option>
-            </select>
+          <div class="config-row">
+            <div>
+              <span class="form-label">防封模式 <span class="field-key">mode</span></span>
+              <p class="form-hint">全局默认预设。供应商可在 JSON 中用 anti_ban 覆盖。</p>
+            </div>
+            <div>
+              <select id="antiBanMode">
+                <option value="conservative">保守模式（默认）</option>
+                <option value="throughput">吞吐模式</option>
+              </select>
+            </div>
+          </div>
+          <div class="config-row">
+            <div>
+              <span class="form-label">Key 限流参数</span>
+              <p class="form-hint">控制每个 Key 的并发、最小请求间隔，以及 429 后的随机延迟范围。</p>
+            </div>
+            <div class="form-grid cols-4">
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">最大并发</span><span class="field-key">max_concurrent</span></div>
+                <input id="antiBanMaxConcurrent" type="number" min="1" placeholder="1" />
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">最小间隔</span><span class="field-key">min_interval_ms</span><span class="form-label-unit">ms</span></div>
+                <input id="antiBanMinInterval" type="number" min="0" placeholder="1000" />
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">429 退避下限</span><span class="field-key">delay_min</span><span class="form-label-unit">ms</span></div>
+                <input id="antiBanDelayMin" type="number" min="0" placeholder="5000" />
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">429 退避上限</span><span class="field-key">delay_max</span><span class="form-label-unit">ms</span></div>
+                <input id="antiBanDelayMax" type="number" min="0" placeholder="10000" />
+              </div>
+            </div>
           </div>
         </div>
-        <div class="config-row" style="margin-top:24px">
-          <div>
-            <span class="form-label">Key 防封阈值</span>
-            <p class="form-hint">控制每个 Key 的并发、最小请求间隔，以及普通 429 后的随机延迟范围。</p>
+
+        <!-- 子节 2：Key 选择与重试 -->
+        <div class="config-section">
+          <div class="config-section-title">
+            <span class="ssec-title">Key 选择与重试</span>
+            <span class="ssec-meta">按健康分挑选 Key，并在 429 / 5xx 后自动换 Key 重试</span>
           </div>
-          <div class="form-grid">
-            <div class="form-group">
-              <span class="form-label">最大并发</span>
-              <input id="antiBanMaxConcurrent" type="number" min="1" placeholder="1" />
+          <div class="config-row">
+            <div>
+              <span class="form-label">Key 选择策略</span>
+              <p class="form-hint">健康分加权挑 Key 的方式；命中冷却时是否落到下一个候选。</p>
             </div>
-            <div class="form-group">
-              <span class="form-label">最小间隔 ms</span>
-              <input id="antiBanMinInterval" type="number" min="0" placeholder="1000" />
-            </div>
-            <div class="form-group">
-              <span class="form-label">429 延迟最小 ms</span>
-              <input id="antiBanDelayMin" type="number" min="0" placeholder="5000" />
-            </div>
-            <div class="form-group">
-              <span class="form-label">429 延迟最大 ms</span>
-              <input id="antiBanDelayMax" type="number" min="0" placeholder="10000" />
+            <div class="form-grid cols-4">
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">选择模式</span><span class="field-key">key_selection</span></div>
+                <select id="antiBanKeySelection">
+                  <option value="sticky">粘住（最高健康分）</option>
+                  <option value="balanced">加权随机</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">命中冷却时</span><span class="field-key">sticky_on_cooldown</span></div>
+                <select id="antiBanStickyOnCooldown">
+                  <option value="fallthrough">落到下一个</option>
+                  <option value="wait">等待恢复</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">最大重试次数</span><span class="field-key">retry.max_attempts</span></div>
+                <input id="antiBanRetryMaxAttempts" type="number" min="1" placeholder="3" />
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">重试总时长上限</span><span class="field-key">retry.max_total_ms</span><span class="form-label-unit">ms</span></div>
+                <input id="antiBanRetryMaxTotalMs" type="number" min="0" placeholder="30000" />
+              </div>
             </div>
           </div>
         </div>
+
+        <!-- 子节 3：高级调参 -->
+        <details class="advanced-section" id="antiBanAdvanced">
+          <summary>高级调参（保存即生效）</summary>
+
+          <div class="config-section">
+            <div class="config-section-title">
+              <span class="ssec-title">重试触发与选择器下限</span>
+              <span class="ssec-meta">retry.* / selector.min_weight</span>
+            </div>
+            <div class="config-row">
+              <div>
+                <span class="form-label">允许重试的错误类别</span>
+                <p class="form-hint">默认都开启。关闭后对应类别错误不会触发代理内自动重试。</p>
+              </div>
+              <div>
+                <div class="checkbox-inline-group">
+                  <label class="checkbox-wrapper">
+                    <input id="antiBanRetryOnRateLimit" type="checkbox" />
+                    <span class="checkbox-label">429 限流 <span class="field-key">retry_on_rate_limit</span></span>
+                  </label>
+                  <label class="checkbox-wrapper">
+                    <input id="antiBanRetryOnTransient" type="checkbox" />
+                    <span class="checkbox-label">5xx / 网络瞬时错误 <span class="field-key">retry_on_transient</span></span>
+                  </label>
+                </div>
+                <div class="form-group" style="margin-top:14px;max-width:320px;">
+                  <div class="form-label-row"><span class="form-label">加权随机最小权重</span><span class="field-key">selector.min_weight</span></div>
+                  <input id="antiBanSelectorMinWeight" type="number" min="0" max="1" step="0.01" placeholder="0.05" />
+                  <p class="form-hint">balanced 模式下，避免低分 Key 权重归零而完全不被选中。</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="config-section">
+            <div class="config-section-title">
+              <span class="ssec-title">健康评分参数</span>
+              <span class="ssec-meta">health.* — 滑动窗口健康分的超参，通常无需调整</span>
+            </div>
+            <div class="form-grid cols-3">
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">滑动窗口</span><span class="field-key">window_ms</span><span class="form-label-unit">ms</span></div>
+                <input id="antiBanHealthWindowMs" type="number" min="1000" placeholder="300000" />
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">429 单次扣分</span><span class="field-key">rate_limit_penalty_per_event</span></div>
+                <input id="antiBanHealthRlPenalty" type="number" min="0" max="1" step="0.01" placeholder="0.15" />
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">429 扣分下限</span><span class="field-key">rate_limit_penalty_floor</span></div>
+                <input id="antiBanHealthRlFloor" type="number" min="0" max="1" step="0.01" placeholder="0.2" />
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">瞬时错误单次扣分</span><span class="field-key">transient_penalty_per_event</span></div>
+                <input id="antiBanHealthTransPenalty" type="number" min="0" max="1" step="0.01" placeholder="0.10" />
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">瞬时错误扣分下限</span><span class="field-key">transient_penalty_floor</span></div>
+                <input id="antiBanHealthTransFloor" type="number" min="0" max="1" step="0.01" placeholder="0.3" />
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">连续错误单次扣分</span><span class="field-key">consecutive_penalty_per_event</span></div>
+                <input id="antiBanHealthConsPenalty" type="number" min="0" max="1" step="0.01" placeholder="0.20" />
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">连续错误扣分下限</span><span class="field-key">consecutive_penalty_floor</span></div>
+                <input id="antiBanHealthConsFloor" type="number" min="0" max="1" step="0.01" placeholder="0.1" />
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">新鲜成功加成</span><span class="field-key">fresh_success_boost</span></div>
+                <input id="antiBanHealthSuccessBoost" type="number" min="0" step="0.01" placeholder="1.05" />
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">新鲜成功窗口</span><span class="field-key">fresh_success_window_ms</span><span class="form-label-unit">ms</span></div>
+                <input id="antiBanHealthSuccessWindowMs" type="number" min="0" placeholder="60000" />
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">健康分下限</span><span class="field-key">score_floor</span></div>
+                <input id="antiBanHealthScoreFloor" type="number" min="0" max="1" step="0.01" placeholder="0.1" />
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">健康分上限</span><span class="field-key">score_ceiling</span></div>
+                <input id="antiBanHealthScoreCeiling" type="number" min="0" step="0.01" placeholder="1.05" />
+              </div>
+            </div>
+          </div>
+
+          <div class="config-section">
+            <div class="config-section-title">
+              <span class="ssec-title">配额持久化</span>
+              <span class="ssec-meta">quota.* — runtime_usage.json 的写入策略</span>
+            </div>
+            <div class="form-grid cols-3">
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">每 N 次请求落盘</span><span class="field-key">persist_every_n_requests</span></div>
+                <input id="antiBanQuotaPersistEvery" type="number" min="0" placeholder="50" />
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">临界阈值强制落盘</span><span class="field-key">persist_critical_threshold</span></div>
+                <input id="antiBanQuotaCritical" type="number" min="0" max="1" step="0.01" placeholder="0.85" />
+              </div>
+              <div class="form-group">
+                <div class="form-label-row"><span class="form-label">用量文件名</span><span class="field-key">usage_file</span></div>
+                <input id="antiBanQuotaUsageFile" type="text" placeholder="runtime_usage.json" />
+              </div>
+            </div>
+          </div>
+        </details>
       </div>
     </div>
 

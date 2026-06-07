@@ -93,6 +93,11 @@ export async function startServer(options: { host: string; port: number; configP
     shuttingDown = true;
     log('info', '收到退出信号，准备关闭服务', { signal });
     try {
+      await app.runtimeConfigManager.shutdown();
+    } catch {
+      // ignore
+    }
+    try {
       await app.close();
     } catch {
       // ignore

@@ -123,11 +123,6 @@ export interface AppSettings {
   clusterWorkers: number;
   keyMaxErrors: number;
   keyAutoDisable: boolean;
-  antiBanMode: 'conservative' | 'throughput';
-  keyMaxConcurrent: number;
-  keyMinIntervalMs: number;
-  key429DelayMinMs: number;
-  key429DelayMaxMs: number;
 }
 
 function toNumber(raw: string | undefined, fallback: number): number {
@@ -183,10 +178,5 @@ export const settings: AppSettings = {
   rateLimitTimeWindow: toNumber(process.env.RATE_LIMIT_TIME_WINDOW, 60000),
   clusterWorkers: (() => { const v = Number(process.env.CLUSTER_WORKERS); return Number.isFinite(v) && v >= 0 ? v : 0; })(),
   keyMaxErrors: toNumber(process.env.KEY_MAX_ERRORS, 5),
-  keyAutoDisable: toBoolean(process.env.KEY_AUTO_DISABLE, true),
-  antiBanMode: 'conservative',
-  keyMaxConcurrent: 1,
-  keyMinIntervalMs: 1000,
-  key429DelayMinMs: 5000,
-  key429DelayMaxMs: 10000
+  keyAutoDisable: toBoolean(process.env.KEY_AUTO_DISABLE, true)
 };

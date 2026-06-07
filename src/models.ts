@@ -1,6 +1,7 @@
 /**
  * 核心数据模型与运行时配置校验。
  */
+import { nanoid } from './utils/nanoid.js';
 
 export interface AnthropicTool {
   name: string;
@@ -39,15 +40,67 @@ export enum KeyRotationStrategy {
 
 export type AntiBanMode = 'conservative' | 'throughput';
 
+export type KeySelectionMode = 'sticky' | 'balanced';
+export type StickyOnCooldown = 'wait' | 'fallthrough';
+
+export interface RetryConfig {
+  max_attempts?: number;
+  max_total_ms?: number;
+  retry_on_rate_limit?: boolean;
+  retry_on_transient?: boolean;
+}
+
+export interface SelectorConfig {
+  min_weight?: number;
+}
+
+export interface HealthConfig {
+  window_ms?: number;
+  rate_limit_penalty_per_event?: number;
+  rate_limit_penalty_floor?: number;
+  transient_penalty_per_event?: number;
+  transient_penalty_floor?: number;
+  consecutive_penalty_per_event?: number;
+  consecutive_penalty_floor?: number;
+  fresh_success_boost?: number;
+  fresh_success_window_ms?: number;
+  score_floor?: number;
+  score_ceiling?: number;
+}
+
+export interface QuotaPersistConfig {
+  persist_every_n_requests?: number;
+  persist_critical_threshold?: number;
+  usage_file?: string;
+}
+
+export interface KeyQuotaConfig {
+  max_requests: number | null;
+  max_tokens: number | null;
+  soft_stop_threshold?: number;
+}
+
+export interface KeyUsage {
+  requests_used: number;
+  tokens_used: number;
+}
+
 export interface AntiBanConfig {
   mode?: AntiBanMode;
   max_concurrent?: number;
   min_interval_ms?: number;
   rate_limit_delay_min_ms?: number;
   rate_limit_delay_max_ms?: number;
+  key_selection?: KeySelectionMode;
+  sticky_on_cooldown?: StickyOnCooldown;
+  retry?: RetryConfig;
+  selector?: SelectorConfig;
+  health?: HealthConfig;
+  quota?: QuotaPersistConfig;
 }
 
 export interface ApiKeyEntry {
+  id: string;
   key: string;
   enabled: boolean;
   error_count: number;
@@ -56,12 +109,28 @@ export interface ApiKeyEntry {
   last_error_message: string | null;
   auto_disabled_at: number | null;
   note?: string;
+  quota?: KeyQuotaConfig | null;
+}
+
+/**
+ * runtime_models.json 中实际持久化的 Key 形状：只保留用户配置字段。
+ * 运行态字段（error_count / disabled_at / last_error_* / auto_disabled_at / 自动禁用后的 enabled）
+ * 由 KeyStateStore 写入 runtime_state.json，按 id 索引；
+ * id 一旦生成不再变更，用户改 key 字面量也能保留历史。
+ */
+export interface PersistedApiKey {
+  id: string;
+  key: string;
+  enabled?: boolean;
+  note?: string;
+  quota?: KeyQuotaConfig | null;
 }
 
 export interface ProviderConfig {
   provider_id: string;
   provider_type: 'openai_compatible' | 'anthropic';
   base_url: string;
+  quota?: KeyQuotaConfig | null;
   api_key?: string | ApiKeyEntry[] | null;
   api_key_env?: string | null;
   key_rotation_strategy?: KeyRotationStrategy | null;
@@ -104,6 +173,7 @@ export interface ResolvedProvider {
   provider_id: string;
   provider_type: 'openai_compatible' | 'anthropic';
   base_url: string;
+  quota?: KeyQuotaConfig | null;
   api_keys: ApiKeyEntry[];
   key_rotation_strategy: KeyRotationStrategy;
   auto_disable_on_error: boolean;
@@ -111,7 +181,7 @@ export interface ResolvedProvider {
   stream_idle_timeout_seconds: number;
   enabled: boolean;
   headers: Record<string, string>;
-  anti_ban: Required<AntiBanConfig>;
+  anti_ban: import('./services/anti-ban-config.js').ResolvedAntiBan;
   description: string;
 }
 
@@ -129,6 +199,7 @@ export function normalizeRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
     provider_id: String(item.provider_id || '').trim(),
     provider_type: normalizeProviderType(item.provider_type),
     base_url: String(item.base_url || '').trim(),
+    quota: normalizeKeyQuota(item.quota),
     api_key: normalizeApiKeyField(item.api_key),
     api_key_env: normalizeOptional(item.api_key_env),
     key_rotation_strategy: normalizeRotationStrategy(item.key_rotation_strategy),
@@ -201,6 +272,46 @@ export function validateRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
   return config;
 }
 
+/**
+ * 序列化前剥离 api_key 数组中的运行时字段；保留用户配置字段。
+ * 同时返回剥离出来的运行态记录（按 id 索引），调用方可写入 KeyStateStore。
+ */
+export function stripRuntimeFromConfig(config: RuntimeConfig): {
+  config: RuntimeConfig;
+  runtimeByProvider: Record<string, Record<string, ApiKeyRuntimeFields>>;
+} {
+  const runtimeByProvider: Record<string, Record<string, ApiKeyRuntimeFields>> = {};
+  const providers = config.providers.map((p) => {
+    if (!Array.isArray(p.api_key)) return p;
+    const runtime: Record<string, ApiKeyRuntimeFields> = {};
+    const cleaned: PersistedApiKey[] = p.api_key.map((entry) => {
+      const persisted: PersistedApiKey = { id: entry.id, key: entry.key };
+      if (entry.enabled === false) persisted.enabled = false;
+      if (entry.note) persisted.note = entry.note;
+      if (entry.quota !== undefined) persisted.quota = entry.quota;
+      const rt: ApiKeyRuntimeFields = {};
+      if (entry.error_count) rt.error_count = entry.error_count;
+      if (entry.disabled_at != null) rt.disabled_at = entry.disabled_at;
+      if (entry.last_error_at != null) rt.last_error_at = entry.last_error_at;
+      if (entry.last_error_message != null) rt.last_error_message = entry.last_error_message;
+      if (entry.auto_disabled_at != null) rt.auto_disabled_at = entry.auto_disabled_at;
+      if (Object.keys(rt).length > 0) runtime[entry.id] = rt;
+      return persisted;
+    });
+    if (Object.keys(runtime).length > 0) runtimeByProvider[p.provider_id] = runtime;
+    return { ...p, api_key: cleaned as unknown as ApiKeyEntry[] };
+  });
+  return { config: { ...config, providers }, runtimeByProvider };
+}
+
+export interface ApiKeyRuntimeFields {
+  error_count?: number;
+  disabled_at?: number | null;
+  last_error_at?: number | null;
+  last_error_message?: string | null;
+  auto_disabled_at?: number | null;
+}
+
 export function summarizeRuntimeConfig(config: RuntimeConfig): RuntimeConfigSummary {
   return {
     provider_count: config.providers.length,
@@ -228,6 +339,7 @@ function normalizeApiKeyField(value: unknown): string | ApiKeyEntry[] | null {
       .map((k) => k.trim())
       .filter((k) => k.length > 0)
       .map((k) => ({
+        id: nanoid(),
         key: k,
         enabled: true,
         error_count: 0,
@@ -244,7 +356,9 @@ function normalizeApiKeyField(value: unknown): string | ApiKeyEntry[] | null {
         const key = String(item.key || '').trim();
         if (!key) return null;
         const note = item.note ? String(item.note).trim() : '';
+        const rawId = typeof item.id === 'string' ? item.id.trim() : '';
         const base: ApiKeyEntry = {
+          id: rawId || nanoid(),
           key,
           enabled: item.enabled !== false,
           error_count: Number(item.error_count) || 0,
@@ -254,6 +368,8 @@ function normalizeApiKeyField(value: unknown): string | ApiKeyEntry[] | null {
           auto_disabled_at: item.auto_disabled_at ?? null
         };
         if (note) base.note = note;
+        const quota = normalizeKeyQuota(item.quota);
+        if (quota !== undefined) base.quota = quota;
         return base;
       })
       .filter((item): item is ApiKeyEntry => item !== null);
@@ -265,6 +381,23 @@ function normalizeHeaders(headers: Record<string, unknown>): Record<string, stri
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) {
     result[String(key).trim()] = String(value).trim();
+  }
+  return result;
+}
+
+function normalizeKeyQuota(value: unknown): KeyQuotaConfig | null | undefined {
+  if (value === null) return null;
+  if (!isPlainObject(value)) return undefined;
+  const maxReq = normalizeOptionalNumber(value.max_requests);
+  const maxTok = normalizeOptionalNumber(value.max_tokens);
+  if (maxReq == null && maxTok == null && value.soft_stop_threshold == null) return undefined;
+  const result: KeyQuotaConfig = {
+    max_requests: maxReq,
+    max_tokens: maxTok
+  };
+  const threshold = Number(value.soft_stop_threshold);
+  if (Number.isFinite(threshold) && threshold > 0 && threshold <= 1) {
+    result.soft_stop_threshold = threshold;
   }
   return result;
 }
@@ -283,7 +416,76 @@ function normalizeAntiBanConfig(value: unknown): AntiBanConfig | undefined {
   if (delayMin != null) result.rate_limit_delay_min_ms = delayMin;
   const delayMax = normalizeNonNegativeNumber(value.rate_limit_delay_max_ms);
   if (delayMax != null) result.rate_limit_delay_max_ms = delayMax;
+  if (value.key_selection === 'sticky' || value.key_selection === 'balanced') {
+    result.key_selection = value.key_selection;
+  }
+  if (value.sticky_on_cooldown === 'wait' || value.sticky_on_cooldown === 'fallthrough') {
+    result.sticky_on_cooldown = value.sticky_on_cooldown;
+  }
+  // 高级 anti-ban 配置需要白名单保留，否则 Admin 保存会意外清掉手写 JSON 调参。
+  const retry = normalizeRetryConfig(value.retry);
+  if (retry) result.retry = retry;
+  const selector = normalizeSelectorConfig(value.selector);
+  if (selector) result.selector = selector;
+  const health = normalizeHealthConfig(value.health);
+  if (health) result.health = health;
+  const quota = normalizeQuotaPersistConfig(value.quota);
+  if (quota) result.quota = quota;
   return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function normalizeRetryConfig(value: unknown): RetryConfig | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const result: RetryConfig = {};
+  const attempts = normalizeOptionalNumber(value.max_attempts);
+  if (attempts != null) result.max_attempts = Math.trunc(attempts);
+  const totalMs = normalizeNonNegativeNumber(value.max_total_ms);
+  if (totalMs != null) result.max_total_ms = Math.trunc(totalMs);
+  if (typeof value.retry_on_rate_limit === 'boolean') result.retry_on_rate_limit = value.retry_on_rate_limit;
+  if (typeof value.retry_on_transient === 'boolean') result.retry_on_transient = value.retry_on_transient;
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function normalizeSelectorConfig(value: unknown): SelectorConfig | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const minWeight = normalizeRatio(value.min_weight);
+  return minWeight == null ? undefined : { min_weight: minWeight };
+}
+
+function normalizeHealthConfig(value: unknown): HealthConfig | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const result: HealthConfig = {};
+  setHealthNumber(result, 'window_ms', value.window_ms, true);
+  setHealthNumber(result, 'rate_limit_penalty_per_event', value.rate_limit_penalty_per_event);
+  setHealthNumber(result, 'rate_limit_penalty_floor', value.rate_limit_penalty_floor);
+  setHealthNumber(result, 'transient_penalty_per_event', value.transient_penalty_per_event);
+  setHealthNumber(result, 'transient_penalty_floor', value.transient_penalty_floor);
+  setHealthNumber(result, 'consecutive_penalty_per_event', value.consecutive_penalty_per_event);
+  setHealthNumber(result, 'consecutive_penalty_floor', value.consecutive_penalty_floor);
+  setHealthNumber(result, 'fresh_success_boost', value.fresh_success_boost);
+  setHealthNumber(result, 'fresh_success_window_ms', value.fresh_success_window_ms, true);
+  setHealthNumber(result, 'score_floor', value.score_floor);
+  setHealthNumber(result, 'score_ceiling', value.score_ceiling);
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function normalizeQuotaPersistConfig(value: unknown): QuotaPersistConfig | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const result: QuotaPersistConfig = {};
+  const every = normalizeNonNegativeNumber(value.persist_every_n_requests);
+  if (every != null) result.persist_every_n_requests = Math.trunc(every);
+  const critical = normalizeRatio(value.persist_critical_threshold);
+  if (critical != null) result.persist_critical_threshold = critical;
+  const usageFile = typeof value.usage_file === 'string' ? value.usage_file.trim() : '';
+  if (usageFile) result.usage_file = usageFile;
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function setHealthNumber(target: HealthConfig, key: keyof HealthConfig, raw: unknown, integer = false): void {
+  const num = normalizeNonNegativeNumber(raw);
+  if (num != null) {
+    (target as Record<string, number>)[key] = integer ? Math.trunc(num) : num;
+  }
 }
 
 function normalizeRotationStrategy(value: unknown): KeyRotationStrategy {
@@ -320,4 +522,10 @@ function normalizeNonNegativeNumber(value: unknown): number | null {
   if (value == null) return null;
   const num = Number(value);
   return Number.isFinite(num) && num >= 0 ? num : null;
+}
+
+function normalizeRatio(value: unknown): number | null {
+  if (value == null) return null;
+  const num = Number(value);
+  return Number.isFinite(num) && num >= 0 && num <= 1 ? num : null;
 }

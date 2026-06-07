@@ -2,10 +2,16 @@ import { setGlobalDispatcher, Agent } from 'undici';
 import { settings } from '../config.js';
 import type { ResolvedProvider, ResolvedRoute } from '../models.js';
 import type { ApiKeyRotator, KeyLease } from './api-key-rotator.js';
+import { log } from '../utils/logger.js';
 
-const responseLeases = new WeakMap<Response, { rotator: ApiKeyRotator; lease: KeyLease }>();
+interface ResponseMeta {
+  rotator: ApiKeyRotator;
+  key: string;
+  lease?: KeyLease;
+}
 
-// 设置全局连接池配置
+const responseMeta = new WeakMap<Response, ResponseMeta>();
+
 const agent = new Agent({
   keepAliveTimeout: settings.keepAliveTimeout,
   keepAliveMaxTimeout: settings.keepAliveTimeout * 2,
@@ -14,7 +20,6 @@ const agent = new Agent({
 });
 setGlobalDispatcher(agent);
 
-// 转发时需要剥离的 hop-by-hop 头和 auth 头（auth 由上游 key 替换）
 const HEADERS_TO_STRIP = new Set([
   'host', 'connection', 'keep-alive', 'transfer-encoding',
   'content-length', 'te', 'trailer', 'upgrade',
@@ -113,7 +118,7 @@ export class UpstreamService {
       return { response: await fetch(params.url, fetchParams), lease };
     } catch (error) {
       if (params.rotator && lease) {
-        params.rotator.markNetworkError(lease.key, error instanceof Error ? error.message : String(error));
+        params.rotator.markError(lease.key, error instanceof Error ? error.message : String(error), 'network');
         params.rotator.release(lease);
       }
       throw error;
@@ -167,62 +172,88 @@ export class UpstreamService {
     anthropicBeta?: string;
   }): Promise<Response> {
     const body = JSON.stringify(params.payload);
-
-    const timeoutMs = params.payload.stream === true
+    const isStream = params.payload.stream === true;
+    const timeoutMs = isStream
       ? undefined
       : Math.max(1000, params.provider.timeout_seconds * 1000 || settings.requestTimeoutMs);
 
-    if (params.rotator && !params.rotator.hasAvailableKey()) {
-      throw new Error(`供应商 ${params.provider.provider_id} 的所有 API Key 均不可用`);
-    }
+    const retry = params.provider.anti_ban.retry;
+    const deadline = Date.now() + retry.max_total_ms;
+    let lastResponse: Response | undefined;
 
-    const result = await this.doFetch({
-      url: params.url,
-      provider: params.provider,
-      rotator: params.rotator,
-      payload: body,
-      timeoutMs,
-      requestId: params.requestId,
-      sessionId: params.sessionId,
-      incomingHeaders: params.incomingHeaders,
-      anthropicVersion: params.anthropicVersion,
-      anthropicBeta: params.anthropicBeta,
-    });
+    for (let attempt = 0; attempt < retry.max_attempts; attempt++) {
+      if (attempt > 0 && Date.now() >= deadline) break;
 
-    const response = result.response;
-    const usedKey = result.lease?.key;
-
-    if (response.ok) {
-      if (params.rotator && usedKey) {
-        params.rotator.markSuccess(usedKey);
+      if (params.rotator && !params.rotator.hasAvailableKey()) {
+        if (lastResponse) return lastResponse;
+        throw new Error(`供应商 ${params.provider.provider_id} 的所有 API Key 均不可用`);
       }
-      if (params.rotator && result.lease) {
-        if (params.payload.stream === true) {
-          responseLeases.set(response, { rotator: params.rotator, lease: result.lease });
-        } else {
-          params.rotator.release(result.lease);
+
+      const result = await this.doFetch({
+        url: params.url,
+        provider: params.provider,
+        rotator: params.rotator,
+        payload: body,
+        timeoutMs,
+        requestId: params.requestId,
+        sessionId: params.sessionId,
+        incomingHeaders: params.incomingHeaders,
+        anthropicVersion: params.anthropicVersion,
+        anthropicBeta: params.anthropicBeta,
+      });
+
+      const response = result.response;
+      const usedKey = result.lease?.key;
+
+      if (response.ok) {
+        if (params.rotator && usedKey) {
+          params.rotator.markSuccess(usedKey);
+          if (isStream && result.lease) {
+            responseMeta.set(response, { rotator: params.rotator, key: usedKey, lease: result.lease });
+          } else {
+            responseMeta.set(response, { rotator: params.rotator, key: usedKey });
+            if (result.lease) params.rotator.release(result.lease);
+          }
         }
+        return response;
       }
-      return response;
-    }
 
-    if (params.rotator && usedKey) {
       const bodyText = await readResponseText(response);
       const errorText = summarizeUpstreamError(response, bodyText);
       const classification = classifyUpstreamError(response.status, response.statusText, bodyText);
-      if (classification.category === 'hard_limit') {
-        params.rotator.markQuotaError(usedKey, errorText);
-      } else if (classification.category === 'rate_limit') {
-        params.rotator.markRateLimited(usedKey, errorText);
-      } else {
-        params.rotator.markError(usedKey, errorText);
+
+      // 排查 429 / 4xx 自动禁用是否生效：把分类结果与原始 body 一起打出来。
+      if (!response.ok) {
+        log('warn', '上游错误响应分类', {
+          provider_id: params.provider.provider_id,
+          status: response.status,
+          status_text: response.statusText,
+          category: classification.category,
+          reason: classification.reason,
+          used_key: usedKey ? usedKey.slice(0, 6) + '***' : null,
+          body_preview: bodyText.slice(0, 500)
+        });
       }
-      if (result.lease) {
-        params.rotator.release(result.lease);
+
+      if (params.rotator && usedKey) {
+        if (classification.category === 'hard_limit') {
+          params.rotator.markQuotaError(usedKey, errorText);
+        } else if (classification.category === 'rate_limit') {
+          params.rotator.markRateLimited(usedKey, errorText);
+        } else {
+          params.rotator.markError(usedKey, errorText);
+        }
+        if (result.lease) params.rotator.release(result.lease);
       }
+
+      lastResponse = response;
+
+      if (classification.category === 'hard_limit') return response;
+      if (classification.category === 'rate_limit' && !retry.retry_on_rate_limit) return response;
+      if (classification.category === 'transient' && !retry.retry_on_transient) return response;
     }
 
-    return response;
+    return lastResponse ?? new Response('upstream retry exhausted with no response', { status: 502 });
   }
 
   async countTokensViaProviderResponse(params: {
@@ -339,6 +370,45 @@ export function isQuotaLimitError(text: string): boolean {
 
 export function classifyUpstreamError(status: number, statusText: string, bodyText: string): { category: 'hard_limit' | 'rate_limit' | 'transient'; reason: string } {
   const normalized = bodyText.toLowerCase();
+
+  // hardLimit 必须最先判：quota / insufficient / 账号封禁 等是真正不可恢复，
+  // 不能被「token limit」「context length」这类同样含 limit 字样的临时错误抢先。
+  const hardLimit = [
+    'quota',
+    'insufficient_quota',
+    'insufficient quota',
+    'insufficient_user_quota',
+    'billing hard limit',
+    'usage limit',
+    'exceeded your current quota',
+    'exceeded your quota',
+    'quota exceeded',
+    'out of quota',
+    'invalid api key',
+    'invalid_api_key',
+    'unauthorized key',
+    'incorrect api key',
+    'api key is invalid',
+    'account banned',
+    'account suspended',
+    '限额',
+    '配额',
+    '额度',
+    '余额不足',
+    '用量不足',
+    '用量已达',
+    '账单硬限制',
+    '账单限制',
+    '封禁',
+    '账号封禁',
+    '账号停用',
+    '账号异常'
+  ];
+  if (hardLimit.some((keyword) => normalized.includes(keyword))) {
+    return { category: 'hard_limit', reason: 'hard limit or invalid key' };
+  }
+
+  // 上下文 / 输入过长：临时错误（重试同样会失败但不是 key 的问题），归 rate_limit 让上层换 key。
   const tokenLimit = [
     'token-limit',
     'token limit',
@@ -353,38 +423,6 @@ export function classifyUpstreamError(status: number, statusText: string, bodyTe
   ];
   if (tokenLimit.some((keyword) => normalized.includes(keyword))) {
     return { category: 'rate_limit', reason: 'temporary token or request limit' };
-  }
-
-  const hardLimit = [
-    'quota',
-    'insufficient_quota',
-    'insufficient quota',
-    'billing hard limit',
-    'usage limit',
-    'invalid api key',
-    'invalid_api_key',
-    'unauthorized key',
-    'incorrect api key',
-    'api key is invalid',
-    'account banned',
-    'account suspended',
-    '限额',
-    '配额',
-    '额度',
-    '超限',
-    '超过限制',
-    '余额不足',
-    '用量不足',
-    '用量已达',
-    '账单硬限制',
-    '账单限制',
-    '封禁',
-    '账号封禁',
-    '账号停用',
-    '账号异常'
-  ];
-  if (hardLimit.some((keyword) => normalized.includes(keyword))) {
-    return { category: 'hard_limit', reason: 'hard limit or invalid key' };
   }
 
   const rateLimit = [
@@ -405,11 +443,12 @@ export function classifyUpstreamError(status: number, statusText: string, bodyTe
   return { category: 'transient', reason: statusText || 'transient upstream error' };
 }
 
-export function releaseUpstreamResponse(response: Response): void {
-  const lease = responseLeases.get(response);
-  if (!lease) return;
-  lease.rotator.release(lease.lease);
-  responseLeases.delete(response);
+export function releaseUpstreamResponse(response: Response, usage?: { requests: number; tokens: number }): void {
+  const meta = responseMeta.get(response);
+  if (!meta) return;
+  if (usage) meta.rotator.recordUsage(meta.key, usage.requests, usage.tokens);
+  if (meta.lease) meta.rotator.release(meta.lease);
+  responseMeta.delete(response);
 }
 
 async function readResponseText(response: Response): Promise<string> {

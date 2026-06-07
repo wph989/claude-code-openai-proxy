@@ -17,8 +17,13 @@ coverage
 
 # 运行时数据文件
 runtime_models.json
+runtime_usage.json
+runtime_state.json
 *.log
 logs/
+
+# 冒烟测试用的本地脚本（不提交）
+scripts/mock-upstream.mjs
 
 # 调试日志
 npm-debug.log*
@@ -55,3 +60,4 @@ temp/
 .pids
 local_test.md
 pids/
+docs/

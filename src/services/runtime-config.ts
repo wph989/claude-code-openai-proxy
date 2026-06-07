@@ -1,17 +1,24 @@
-import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { settings } from '../config.js';
 import { setRuntimeProxyToken } from '../auth.js';
 import { ApiKeyRotator, type KeyStateChange } from './api-key-rotator.js';
+import { resolveAntiBanConfig, type ResolvedAntiBan } from './anti-ban-config.js';
+import { UsageStore } from './usage-store.js';
+import { KeyStateStore, type KeyRuntimeRecord } from './key-state-store.js';
+import { writeJsonAtomic } from '../utils/atomic-write.js';
+import { nanoid } from '../utils/nanoid.js';
 import {
   KeyRotationStrategy,
-  type AntiBanConfig,
   type ApiKeyEntry,
+  type KeyQuotaConfig,
+  type KeyUsage,
   type ProviderConfig,
   type ResolvedProvider,
   type ResolvedRoute,
   type RuntimeConfig,
   normalizeRuntimeConfig,
+  stripRuntimeFromConfig,
   summarizeRuntimeConfig,
   validateRuntimeConfig
 } from '../models.js';
@@ -29,6 +36,10 @@ export class RuntimeConfigManager {
   private rotators: Map<string, ApiKeyRotator> = new Map();
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   private persisting: Promise<void> | null = null;
+  private usageStore: UsageStore | null = null;
+  private preloadedUsage: Record<string, KeyUsage> = {};
+  private stateStore: KeyStateStore | null = null;
+  private preloadedState: Record<string, KeyRuntimeRecord> = {};
 
   constructor(configPath = settings.configFile) {
     this.configPath = path.resolve(configPath);
@@ -50,11 +61,95 @@ export class RuntimeConfigManager {
   async reload(): Promise<RuntimeConfig> {
     const text = await readFile(this.configPath, 'utf-8');
     const raw = JSON.parse(text) as RuntimeConfig;
-    this.config = validateRuntimeConfig(raw);
+    const needsIdRewrite = detectMissingIds(raw);
+    const validated = validateRuntimeConfig(raw);
+
+    await this.initStateStore();
+    this.applyStateStoreToConfig(validated);
+
+    this.config = validated;
     setRuntimeProxyToken(this.config.proxy_auth_token ?? null);
     applyGlobalSettings(this.config);
+    await this.initUsageStore();
     this.rebuildRotators();
+    await this.reconcileStores();
+
+    if (needsIdRewrite) {
+      // 旧版 runtime_models.json 不含 id 字段：normalize 时已现场分配，立刻持久化干净版本。
+      await this.persistNow();
+    }
     return this.getConfig();
+  }
+
+  private async initStateStore(): Promise<void> {
+    const stateFile = path.resolve(path.dirname(this.configPath), 'runtime_state.json');
+    this.stateStore = new KeyStateStore(stateFile);
+    this.preloadedState = await this.stateStore.load();
+  }
+
+  /**
+   * 将 state 文件中的运行态字段合并回 ApiKeyEntry（按 providerId:id 索引）。
+   */
+  private applyStateStoreToConfig(config: RuntimeConfig): void {
+    if (!this.stateStore) return;
+    for (const provider of config.providers) {
+      if (!Array.isArray(provider.api_key)) continue;
+      for (const entry of provider.api_key) {
+        const composite = `${provider.provider_id}:${entry.id}`;
+        const record = this.preloadedState[composite];
+        if (!record) continue;
+        if (record.error_count != null) entry.error_count = record.error_count;
+        if (record.disabled_at !== undefined) entry.disabled_at = record.disabled_at ?? null;
+        if (record.last_error_at !== undefined) entry.last_error_at = record.last_error_at ?? null;
+        if (record.last_error_message !== undefined) entry.last_error_message = record.last_error_message ?? null;
+        if (record.auto_disabled_at !== undefined) entry.auto_disabled_at = record.auto_disabled_at ?? null;
+        if (record.auto_disabled_at != null) entry.enabled = false;
+      }
+    }
+  }
+
+  private async initUsageStore(): Promise<void> {
+    const ab = resolveAntiBanConfig(this.config.anti_ban);
+    const usageFile = path.isAbsolute(ab.quota.usage_file)
+      ? ab.quota.usage_file
+      : path.resolve(path.dirname(this.configPath), ab.quota.usage_file);
+    this.usageStore = new UsageStore(usageFile, {
+      every_n: ab.quota.persist_every_n_requests,
+      critical_threshold: ab.quota.persist_critical_threshold
+    });
+    this.preloadedUsage = await this.usageStore.load();
+  }
+
+  /**
+   * 启动 / 配置变更后，把 state 和 usage 文件对齐到当前 config 的全量 key 集合。
+   * 缺的补默认零值，多的清掉，保证文件可见性等于内存可见性。
+   */
+  private async reconcileStores(): Promise<void> {
+    const desired = new Set<string>();
+    for (const p of this.config.providers) {
+      const keys = resolveApiKeys(p);
+      for (const k of keys) desired.add(`${p.provider_id}:${k.id}`);
+    }
+    const defaults: KeyRuntimeRecord = {
+      error_count: 0,
+      disabled_at: null,
+      last_error_at: null,
+      last_error_message: null,
+      auto_disabled_at: null
+    };
+    const tasks: Promise<void>[] = [];
+    if (this.stateStore && this.stateStore.reconcile(desired, defaults)) {
+      tasks.push(this.stateStore.forceFlush());
+    }
+    if (this.usageStore && this.usageStore.reconcile(desired)) {
+      tasks.push(this.usageStore.forceFlush());
+    }
+    if (tasks.length) await Promise.all(tasks);
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.usageStore) await this.usageStore.forceFlush();
+    if (this.stateStore) await this.stateStore.forceFlush();
   }
 
   async ensureDefaultConfig(): Promise<void> {
@@ -66,13 +161,18 @@ export class RuntimeConfigManager {
 
   async saveConfig(raw: RuntimeConfig): Promise<RuntimeConfig> {
     const validated = validateRuntimeConfig(raw);
-    const dir = path.dirname(this.configPath);
-    await mkdir(dir, { recursive: true });
-    await writeFile(this.configPath, JSON.stringify(validated, null, 2) + '\n', 'utf-8');
+
+    if (!this.stateStore) await this.initStateStore();
+    // 来自 admin 的 payload 通常不含运行态字段，但保险起见仍走一次合并；同时把 admin 改的 enabled / quota 等带回内存。
+    this.applyStateStoreToConfig(validated);
+
     this.config = validated;
     setRuntimeProxyToken(this.config.proxy_auth_token ?? null);
     applyGlobalSettings(this.config);
+    await this.initUsageStore();
     this.rebuildRotators();
+    await this.reconcileStores();
+    await this.persistNow();
     return this.getConfig();
   }
 
@@ -118,13 +218,14 @@ export class RuntimeConfigManager {
 
     const apiKeys = resolveApiKeys(provider);
     const autoDisable = provider.auto_disable_on_error !== false;
-    const antiBan = resolveAntiBanConfig(provider.anti_ban);
+    const antiBan = resolveAntiBanConfig(provider.anti_ban, this.config.anti_ban);
     const rotator = this.getOrCreateRotator(provider.provider_id, apiKeys, provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin, autoDisable, antiBan);
 
     const resolvedProvider: ResolvedProvider = {
       provider_id: provider.provider_id,
       provider_type: provider.provider_type,
       base_url: replaceEnv(provider.base_url),
+      quota: provider.quota ?? null,
       api_keys: apiKeys,
       key_rotation_strategy: provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin,
       auto_disable_on_error: autoDisable,
@@ -148,13 +249,14 @@ export class RuntimeConfigManager {
     return { route: resolvedRoute, provider: resolvedProvider, rotator };
   }
 
-  private getOrCreateRotator(providerId: string, keys: ApiKeyEntry[], strategy: KeyRotationStrategy, autoDisable: boolean, antiBan: Required<AntiBanConfig>): ApiKeyRotator {
+  private getOrCreateRotator(providerId: string, keys: ApiKeyEntry[], strategy: KeyRotationStrategy, autoDisable: boolean, antiBan: ResolvedAntiBan): ApiKeyRotator {
     const existing = this.rotators.get(providerId);
     if (existing && keysEqual(existing.keys, keys) && existing.strategy === strategy && antiBanEqual(existing.antiBan, antiBan)) {
       return existing;
     }
     const rotator = new ApiKeyRotator(keys, strategy, autoDisable, antiBan);
     rotator.onChange = (key, patch) => this.onKeyStateChange(providerId, key, patch);
+    this.attachUsageBridge(providerId, rotator);
     this.rotators.set(providerId, rotator);
     return rotator;
   }
@@ -165,12 +267,30 @@ export class RuntimeConfigManager {
       const apiKeys = resolveApiKeys(provider);
       const strategy = provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin;
       const autoDisable = provider.auto_disable_on_error !== false;
-      const antiBan = resolveAntiBanConfig(provider.anti_ban);
+      const antiBan = resolveAntiBanConfig(provider.anti_ban, this.config.anti_ban);
       if (apiKeys.length > 0) {
         const rotator = new ApiKeyRotator(apiKeys, strategy, autoDisable, antiBan);
         rotator.onChange = (key, patch) => this.onKeyStateChange(provider.provider_id, key, patch);
+        this.attachUsageBridge(provider.provider_id, rotator);
         this.rotators.set(provider.provider_id, rotator);
       }
+    }
+  }
+
+  private attachUsageBridge(providerId: string, rotator: ApiKeyRotator): void {
+    for (const k of rotator.getKeys()) {
+      const ck = `${providerId}:${k.id}`;
+      const prior = this.preloadedUsage[ck];
+      if (prior) rotator.hydrateUsage(k.key, prior);
+    }
+    if (this.usageStore) {
+      const store = this.usageStore;
+      const idByKey = new Map(rotator.getKeys().map((k) => [k.key, k.id]));
+      rotator.setUsageListener((key, usage, ratio) => {
+        const id = idByKey.get(key);
+        if (!id) return;
+        store.update(`${providerId}:${id}`, usage, ratio);
+      });
     }
   }
 
@@ -185,7 +305,22 @@ export class RuntimeConfigManager {
     Object.assign(entry, patch);
     provider.api_key = keys;
 
-    this.schedulePersist();
+    // 把运行态字段写入 state 文件；用户配置字段（enabled / note / quota）变化才需要持久化 config。
+    const runtimePatch: KeyRuntimeRecord = {};
+    if (patch.error_count != null) runtimePatch.error_count = patch.error_count;
+    if (patch.disabled_at !== undefined) runtimePatch.disabled_at = patch.disabled_at;
+    if (patch.last_error_at !== undefined) runtimePatch.last_error_at = patch.last_error_at;
+    if (patch.last_error_message !== undefined) runtimePatch.last_error_message = patch.last_error_message;
+    if (patch.auto_disabled_at !== undefined) runtimePatch.auto_disabled_at = patch.auto_disabled_at;
+
+    if (Object.keys(runtimePatch).length > 0 && this.stateStore) {
+      this.stateStore.update(`${providerId}:${entry.id}`, runtimePatch);
+    }
+
+    const userFieldChanged = patch.enabled !== undefined || patch.note !== undefined;
+    if (userFieldChanged) {
+      this.schedulePersist();
+    }
   }
 
   private schedulePersist(): void {
@@ -200,11 +335,8 @@ export class RuntimeConfigManager {
     if (this.persisting) return this.persisting;
     this.persisting = (async () => {
       try {
-        const dir = path.dirname(this.configPath);
-        await mkdir(dir, { recursive: true });
-        const tmpPath = this.configPath + '.tmp';
-        await writeFile(tmpPath, JSON.stringify(this.config, null, 2) + '\n', 'utf-8');
-        await rename(tmpPath, this.configPath);
+        const { config: cleaned } = stripRuntimeFromConfig(this.config);
+        await writeJsonAtomic(this.configPath, cleaned);
       } catch (err) {
         console.error('[config] 持久化配置失败:', err);
       } finally {
@@ -281,6 +413,34 @@ export class RuntimeConfigManager {
     }
 
     rotator.resetErrorCount(keys[keyIndex].key);
+    rotator.resetUsage(keys[keyIndex].key);
+    if (this.usageStore) await this.usageStore.forceFlush();
+    await this.persistNow();
+  }
+
+  async resetKeyQuota(providerId: string, keyIndex: number): Promise<void> {
+    const rotator = this.rotators.get(providerId);
+    if (!rotator) throw new Error(`未找到供应商的 rotator：${providerId}`);
+    const keys = rotator.getKeys();
+    if (keyIndex < 0 || keyIndex >= keys.length) {
+      throw new Error(`无效的 key 索引：${keyIndex}`);
+    }
+    rotator.resetUsage(keys[keyIndex].key);
+    if (this.usageStore) await this.usageStore.forceFlush();
+  }
+
+  async updateKeyQuota(providerId: string, keyIndex: number, quota: KeyQuotaConfig | null): Promise<void> {
+    const provider = this.config.providers.find((p) => p.provider_id === providerId);
+    if (!provider) throw new Error(`未找到供应商：${providerId}`);
+    const keys = resolveApiKeys(provider);
+    if (keyIndex < 0 || keyIndex >= keys.length) {
+      throw new Error(`无效的 key 索引：${keyIndex}`);
+    }
+    const entry = keys[keyIndex];
+    entry.quota = quota;
+    provider.api_key = keys;
+    const rotator = this.rotators.get(providerId);
+    rotator?.setKeyQuota(entry.key, quota);
     await this.persistNow();
   }
 
@@ -297,6 +457,7 @@ export class RuntimeConfigManager {
     }
 
     const newKey: ApiKeyEntry = {
+      id: nanoid(),
       key: trimmed,
       enabled: true,
       error_count: 0,
@@ -310,6 +471,7 @@ export class RuntimeConfigManager {
     provider.api_key = keys;
 
     this.rebuildRotators();
+    await this.reconcileStores();
     await this.persistNow();
 
     return newKey;
@@ -329,10 +491,12 @@ export class RuntimeConfigManager {
       entry.auto_disabled_at = null;
       entry.last_error_at = null;
       entry.last_error_message = null;
+      rotator?.resetUsage(entry.key);
       count++;
     }
     provider.api_key = keys;
     this.rebuildRotators();
+    if (this.usageStore) await this.usageStore.forceFlush();
     await this.persistNow();
     return count;
   }
@@ -354,6 +518,7 @@ export class RuntimeConfigManager {
         continue;
       }
       const newKey: ApiKeyEntry = {
+        id: nanoid(),
         key: trimmed,
         enabled: true,
         error_count: 0,
@@ -370,6 +535,7 @@ export class RuntimeConfigManager {
     if (added.length > 0) {
       provider.api_key = keys;
       this.rebuildRotators();
+      await this.reconcileStores();
       await this.persistNow();
     }
 
@@ -385,10 +551,16 @@ export class RuntimeConfigManager {
       throw new Error(`无效的 key 索引：${keyIndex}`);
     }
 
+    const removed = keys[keyIndex];
     keys.splice(keyIndex, 1);
     provider.api_key = keys;
 
+    if (this.stateStore && removed) {
+      this.stateStore.remove(`${providerId}:${removed.id}`);
+    }
+
     this.rebuildRotators();
+    await this.reconcileStores();
     await this.persistNow();
   }
 }
@@ -402,6 +574,7 @@ function resolveApiKeys(provider: ProviderConfig): ApiKeyEntry[] {
         const trimmed = key.trim();
         if (trimmed) {
           keys.push({
+            id: nanoid(),
             key: trimmed,
             enabled: true,
             error_count: 0,
@@ -424,6 +597,7 @@ function resolveApiKeys(provider: ProviderConfig): ApiKeyEntry[] {
         const val = process.env[trimmed]?.trim();
         if (val) {
           keys.push({
+            id: nanoid(),
             key: val,
             enabled: true,
             error_count: 0,
@@ -442,38 +616,32 @@ function resolveApiKeys(provider: ProviderConfig): ApiKeyEntry[] {
   for (const entry of keys) {
     if (!seen.has(entry.key)) {
       seen.add(entry.key);
-      unique.push(entry);
+      unique.push(applyProviderQuota(entry, provider.quota));
     }
   }
   return unique;
 }
 
+function applyProviderQuota(entry: ApiKeyEntry, providerQuota: KeyQuotaConfig | null | undefined): ApiKeyEntry {
+  // quota: undefined 表示继承供应商默认值；null 表示该 key 显式不使用配额。
+  if (entry.quota !== undefined) return entry;
+  if (providerQuota === undefined) return entry;
+  return { ...entry, quota: providerQuota };
+}
+
 function keysEqual(a: ApiKeyEntry[], b: ApiKeyEntry[]): boolean {
   if (a.length !== b.length) return false;
-  return a.every((entry, i) => entry.key === b[i].key && entry.enabled === b[i].enabled);
+  return a.every((entry, i) => (
+    entry.id === b[i].id
+    && entry.key === b[i].key
+    && entry.enabled === b[i].enabled
+    && JSON.stringify(entry.quota ?? null) === JSON.stringify(b[i].quota ?? null)
+  ));
 }
 
-function antiBanEqual(a: Required<AntiBanConfig>, b: Required<AntiBanConfig>): boolean {
-  return a.mode === b.mode
-    && a.max_concurrent === b.max_concurrent
-    && a.min_interval_ms === b.min_interval_ms
-    && a.rate_limit_delay_min_ms === b.rate_limit_delay_min_ms
-    && a.rate_limit_delay_max_ms === b.rate_limit_delay_max_ms;
-}
-
-function resolveAntiBanConfig(config?: AntiBanConfig): Required<AntiBanConfig> {
-  const mode = config?.mode ?? settings.antiBanMode;
-  const defaults = mode === 'throughput'
-    ? { max_concurrent: 3, min_interval_ms: 100, rate_limit_delay_min_ms: 1000, rate_limit_delay_max_ms: 3000 }
-    : { max_concurrent: 1, min_interval_ms: 1000, rate_limit_delay_min_ms: 5000, rate_limit_delay_max_ms: 10000 };
-  const delayMin = Math.max(0, Math.trunc(config?.rate_limit_delay_min_ms ?? settings.key429DelayMinMs ?? defaults.rate_limit_delay_min_ms));
-  return {
-    mode,
-    max_concurrent: Math.max(1, Math.trunc(config?.max_concurrent ?? settings.keyMaxConcurrent ?? defaults.max_concurrent)),
-    min_interval_ms: Math.max(0, Math.trunc(config?.min_interval_ms ?? settings.keyMinIntervalMs ?? defaults.min_interval_ms)),
-    rate_limit_delay_min_ms: delayMin,
-    rate_limit_delay_max_ms: Math.max(delayMin, Math.trunc(config?.rate_limit_delay_max_ms ?? settings.key429DelayMaxMs ?? defaults.rate_limit_delay_max_ms))
-  };
+function antiBanEqual(a: ResolvedAntiBan, b: ResolvedAntiBan): boolean {
+  if (a === b) return true;
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 function replaceEnv(value: string): string {
@@ -497,12 +665,21 @@ function applyGlobalSettings(config: RuntimeConfig): void {
   if (config.key_max_errors != null && config.key_max_errors > 0) {
     settings.keyMaxErrors = config.key_max_errors;
   }
-  const antiBan = resolveAntiBanConfig(config.anti_ban);
-  settings.antiBanMode = antiBan.mode;
-  settings.keyMaxConcurrent = antiBan.max_concurrent;
-  settings.keyMinIntervalMs = antiBan.min_interval_ms;
-  settings.key429DelayMinMs = antiBan.rate_limit_delay_min_ms;
-  settings.key429DelayMaxMs = antiBan.rate_limit_delay_max_ms;
+}
+
+/**
+ * 检测原始 JSON 是否包含缺 id 的 api_key 项；用于决定 reload 后是否要立刻回写干净版本。
+ * normalize 会现场补 id，不能用 normalize 后的结果判断。
+ */
+function detectMissingIds(raw: RuntimeConfig): boolean {
+  if (!Array.isArray(raw?.providers)) return false;
+  for (const p of raw.providers) {
+    if (!Array.isArray(p?.api_key)) continue;
+    for (const entry of p.api_key as Array<{ id?: unknown }>) {
+      if (!entry || typeof entry.id !== 'string' || entry.id.trim() === '') return true;
+    }
+  }
+  return false;
 }
 
 export function buildDefaultRuntimeConfig(): RuntimeConfig {

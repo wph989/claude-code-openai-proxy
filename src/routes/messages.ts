@@ -151,10 +151,12 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
         return reply.code(upstreamResponse.status).send(data);
       }
       const { body, usage } = openAIToAnthropicResponse(payload.model, data);
+      releaseUpstreamResponse(upstreamResponse, { requests: 1, tokens: (usage.input_tokens || 0) + (usage.output_tokens || 0) });
       log('info', '非流式响应完成', {
         provider_id: provider.provider_id,
         client_model: payload.model,
         upstream_model: route.upstream_model,
+        upstream_status: upstreamResponse.status,
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
         response_body: body
@@ -184,6 +186,13 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
     });
     output.pipe(reply.raw);
 
+    // 客户端断开时取消上游 body，让 bridge 的 finally 释放 lease，避免 activeRequests 泄漏。
+    const onClientClose = () => {
+      try { upstreamResponse.body?.cancel().catch(() => {}); } catch { /* noop */ }
+      output.destroy();
+    };
+    reply.raw.once('close', onClientClose);
+
     void bridgeOpenAIStreamToAnthropic({
       upstreamResponse,
       output,
@@ -197,6 +206,8 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
         upstreamModel: route.upstream_model
       },
       idleTimeoutMs: Math.max(1000, provider.stream_idle_timeout_seconds * 1000 || settings.streamIdleTimeoutMs)
+    }).finally(() => {
+      reply.raw.off('close', onClientClose);
     });
   });
 }

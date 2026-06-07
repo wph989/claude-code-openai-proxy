@@ -28,6 +28,29 @@ const antiBanMaxConcurrentInput = $('#antiBanMaxConcurrent');
 const antiBanMinIntervalInput = $('#antiBanMinInterval');
 const antiBanDelayMinInput = $('#antiBanDelayMin');
 const antiBanDelayMaxInput = $('#antiBanDelayMax');
+const antiBanKeySelectionInput = $('#antiBanKeySelection');
+const antiBanStickyOnCooldownInput = $('#antiBanStickyOnCooldown');
+const antiBanRetryMaxAttemptsInput = $('#antiBanRetryMaxAttempts');
+const antiBanRetryMaxTotalMsInput = $('#antiBanRetryMaxTotalMs');
+const antiBanRetryOnRateLimitInput = $('#antiBanRetryOnRateLimit');
+const antiBanRetryOnTransientInput = $('#antiBanRetryOnTransient');
+const antiBanSelectorMinWeightInput = $('#antiBanSelectorMinWeight');
+const antiBanHealthInputs = {
+  window_ms: $('#antiBanHealthWindowMs'),
+  rate_limit_penalty_per_event: $('#antiBanHealthRlPenalty'),
+  rate_limit_penalty_floor: $('#antiBanHealthRlFloor'),
+  transient_penalty_per_event: $('#antiBanHealthTransPenalty'),
+  transient_penalty_floor: $('#antiBanHealthTransFloor'),
+  consecutive_penalty_per_event: $('#antiBanHealthConsPenalty'),
+  consecutive_penalty_floor: $('#antiBanHealthConsFloor'),
+  fresh_success_boost: $('#antiBanHealthSuccessBoost'),
+  fresh_success_window_ms: $('#antiBanHealthSuccessWindowMs'),
+  score_floor: $('#antiBanHealthScoreFloor'),
+  score_ceiling: $('#antiBanHealthScoreCeiling'),
+};
+const antiBanQuotaPersistEveryInput = $('#antiBanQuotaPersistEvery');
+const antiBanQuotaCriticalInput = $('#antiBanQuotaCritical');
+const antiBanQuotaUsageFileInput = $('#antiBanQuotaUsageFile');
 const tabProviders = $('#tab-providers');
 const tabModels = $('#tab-models');
 const tableContainer = $('#table-container');
@@ -162,6 +185,7 @@ function formatTime(ts) {
 function keyStatusLabel(status, key) {
   if (!key.enabled) return key.auto_disabled_at ? '自动禁用' : '已禁用';
   if (status === 'delayed') return '延迟中';
+  if (status === 'busy') return `占满 ${key.active_requests}`;
   return '可用';
 }
 
@@ -178,8 +202,87 @@ function keyErrorCategoryLabel(category) {
 function keyRuntimeReason(key) {
   if (key.disabled_reason) return keyErrorCategoryLabel(key.last_error_category) || '不可用';
   if (key.status === 'delayed' && key.next_available_at) return `临时限流，等待至 ${formatTime(key.next_available_at)}`;
+  if (key.status === 'available' && key.last_error_category) {
+    const label = keyErrorCategoryLabel(key.last_error_category);
+    return label ? `已恢复（最近：${label}）` : '';
+  }
   if (key.last_error_category) return keyErrorCategoryLabel(key.last_error_category);
   return '';
+}
+
+function openQuotaEditor(providerId, keyIndex, current) {
+  const c = current || {};
+  const reqVal = c.max_requests != null ? c.max_requests : '';
+  const tokVal = c.max_tokens != null ? c.max_tokens : '';
+  const thrVal = c.soft_stop_threshold != null ? c.soft_stop_threshold : '';
+  const html = `
+    <p class="form-hint">本地软停用配额：达到 上限 × 软停阈值 时让 Key 自动离开候选池；用户配置 enabled 不变，调用 /reset 或重置配额后立即恢复。三项留空 = 清除配额。</p>
+    <div class="form-grid">
+      <div class="form-group">
+        <div class="form-label-row"><span class="form-label">请求次数上限</span><span class="field-key">max_requests</span></div>
+        <input id="qf-max-req" type="number" min="1" value="${esc(reqVal)}" placeholder="留空 = 不限"/>
+      </div>
+      <div class="form-group">
+        <div class="form-label-row"><span class="form-label">Token 总量上限</span><span class="field-key">max_tokens</span></div>
+        <input id="qf-max-tok" type="number" min="1" value="${esc(tokVal)}" placeholder="留空 = 不限"/>
+      </div>
+      <div class="form-group">
+        <div class="form-label-row"><span class="form-label">软停阈值 (0,1]</span><span class="field-key">soft_stop_threshold</span></div>
+        <input id="qf-threshold" type="number" min="0" max="1" step="0.01" value="${esc(thrVal)}" placeholder="0.95"/>
+      </div>
+    </div>`;
+  Dialog.show(`编辑配额 — ${providerId} #${keyIndex + 1}`, html, [
+    { text: '取消', class: 'btn-secondary' },
+    { text: '保存', class: 'btn-primary', action: () => submitQuota(providerId, keyIndex) }
+  ]);
+}
+
+function submitQuota(providerId, keyIndex) {
+  let quota;
+  try {
+    quota = readQuotaInputs('qf');
+  } catch (err) {
+    Dialog.alert('错误', err.message);
+    return;
+  }
+  fetch(`/api/keys/${encodeURIComponent(providerId)}/${keyIndex}/quota`, {
+    method: 'PUT', credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ quota })
+  })
+  .then(res => res.json().then(data => ({ ok: res.ok, data })))
+  .then(({ ok, data }) => {
+    if (!ok) throw new Error(data.message || '保存失败');
+    setStatus(data.message || '配额已更新');
+    renderKeyPanel(providerId);
+  })
+  .catch(err => Dialog.alert('错误', '保存失败：' + err.message));
+}
+
+function readQuotaInputs(prefix) {
+  const reqRaw = document.getElementById(`${prefix}-max-req`).value.trim();
+  const tokRaw = document.getElementById(`${prefix}-max-tok`).value.trim();
+  const thrRaw = document.getElementById(`${prefix}-threshold`).value.trim();
+  if (!reqRaw && !tokRaw && !thrRaw) return null;
+
+  const max_requests = reqRaw ? Number(reqRaw) : null;
+  const max_tokens = tokRaw ? Number(tokRaw) : null;
+  if (reqRaw && (!Number.isFinite(max_requests) || max_requests <= 0)) {
+    throw new Error('请求次数上限必须为正数');
+  }
+  if (tokRaw && (!Number.isFinite(max_tokens) || max_tokens <= 0)) {
+    throw new Error('Token 总量上限必须为正数');
+  }
+
+  const quota = { max_requests, max_tokens };
+  if (thrRaw) {
+    const threshold = Number(thrRaw);
+    if (!Number.isFinite(threshold) || threshold <= 0 || threshold > 1) {
+      throw new Error('软停阈值必须在 (0, 1] 之间');
+    }
+    quota.soft_stop_threshold = threshold;
+  }
+  return quota;
 }
 
 function antiBanDefaults(mode) {
@@ -188,31 +291,116 @@ function antiBanDefaults(mode) {
     : { mode: 'conservative', max_concurrent: 1, min_interval_ms: 1000, rate_limit_delay_min_ms: 5000, rate_limit_delay_max_ms: 10000 };
 }
 
+function readPositiveInt(input) {
+  const v = parseInt(input.value, 10);
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+
+function readNonNegativeInt(input) {
+  const v = parseInt(input.value, 10);
+  return Number.isFinite(v) && v >= 0 ? v : null;
+}
+
+function readRatio(input) {
+  if (!input.value.trim()) return null;
+  const v = Number(input.value);
+  return Number.isFinite(v) && v >= 0 && v <= 1 ? v : null;
+}
+
+function readPositiveFloat(input) {
+  if (!input.value.trim()) return null;
+  const v = Number(input.value);
+  return Number.isFinite(v) && v >= 0 ? v : null;
+}
+
+function setNumberInput(input, value) {
+  input.value = value == null ? '' : value;
+}
+
 function readAntiBanConfig() {
   const mode = antiBanModeInput.value === 'throughput' ? 'throughput' : 'conservative';
   const defaults = antiBanDefaults(mode);
-  const maxConcurrent = parseInt(antiBanMaxConcurrentInput.value, 10);
-  const minInterval = parseInt(antiBanMinIntervalInput.value, 10);
-  const delayMin = parseInt(antiBanDelayMinInput.value, 10);
-  const delayMax = parseInt(antiBanDelayMaxInput.value, 10);
-  const normalizedDelayMin = Number.isFinite(delayMin) && delayMin >= 0 ? delayMin : defaults.rate_limit_delay_min_ms;
-  return {
+  const maxConcurrent = readPositiveInt(antiBanMaxConcurrentInput) ?? defaults.max_concurrent;
+  const minInterval = readNonNegativeInt(antiBanMinIntervalInput) ?? defaults.min_interval_ms;
+  const delayMin = readNonNegativeInt(antiBanDelayMinInput) ?? defaults.rate_limit_delay_min_ms;
+  const delayMaxRaw = readNonNegativeInt(antiBanDelayMaxInput);
+  const delayMax = delayMaxRaw != null && delayMaxRaw >= delayMin
+    ? delayMaxRaw
+    : Math.max(delayMin, defaults.rate_limit_delay_max_ms);
+
+  const result = {
     mode,
-    max_concurrent: Number.isFinite(maxConcurrent) && maxConcurrent > 0 ? maxConcurrent : defaults.max_concurrent,
-    min_interval_ms: Number.isFinite(minInterval) && minInterval >= 0 ? minInterval : defaults.min_interval_ms,
-    rate_limit_delay_min_ms: normalizedDelayMin,
-    rate_limit_delay_max_ms: Number.isFinite(delayMax) && delayMax >= normalizedDelayMin ? delayMax : Math.max(normalizedDelayMin, defaults.rate_limit_delay_max_ms)
+    max_concurrent: maxConcurrent,
+    min_interval_ms: minInterval,
+    rate_limit_delay_min_ms: delayMin,
+    rate_limit_delay_max_ms: delayMax,
+    key_selection: antiBanKeySelectionInput.value === 'balanced' ? 'balanced' : 'sticky',
+    sticky_on_cooldown: antiBanStickyOnCooldownInput.value === 'wait' ? 'wait' : 'fallthrough',
   };
+
+  const retry = {};
+  const retryAttempts = readPositiveInt(antiBanRetryMaxAttemptsInput);
+  if (retryAttempts != null) retry.max_attempts = retryAttempts;
+  const retryTotal = readNonNegativeInt(antiBanRetryMaxTotalMsInput);
+  if (retryTotal != null) retry.max_total_ms = retryTotal;
+  retry.retry_on_rate_limit = antiBanRetryOnRateLimitInput.checked;
+  retry.retry_on_transient = antiBanRetryOnTransientInput.checked;
+  result.retry = retry;
+
+  const minWeight = readRatio(antiBanSelectorMinWeightInput);
+  if (minWeight != null) result.selector = { min_weight: minWeight };
+
+  const health = {};
+  for (const [field, input] of Object.entries(antiBanHealthInputs)) {
+    if (!input.value.trim()) continue;
+    const v = field === 'window_ms' || field === 'fresh_success_window_ms'
+      ? readNonNegativeInt(input)
+      : readPositiveFloat(input);
+    if (v != null) health[field] = v;
+  }
+  if (Object.keys(health).length > 0) result.health = health;
+
+  const quota = {};
+  const persistEvery = readNonNegativeInt(antiBanQuotaPersistEveryInput);
+  if (persistEvery != null) quota.persist_every_n_requests = persistEvery;
+  const critical = readRatio(antiBanQuotaCriticalInput);
+  if (critical != null) quota.persist_critical_threshold = critical;
+  const usageFile = antiBanQuotaUsageFileInput.value.trim();
+  if (usageFile) quota.usage_file = usageFile;
+  if (Object.keys(quota).length > 0) result.quota = quota;
+
+  return result;
 }
 
 function fillAntiBanConfig(config) {
-  const mode = config?.mode === 'throughput' ? 'throughput' : 'conservative';
+  const cfg = config || {};
+  const mode = cfg.mode === 'throughput' ? 'throughput' : 'conservative';
   const defaults = antiBanDefaults(mode);
   antiBanModeInput.value = mode;
-  antiBanMaxConcurrentInput.value = config?.max_concurrent ?? defaults.max_concurrent;
-  antiBanMinIntervalInput.value = config?.min_interval_ms ?? defaults.min_interval_ms;
-  antiBanDelayMinInput.value = config?.rate_limit_delay_min_ms ?? defaults.rate_limit_delay_min_ms;
-  antiBanDelayMaxInput.value = config?.rate_limit_delay_max_ms ?? defaults.rate_limit_delay_max_ms;
+  antiBanMaxConcurrentInput.value = cfg.max_concurrent ?? defaults.max_concurrent;
+  antiBanMinIntervalInput.value = cfg.min_interval_ms ?? defaults.min_interval_ms;
+  antiBanDelayMinInput.value = cfg.rate_limit_delay_min_ms ?? defaults.rate_limit_delay_min_ms;
+  antiBanDelayMaxInput.value = cfg.rate_limit_delay_max_ms ?? defaults.rate_limit_delay_max_ms;
+  antiBanKeySelectionInput.value = cfg.key_selection === 'balanced' ? 'balanced' : 'sticky';
+  antiBanStickyOnCooldownInput.value = cfg.sticky_on_cooldown === 'wait' ? 'wait' : 'fallthrough';
+
+  const retry = cfg.retry || {};
+  setNumberInput(antiBanRetryMaxAttemptsInput, retry.max_attempts);
+  setNumberInput(antiBanRetryMaxTotalMsInput, retry.max_total_ms);
+  antiBanRetryOnRateLimitInput.checked = retry.retry_on_rate_limit !== false;
+  antiBanRetryOnTransientInput.checked = retry.retry_on_transient !== false;
+
+  setNumberInput(antiBanSelectorMinWeightInput, cfg.selector?.min_weight);
+
+  const health = cfg.health || {};
+  for (const [field, input] of Object.entries(antiBanHealthInputs)) {
+    setNumberInput(input, health[field]);
+  }
+
+  const quota = cfg.quota || {};
+  setNumberInput(antiBanQuotaPersistEveryInput, quota.persist_every_n_requests);
+  setNumberInput(antiBanQuotaCriticalInput, quota.persist_critical_threshold);
+  antiBanQuotaUsageFileInput.value = quota.usage_file || '';
 }
 
 // ── API ──
@@ -429,6 +617,7 @@ function renderTableHead(fields, st, labels) {
 
 function renderProviderRow(p, idx) {
   const strat = strategyLabel(p.key_rotation_strategy);
+  const quotaText = quotaSummary(p.quota);
   const typeLabel = p.provider_type === 'anthropic' ? 'Anthropic' : 'OpenAI';
   const badge = p.enabled !== false
     ? `<span class="badge badge-on toggle-enabled" data-idx="${idx}" data-type="provider" title="点击停用">启用</span>`
@@ -443,7 +632,7 @@ function renderProviderRow(p, idx) {
     <td class="col-id">${esc(p.provider_id)}</td>
     <td>${typeLabel}</td>
     <td class="col-url" title="${esc(p.base_url)}">${esc(p.base_url)}</td>
-    <td class="col-strategy">${strat}</td>
+    <td class="col-strategy">${strat}<br><span class="text-dim">${esc(quotaText)}</span></td>
     <td>${badge}</td>
     <td class="col-actions">
       <button class="btn-icon keys-btn" data-provider="${esc(p.provider_id)}" title="管理 API Keys">${isExpanded ? '收起 Keys' : 'Keys'} (${keys.length})</button>
@@ -453,6 +642,15 @@ function renderProviderRow(p, idx) {
       <button class="btn-icon danger delete-btn" data-idx="${idx}">删除</button>
     </td>
   </tr>`;
+}
+
+function quotaSummary(quota) {
+  if (!quota) return '默认配额：未配置';
+  const parts = [];
+  if (quota.max_requests != null) parts.push(`请求 ${quota.max_requests}`);
+  if (quota.max_tokens != null) parts.push(`Token ${quota.max_tokens}`);
+  if (quota.soft_stop_threshold != null) parts.push(`阈值 ${quota.soft_stop_threshold}`);
+  return parts.length ? `默认配额：${parts.join(' / ')}` : '默认配额：未配置';
 }
 
 function renderKeyPanelHtml(providerId) {
@@ -469,14 +667,47 @@ function renderKeyPanelHtml(providerId) {
         : `<span class="badge badge-off toggle-enabled" data-type="key" data-provider="${esc(providerId)}" data-idx="${i}" title="点击启用">${statusLabel}</span>`)
       : (status === 'delayed'
         ? `<span class="badge badge-warn toggle-enabled" data-type="key" data-provider="${esc(providerId)}" data-idx="${i}" title="点击禁用">${statusLabel}</span>`
+        : status === 'busy'
+        ? `<span class="badge badge-info toggle-enabled" data-type="key" data-provider="${esc(providerId)}" data-idx="${i}" title="并发已满，活跃请求 ${k.active_requests}">${statusLabel}</span>`
         : `<span class="badge badge-on toggle-enabled" data-type="key" data-provider="${esc(providerId)}" data-idx="${i}" title="点击禁用">${statusLabel}</span>`);
 
     const errorBadge = k.error_count > 0
       ? `<span class="badge ${k.error_count >= 3 ? 'badge-warn' : 'badge-info'}">错误 ${k.error_count} 次</span>`
       : '<span class="text-dim">无错误</span>';
 
+    const healthBadge = (() => {
+      if (k.health_score == null) return '';
+      const s = Number(k.health_score);
+      const cls = s >= 0.7 ? 'health-good' : s >= 0.4 ? 'health-warn' : 'health-bad';
+      return `<span class="badge ${cls}" title="健康分（滑动窗口评分）">健康 ${s.toFixed(2)}</span>`;
+    })();
+
+    const quotaBlock = (() => {
+      if (!k.quota) return '<span class="text-dim">未配置配额</span>';
+      const usage = k.usage || { requests_used: 0, tokens_used: 0 };
+      const reqMax = k.quota.max_requests;
+      const tokMax = k.quota.max_tokens;
+      const reqPct = reqMax ? Math.min(100, Math.round(usage.requests_used / reqMax * 100)) : 0;
+      const tokPct = tokMax ? Math.min(100, Math.round(usage.tokens_used / tokMax * 100)) : 0;
+      const blocked = k.quota_blocked
+        ? `<span class="badge health-bad" title="${esc(k.quota_reason || '配额接近上限')}">软停用</span>`
+        : '';
+      const reqRow = reqMax
+        ? `<div class="quota-line">请求 ${usage.requests_used}/${reqMax}<div class="quota-bar"><span style="width:${reqPct}%"></span></div></div>`
+        : '';
+      const tokRow = tokMax
+        ? `<div class="quota-line">Token ${usage.tokens_used}/${tokMax}<div class="quota-bar"><span style="width:${tokPct}%"></span></div></div>`
+        : '';
+      return `<div class="quota-row">${reqRow}${tokRow}${blocked}</div>`;
+    })();
+
     let actions = `<button class="btn-icon key-action-btn" data-provider="${esc(providerId)}" data-idx="${i}" data-action="reset">重置</button>`;
+    actions += `<button class="btn-icon key-quota-edit-btn" data-provider="${esc(providerId)}" data-idx="${i}">配额…</button>`;
+    actions += k.quota
+      ? `<button class="btn-icon key-quota-reset-btn" data-provider="${esc(providerId)}" data-idx="${i}">重置配额</button>`
+      : `<span class="btn-icon-placeholder" aria-hidden="true"></span>`;
     actions += `<button class="btn-icon danger key-delete-btn" data-provider="${esc(providerId)}" data-idx="${i}">删除</button>`;
+    actions = `<div class="key-action-grid">${actions}</div>`;
 
     const lastError = k.last_error_message
       ? `<span class="key-error-detail" title="${esc(k.last_error_message)}">${esc(k.last_error_message)} · ${formatTime(k.last_error_at)}</span>`
@@ -494,9 +725,9 @@ function renderKeyPanelHtml(providerId) {
       <td class="key-col-note">
         <input class="key-note-input" data-provider="${esc(providerId)}" data-idx="${i}" value="${esc(k.note || '')}" placeholder="备注..." />
       </td>
-      <td class="key-col-status">${enabledBadge}</td>
+      <td class="key-col-status">${enabledBadge}${healthBadge ? '<br>' + healthBadge : ''}</td>
       <td class="key-col-errors">${errorBadge}${lastError ? '<br>' + lastError : ''}</td>
-      <td class="key-col-runtime">${runtimeInfo}</td>
+      <td class="key-col-runtime">${runtimeInfo}<br>${quotaBlock}</td>
       <td class="key-col-time">${k.auto_disabled_at ? formatTime(k.auto_disabled_at) : (k.disabled_at ? formatTime(k.disabled_at) : '-')}</td>
       <td class="key-col-actions">${actions}</td>
     </tr>`;
@@ -752,6 +983,34 @@ tableContainer.addEventListener('click', (e) => {
     return;
   }
 
+  if (target.classList.contains('key-quota-edit-btn')) {
+    const providerId = target.dataset.provider;
+    const keyIndex = parseInt(target.dataset.idx);
+    const keys = keyStates[providerId] || [];
+    const current = keys[keyIndex]?.quota || null;
+    openQuotaEditor(providerId, keyIndex, current);
+    return;
+  }
+
+  if (target.classList.contains('key-quota-reset-btn')) {
+    const providerId = target.dataset.provider;
+    const keyIndex = parseInt(target.dataset.idx);
+    Dialog.confirm('确认重置配额', `确定要清零 ${providerId} 第 ${keyIndex + 1} 个 Key 的本地配额计数吗？`, () => {
+      fetch(`/api/keys/${encodeURIComponent(providerId)}/${keyIndex}/quota/reset`, {
+        method: 'POST',
+        credentials: 'include'
+      })
+      .then(res => res.json().then(data => ({ ok: res.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.message || '重置配额失败');
+        setStatus(data.message || '配额计数已清零');
+        renderKeyPanel(providerId);
+      })
+      .catch(err => Dialog.alert('错误', '重置配额失败：' + err.message));
+    }, '确认重置', '取消', 'btn-warning');
+    return;
+  }
+
   if (target.classList.contains('key-action-btn')) {
     const providerId = target.dataset.provider;
     const keyIndex = parseInt(target.dataset.idx);
@@ -874,6 +1133,10 @@ function submitModal() {
 function providerFormHtml(item) {
   const p = item || {};
   const keys = getKeyArray(p);
+  const quota = p.quota || {};
+  const quotaReqVal = quota.max_requests != null ? quota.max_requests : '';
+  const quotaTokVal = quota.max_tokens != null ? quota.max_tokens : '';
+  const quotaThrVal = quota.soft_stop_threshold != null ? quota.soft_stop_threshold : '';
   const keyDisplay = keys.length > 0
     ? `<div class="key-info-box"><span class="form-label">当前 API Keys</span><div class="key-list-preview">${keys.map((k, i) =>
         `<div class="key-list-item ${k.enabled ? '' : 'key-disabled'}">${i + 1}. ${maskKey(k.key)} <span class="badge ${k.enabled ? 'badge-on' : 'badge-off'}">${k.enabled ? '启用' : '禁用'}</span> <span class="text-dim">错误: ${k.error_count || 0}</span></div>`
@@ -883,63 +1146,77 @@ function providerFormHtml(item) {
   return `
     <div class="form-grid">
       <div class="form-group">
-        <span class="form-label">provider_id *</span>
+        <div class="form-label-row"><span class="form-label">供应商 ID *</span><span class="field-key">provider_id</span></div>
         <input id="mf-provider_id" type="text" value="${esc(p.provider_id)}" placeholder="例如：nvidia2" />
       </div>
       <div class="form-group">
-        <span class="form-label">说明</span>
+        <div class="form-label-row"><span class="form-label">说明</span><span class="field-key">description</span></div>
         <input id="mf-description" type="text" value="${esc(p.description)}" placeholder="例如：第二个 NVIDIA 入口" />
       </div>
       <div class="form-group">
-        <span class="form-label">供应商类型 *</span>
+        <div class="form-label-row"><span class="form-label">供应商类型 *</span><span class="field-key">provider_type</span></div>
         <select id="mf-provider_type">
-          <option value="openai_compatible" ${(p.provider_type||'openai_compatible')==='openai_compatible'?'selected':''}>OpenAI Compatible（协议转换/透传）</option>
-          <option value="anthropic" ${p.provider_type==='anthropic'?'selected':''}>Anthropic Compatible（透传）</option>
+          <option value="openai_compatible" ${(p.provider_type||'openai_compatible')==='openai_compatible'?'selected':''}>OpenAI 兼容（协议转换 / 透传）</option>
+          <option value="anthropic" ${p.provider_type==='anthropic'?'selected':''}>Anthropic 兼容（透传）</option>
         </select>
       </div>
       <div class="form-group">
-        <span class="form-label">base_url *</span>
+        <div class="form-label-row"><span class="form-label">上游接入地址 *</span><span class="field-key">base_url</span></div>
         <input id="mf-base_url" type="text" value="${esc(p.base_url)}" placeholder="https://integrate.api.nvidia.com/v1" />
       </div>
       <div class="form-group">
-        <span class="form-label">api_key_env</span>
-        <input id="mf-api_key_env" type="text" value="${esc(p.api_key_env)}" placeholder="多个环境变量名用逗号分隔" />
+        <div class="form-label-row"><span class="form-label">环境变量名</span><span class="field-key">api_key_env</span></div>
+        <input id="mf-api_key_env" type="text" value="${esc(p.api_key_env)}" placeholder="多个变量名用逗号分隔" />
       </div>
       <div class="form-group">
-        <span class="form-label">新增 api_key（多个 key 用逗号分隔）</span>
+        <div class="form-label-row"><span class="form-label">新增 API Key（多个用逗号分隔）</span><span class="field-key">api_key</span></div>
         <input id="mf-api_key" type="password" value="" placeholder="留空则保留现有 Key 不变" />
       </div>
       <div class="form-group">
-        <span class="form-label">API Key 切换策略</span>
+        <div class="form-label-row"><span class="form-label">Key 切换策略</span><span class="field-key">key_rotation_strategy</span></div>
         <select id="mf-key_rotation_strategy">
-          <option value="round_robin" ${(p.key_rotation_strategy||'round_robin')==='round_robin'?'selected':''}>轮询 (Round-Robin)</option>
+          <option value="round_robin" ${(p.key_rotation_strategy||'round_robin')==='round_robin'?'selected':''}>轮询（Round-Robin）</option>
           <option value="on_429" ${p.key_rotation_strategy==='on_429'?'selected':''}>遇 429 自动切换</option>
         </select>
       </div>
       <div class="form-group">
         <label class="checkbox-wrapper">
           <input id="mf-auto_disable_on_error" type="checkbox" ${p.auto_disable_on_error!==false?'checked':''} />
-          <span class="checkbox-label">错误累计自动禁用 Key（部分不稳定供应商可关闭此功能，调用成功后错误计数自动清零）</span>
+          <span class="checkbox-label">错误累计自动禁用 Key <span class="field-key">auto_disable_on_error</span></span>
         </label>
+        <p class="form-hint">部分不稳定供应商可关闭此功能；调用成功后错误计数自动清零。</p>
       </div>
       <div class="form-group">
-        <span class="form-label">timeout_seconds</span>
+        <div class="form-label-row"><span class="form-label">请求超时</span><span class="field-key">timeout_seconds</span><span class="form-label-unit">秒</span></div>
         <input id="mf-timeout_seconds" type="number" min="1" value="${p.timeout_seconds||300}" />
       </div>
       <div class="form-group">
-        <span class="form-label">stream_idle_timeout_seconds</span>
+        <div class="form-label-row"><span class="form-label">流式空闲超时</span><span class="field-key">stream_idle_timeout_seconds</span><span class="form-label-unit">秒</span></div>
         <input id="mf-stream_idle_timeout_seconds" type="number" min="1" value="${p.stream_idle_timeout_seconds||120}" />
       </div>
+      <div class="form-group">
+        <div class="form-label-row"><span class="form-label">默认请求配额</span><span class="field-key">quota.max_requests</span></div>
+        <input id="mfq-max-req" type="number" min="1" value="${esc(quotaReqVal)}" placeholder="留空 = 不限" />
+      </div>
+      <div class="form-group">
+        <div class="form-label-row"><span class="form-label">默认 Token 配额</span><span class="field-key">quota.max_tokens</span></div>
+        <input id="mfq-max-tok" type="number" min="1" value="${esc(quotaTokVal)}" placeholder="留空 = 不限" />
+      </div>
+      <div class="form-group">
+        <div class="form-label-row"><span class="form-label">默认软停阈值</span><span class="field-key">quota.soft_stop_threshold</span></div>
+        <input id="mfq-threshold" type="number" min="0" max="1" step="0.01" value="${esc(quotaThrVal)}" placeholder="0.95" />
+      </div>
     </div>
+    <p class="form-hint">供应商配额会作为所有 Key 的默认值；单个 Key 设置了 quota 字段时优先使用 Key 自己的配额。</p>
     ${keyDisplay}
     <div class="form-group">
       <label class="checkbox-wrapper">
         <input id="mf-enabled" type="checkbox" ${p.enabled!==false?'checked':''} />
-        <span class="checkbox-label">启用该供应商</span>
+        <span class="checkbox-label">启用该供应商 <span class="field-key">enabled</span></span>
       </label>
     </div>
     <div class="form-group">
-      <span class="form-label">headers（JSON 对象，可选）</span>
+      <div class="form-label-row"><span class="form-label">自定义请求头（JSON 对象，可选）</span><span class="field-key">headers</span></div>
       <textarea id="mf-headers" placeholder='{"api-version":"2024-xx"}'>${JSON.stringify(p.headers||{},null,2)}</textarea>
     </div>`;
 }
@@ -952,33 +1229,33 @@ function modelFormHtml(item) {
   return `
     <div class="form-grid">
       <div class="form-group">
-        <span class="form-label">客户端模型名 *</span>
+        <div class="form-label-row"><span class="form-label">客户端模型名 *</span><span class="field-key">client_model</span></div>
         <input id="mf-client_model" type="text" value="${esc(m.client_model)}" placeholder="例如：claude-sonnet-4-5" />
       </div>
       <div class="form-group">
-        <span class="form-label">绑定供应商 *</span>
+        <div class="form-label-row"><span class="form-label">绑定供应商 *</span><span class="field-key">provider_id</span></div>
         <select id="mf-provider_id">
           <option value="">请选择供应商</option>
           ${providerOpts}
         </select>
       </div>
       <div class="form-group">
-        <span class="form-label">上游模型名 *</span>
+        <div class="form-label-row"><span class="form-label">上游模型名 *</span><span class="field-key">upstream_model</span></div>
         <input id="mf-upstream_model" type="text" value="${esc(m.upstream_model)}" placeholder="例如：meta/llama-3.1-70b-instruct" />
       </div>
       <div class="form-group">
-        <span class="form-label">说明</span>
+        <div class="form-label-row"><span class="form-label">说明</span><span class="field-key">description</span></div>
         <input id="mf-description" type="text" value="${esc(m.description)}" placeholder="例如：给 Claude Code 使用的映射" />
       </div>
     </div>
     <div class="form-group">
       <label class="checkbox-wrapper">
         <input id="mf-enabled" type="checkbox" ${m.enabled!==false?'checked':''} />
-        <span class="checkbox-label">启用该模型映射</span>
+        <span class="checkbox-label">启用该模型映射 <span class="field-key">enabled</span></span>
       </label>
     </div>
     <div class="form-group">
-      <span class="form-label">extra_body（JSON 对象，可选）</span>
+      <div class="form-label-row"><span class="form-label">额外请求体（JSON 对象，可选）</span><span class="field-key">extra_body</span></div>
       <textarea id="mf-extra_body" placeholder='{"top_k":20}'>${JSON.stringify(m.extra_body||{},null,2)}</textarea>
     </div>`;
 }
@@ -986,8 +1263,8 @@ function modelFormHtml(item) {
 function collectProviderForm() {
   const provider_id = $('#mf-provider_id').value.trim();
   const base_url = $('#mf-base_url').value.trim();
-  if (!provider_id) throw new Error('provider_id 不能为空');
-  if (!base_url) throw new Error('base_url 不能为空');
+  if (!provider_id) throw new Error('供应商 ID 不能为空');
+  if (!base_url) throw new Error('上游接入地址 不能为空');
 
   const newKeyInput = $('#mf-api_key').value.trim();
   let apiKey = null;
@@ -998,6 +1275,8 @@ function collectProviderForm() {
     }));
     if (apiKey.length === 0) apiKey = null;
   }
+
+  const quota = readQuotaInputs('mfq');
 
   return {
     provider_id,
@@ -1010,6 +1289,7 @@ function collectProviderForm() {
     stream_idle_timeout_seconds: Number($('#mf-stream_idle_timeout_seconds').value || 120),
     enabled: $('#mf-enabled').checked,
     auto_disable_on_error: $('#mf-auto_disable_on_error').checked,
+    quota,
     headers: parseJsonSafe($('#mf-headers').value, {}),
     description: $('#mf-description').value.trim(),
   };
@@ -1019,9 +1299,9 @@ function collectModelForm() {
   const client_model = $('#mf-client_model').value.trim();
   const provider_id = $('#mf-provider_id').value.trim();
   const upstream_model = $('#mf-upstream_model').value.trim();
-  if (!client_model) throw new Error('client_model 不能为空');
-  if (!provider_id) throw new Error('provider_id 不能为空');
-  if (!upstream_model) throw new Error('upstream_model 不能为空');
+  if (!client_model) throw new Error('客户端模型名 不能为空');
+  if (!provider_id) throw new Error('绑定供应商 不能为空');
+  if (!upstream_model) throw new Error('上游模型名 不能为空');
   return {
     client_model,
     provider_id,
@@ -1059,13 +1339,30 @@ defaultClientModel.addEventListener('change', updatePreview);
 proxyAuthTokenInput.addEventListener('input', updatePreview);
 keyMaxErrorsInput.addEventListener('input', updatePreview);
 antiBanModeInput.addEventListener('change', () => {
-  fillAntiBanConfig(antiBanDefaults(antiBanModeInput.value));
+  const mode = antiBanModeInput.value === 'throughput' ? 'throughput' : 'conservative';
+  const defaults = antiBanDefaults(mode);
+  antiBanModeInput.value = mode;
+  antiBanMaxConcurrentInput.value = defaults.max_concurrent;
+  antiBanMinIntervalInput.value = defaults.min_interval_ms;
+  antiBanDelayMinInput.value = defaults.rate_limit_delay_min_ms;
+  antiBanDelayMaxInput.value = defaults.rate_limit_delay_max_ms;
   updatePreviewNow();
 });
 antiBanMaxConcurrentInput.addEventListener('input', updatePreview);
 antiBanMinIntervalInput.addEventListener('input', updatePreview);
 antiBanDelayMinInput.addEventListener('input', updatePreview);
 antiBanDelayMaxInput.addEventListener('input', updatePreview);
+antiBanKeySelectionInput.addEventListener('change', updatePreview);
+antiBanStickyOnCooldownInput.addEventListener('change', updatePreview);
+antiBanRetryMaxAttemptsInput.addEventListener('input', updatePreview);
+antiBanRetryMaxTotalMsInput.addEventListener('input', updatePreview);
+antiBanRetryOnRateLimitInput.addEventListener('change', updatePreview);
+antiBanRetryOnTransientInput.addEventListener('change', updatePreview);
+antiBanSelectorMinWeightInput.addEventListener('input', updatePreview);
+for (const input of Object.values(antiBanHealthInputs)) input.addEventListener('input', updatePreview);
+antiBanQuotaPersistEveryInput.addEventListener('input', updatePreview);
+antiBanQuotaCriticalInput.addEventListener('input', updatePreview);
+antiBanQuotaUsageFileInput.addEventListener('input', updatePreview);
 
 // ── Init ──
 ensureSession().then(loadConfig).catch(e => setStatus(e.message, true));

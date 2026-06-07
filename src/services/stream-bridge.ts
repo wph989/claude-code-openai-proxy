@@ -213,6 +213,11 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
       stop_reason: state.stopReason,
       response_chunks: state.responseChunks
     });
+
+    const totalTokens = (state.usageInputTokens ?? 0) + (state.usageOutputTokens ?? 0);
+    releaseUpstreamResponse(upstreamResponse, { requests: 1, tokens: totalTokens });
+    output.end();
+    return;
   } catch (error) {
     log('error', '流式桥接失败', {
       provider_id: metrics.providerId,

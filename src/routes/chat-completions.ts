@@ -71,6 +71,7 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
       if (!upstreamResponse.ok) {
         return reply.code(upstreamResponse.status).send(data);
       }
+      releaseUpstreamResponse(upstreamResponse, { requests: 1, tokens: extractOpenAIUsageTokens(data.usage) });
       if (data.model) data.model = modelName;
       log('info', 'OpenAI 透传响应完成', {
         provider_id: provider.provider_id,
@@ -151,4 +152,17 @@ async function pipeOpenAISse(params: {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function extractOpenAIUsageTokens(value: unknown): number {
+  if (!isPlainObject(value)) return 0;
+  const total = toInt(value.total_tokens);
+  if (total > 0) return total;
+  // 有些 OpenAI-compatible 上游不返回 total_tokens，只能从输入/输出字段相加。
+  return toInt(value.prompt_tokens) + toInt(value.completion_tokens);
+}
+
+function toInt(value: unknown): number {
+  const num = Number(value ?? 0);
+  return Number.isFinite(num) && num > 0 ? Math.trunc(num) : 0;
 }

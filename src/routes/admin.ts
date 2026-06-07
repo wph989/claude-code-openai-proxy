@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { getExpectedAdminToken, isValidAdminToken, verifyAdminAuth } from '../auth.js';
 import { settings } from '../config.js';
-import type { RuntimeConfig } from '../models.js';
+import type { RuntimeConfig, KeyQuotaConfig } from '../models.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -220,6 +220,47 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
       return { message: 'Key 已删除。', provider_id: providerId, key_index: idx };
     } catch (err) {
       return reply.code(400).send({ message: err instanceof Error ? err.message : '删除失败。' });
+    }
+  });
+
+  app.post('/api/keys/:providerId/:keyIndex/quota/reset', async (request, reply) => {
+    if (!(await verifyAdminAuth(request, reply))) return;
+    const { providerId, keyIndex } = request.params as { providerId: string; keyIndex: string };
+    const idx = parseInt(keyIndex, 10);
+    if (isNaN(idx) || idx < 0) return reply.code(400).send({ message: '无效的 keyIndex。' });
+    try {
+      await app.runtimeConfigManager.resetKeyQuota(providerId, idx);
+      return { message: '配额计数已清零。', provider_id: providerId, key_index: idx };
+    } catch (err) {
+      return reply.code(400).send({ message: err instanceof Error ? err.message : '重置配额失败。' });
+    }
+  });
+
+  app.put('/api/keys/:providerId/:keyIndex/quota', async (request, reply) => {
+    if (!(await verifyAdminAuth(request, reply))) return;
+    const { providerId, keyIndex } = request.params as { providerId: string; keyIndex: string };
+    const idx = parseInt(keyIndex, 10);
+    if (isNaN(idx) || idx < 0) return reply.code(400).send({ message: '无效的 keyIndex。' });
+    const body = (request.body || {}) as { quota?: KeyQuotaConfig | null };
+    const quota = body.quota ?? null;
+    if (quota !== null) {
+      if (quota.soft_stop_threshold !== undefined) {
+        if (typeof quota.soft_stop_threshold !== 'number' || quota.soft_stop_threshold <= 0 || quota.soft_stop_threshold > 1) {
+          return reply.code(400).send({ message: 'soft_stop_threshold 必须在 (0, 1] 之间。' });
+        }
+      }
+      if (quota.max_requests != null && (typeof quota.max_requests !== 'number' || quota.max_requests <= 0)) {
+        return reply.code(400).send({ message: 'max_requests 必须为正数或 null。' });
+      }
+      if (quota.max_tokens != null && (typeof quota.max_tokens !== 'number' || quota.max_tokens <= 0)) {
+        return reply.code(400).send({ message: 'max_tokens 必须为正数或 null。' });
+      }
+    }
+    try {
+      await app.runtimeConfigManager.updateKeyQuota(providerId, idx, quota);
+      return { message: '配额配置已更新。', provider_id: providerId, key_index: idx, quota };
+    } catch (err) {
+      return reply.code(400).send({ message: err instanceof Error ? err.message : '更新配额失败。' });
     }
   });
 }
