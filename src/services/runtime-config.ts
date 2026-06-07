@@ -289,7 +289,10 @@ export class RuntimeConfigManager {
       rotator.setUsageListener((key, usage, ratio) => {
         const id = idByKey.get(key);
         if (!id) return;
-        store.update(`${providerId}:${id}`, usage, ratio);
+        const composite = `${providerId}:${id}`;
+        // preloadedUsage 是 rebuildRotators 的 hydrate 来源；写 store 时必须同步它，避免重置后旧快照回灌。
+        this.preloadedUsage[composite] = { ...usage };
+        store.update(composite, usage, ratio);
       });
     }
   }
@@ -314,7 +317,9 @@ export class RuntimeConfigManager {
     if (patch.auto_disabled_at !== undefined) runtimePatch.auto_disabled_at = patch.auto_disabled_at;
 
     if (Object.keys(runtimePatch).length > 0 && this.stateStore) {
-      this.stateStore.update(`${providerId}:${entry.id}`, runtimePatch);
+      const composite = `${providerId}:${entry.id}`;
+      this.preloadedState[composite] = { ...(this.preloadedState[composite] ?? {}), ...runtimePatch };
+      this.stateStore.update(composite, runtimePatch);
     }
 
     const userFieldChanged = patch.enabled !== undefined || patch.note !== undefined;
@@ -344,6 +349,19 @@ export class RuntimeConfigManager {
       }
     })();
     return this.persisting;
+  }
+
+  private recordResetState(providerId: string, keyId: string): void {
+    const composite = `${providerId}:${keyId}`;
+    const reset: KeyRuntimeRecord = {
+      error_count: 0,
+      disabled_at: null,
+      last_error_at: null,
+      last_error_message: null,
+      auto_disabled_at: null
+    };
+    this.preloadedState[composite] = reset;
+    this.stateStore?.update(composite, reset);
   }
 
   getKeyStates(providerId: string) {
@@ -387,6 +405,7 @@ export class RuntimeConfigManager {
     }
 
     rotator.enableKey(keys[keyIndex].key);
+    if (this.stateStore) await this.stateStore.forceFlush();
     await this.persistNow();
   }
 
@@ -400,6 +419,7 @@ export class RuntimeConfigManager {
     }
 
     rotator.disableKey(keys[keyIndex].key);
+    if (this.stateStore) await this.stateStore.forceFlush();
     await this.persistNow();
   }
 
@@ -415,6 +435,7 @@ export class RuntimeConfigManager {
     rotator.resetErrorCount(keys[keyIndex].key);
     rotator.resetUsage(keys[keyIndex].key);
     if (this.usageStore) await this.usageStore.forceFlush();
+    if (this.stateStore) await this.stateStore.forceFlush();
     await this.persistNow();
   }
 
@@ -485,18 +506,24 @@ export class RuntimeConfigManager {
     const keys = rotator ? rotator.getKeys() : resolveApiKeys(provider);
     let count = 0;
     for (const entry of keys) {
-      entry.error_count = 0;
-      entry.enabled = true;
-      entry.disabled_at = null;
-      entry.auto_disabled_at = null;
-      entry.last_error_at = null;
-      entry.last_error_message = null;
+      if (rotator) {
+        rotator.resetErrorCount(entry.key);
+      } else {
+        entry.error_count = 0;
+        entry.enabled = true;
+        entry.disabled_at = null;
+        entry.auto_disabled_at = null;
+        entry.last_error_at = null;
+        entry.last_error_message = null;
+        this.recordResetState(providerId, entry.id);
+      }
       rotator?.resetUsage(entry.key);
       count++;
     }
     provider.api_key = keys;
     this.rebuildRotators();
     if (this.usageStore) await this.usageStore.forceFlush();
+    if (this.stateStore) await this.stateStore.forceFlush();
     await this.persistNow();
     return count;
   }

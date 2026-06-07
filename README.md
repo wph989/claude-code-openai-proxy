@@ -26,9 +26,10 @@ src/
   auth.ts             # 认证中间件
   models.ts           # 数据模型
   routes/
-    admin.ts          # 管理后台 API
-    health.ts         # 健康检查
-    messages.ts       # Messages API
+    admin.ts            # 管理后台 API
+    health.ts           # 健康检查
+    messages.ts         # Anthropic Messages API
+    chat-completions.ts # OpenAI Chat Completions 透传
   services/
     runtime-config.ts   # 运行时配置
     transformers.ts     # 协议转换
@@ -48,6 +49,9 @@ src/
     pid.ts            # 进程管理
     logger.ts         # 日志工具
     atomic-write.ts   # 原子 JSON 写入（tmp + rename）
+    nanoid.ts         # 短稳定 id 生成（api_key.id）
+    id.ts             # 请求 id 生成
+    time.ts           # 时间工具
 ```
 
 ## 安装
@@ -367,3 +371,8 @@ ccop --version
 ## License
 
 MIT
+
+## github地址
+
+如果觉得有用，还请给个star
+https://github.com/wph989/claude-code-openai-proxy

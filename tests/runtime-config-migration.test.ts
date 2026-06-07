@@ -333,6 +333,95 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
     expect(usageAfter.usage['p1:RESET00001']).toEqual({ requests_used: 0, tokens_used: 0 });
   });
 
+  it('resetAllKeys 重建 rotator 后不会把旧配额用量重新显示出来', async () => {
+    const cfgPath = path.join(tmp, 'runtime_models.json');
+    writeConfig(cfgPath, {
+      providers: [{
+        provider_id: 'p1',
+        provider_type: 'openai_compatible',
+        base_url: 'https://example.com',
+        api_key: [{ id: 'RESETALL01', key: 'sk-1', quota: { max_requests: 10, max_tokens: null, soft_stop_threshold: 1 } }],
+        timeout_seconds: 300,
+        enabled: true,
+        headers: {}
+      }],
+      models: [{ client_model: 'm', provider_id: 'p1', upstream_model: 'u', enabled: true }],
+      default_client_model: 'm'
+    });
+    writeFileSync(path.join(tmp, 'runtime_usage.json'), JSON.stringify({
+      version: 2,
+      updated_at: 1700000000,
+      usage: {
+        'p1:RESETALL01': { requests_used: 4, tokens_used: 21 }
+      }
+    }), 'utf-8');
+
+    const mgr = new RuntimeConfigManager(cfgPath);
+    await mgr.init();
+    expect(mgr.getKeyStates('p1')[0].usage).toEqual({ requests_used: 4, tokens_used: 21 });
+
+    await mgr.resetAllKeys('p1');
+
+    const [state] = mgr.getKeyStates('p1');
+    expect(state.usage).toEqual({ requests_used: 0, tokens_used: 0 });
+
+    await mgr.shutdown();
+    const usageAfter = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
+    expect(usageAfter.usage['p1:RESETALL01']).toEqual({ requests_used: 0, tokens_used: 0 });
+  });
+
+  it('resetAllKeys 会覆盖旧 runtime_state，后续保存配置不会恢复禁用状态', async () => {
+    const cfgPath = path.join(tmp, 'runtime_models.json');
+    writeConfig(cfgPath, {
+      providers: [{
+        provider_id: 'p1',
+        provider_type: 'openai_compatible',
+        base_url: 'https://example.com',
+        api_key: [{ id: 'STATEALL01', key: 'sk-1' }],
+        timeout_seconds: 300,
+        enabled: true,
+        headers: {}
+      }],
+      models: [],
+      default_client_model: null
+    });
+    writeFileSync(path.join(tmp, 'runtime_state.json'), JSON.stringify({
+      version: 2,
+      updated_at: 1700000000,
+      states: {
+        'p1:STATEALL01': {
+          error_count: 9,
+          auto_disabled_at: 1700000000000,
+          last_error_at: 1700000000000,
+          last_error_message: 'old quota'
+        }
+      }
+    }), 'utf-8');
+
+    const mgr = new RuntimeConfigManager(cfgPath);
+    await mgr.init();
+    expect(mgr.getKeyStates('p1')[0].enabled).toBe(false);
+
+    await mgr.resetAllKeys('p1');
+    await mgr.saveConfig(mgr.getConfig());
+
+    const [state] = mgr.getKeyStates('p1');
+    expect(state.enabled).toBe(true);
+    expect(state.error_count).toBe(0);
+    expect(state.auto_disabled_at).toBeNull();
+    expect(state.last_error_message).toBeNull();
+
+    await mgr.shutdown();
+    const stateAfter = JSON.parse(readFileSync(path.join(tmp, 'runtime_state.json'), 'utf-8'));
+    expect(stateAfter.states['p1:STATEALL01']).toEqual({
+      error_count: 0,
+      disabled_at: null,
+      last_error_at: null,
+      last_error_message: null,
+      auto_disabled_at: null
+    });
+  });
+
   it('OpenAI 非流式 2xx 响应会按 usage 写入配额用量', async () => {
     const cfgPath = path.join(tmp, 'runtime_models.json');
     writeConfig(cfgPath, {
