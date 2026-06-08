@@ -145,15 +145,15 @@ program
     }
   });
 
-import { USER_CONFIG_DIR } from './config.js';
+import { USER_CONFIG_FILE } from './config.js';
 
 program
   .command('init-config')
-  .description('初始化配置文件到 ~/.ccop/')
-  .option('--config <path>', '输出路径（默认 ~/.ccop/runtime_models.json）')
+  .description('初始化配置文件到当前模式的默认配置路径')
+  .option('--config <path>', '输出路径（默认使用当前模式的 CONFIG_FILE）')
   .option('--force', '覆盖已存在的文件', false)
   .action(async (options) => {
-    const output = options.config ? path.resolve(options.config) : join(USER_CONFIG_DIR, 'runtime_models.json');
+    const output = options.config ? path.resolve(options.config) : USER_CONFIG_FILE;
     const content = JSON.stringify(buildDefaultRuntimeConfig(), null, 2) + '\n';
     try {
       await writeFile(output, content, { encoding: 'utf-8', flag: options.force ? 'w' : 'wx' });

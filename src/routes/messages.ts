@@ -3,9 +3,10 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { verifyProxyAuth } from '../auth.js';
 import { settings } from '../config.js';
 import type { AnthropicMessagesRequest, CountTokensRequest } from '../models.js';
+import { readStreamChunk } from '../services/stream-read.js';
 import { bridgeOpenAIStreamToAnthropic } from '../services/stream-bridge.js';
 import { anthropicToOpenAIMessages, anthropicToolsToOpenAI, openAIToAnthropicResponse } from '../services/transformers.js';
-import { releaseUpstreamResponse, safeJson } from '../services/upstream.js';
+import { markUpstreamResponseStreamError, releaseUpstreamResponse, safeJson } from '../services/upstream.js';
 import { createId } from '../utils/id.js';
 import { log, logDetailed } from '../utils/logger.js';
 
@@ -187,8 +188,11 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
     output.pipe(reply.raw);
 
     // 客户端断开时取消上游 body，让 bridge 的 finally 释放 lease，避免 activeRequests 泄漏。
+    let clientClosed = false;
+    const clientAbort = new AbortController();
     const onClientClose = () => {
-      try { upstreamResponse.body?.cancel().catch(() => {}); } catch { /* noop */ }
+      clientClosed = true;
+      clientAbort.abort();
       output.destroy();
     };
     reply.raw.once('close', onClientClose);
@@ -205,7 +209,9 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
         clientModel: payload.model,
         upstreamModel: route.upstream_model
       },
-      idleTimeoutMs: Math.max(1000, provider.stream_idle_timeout_seconds * 1000 || settings.streamIdleTimeoutMs)
+      idleTimeoutMs: Math.max(1000, provider.stream_idle_timeout_seconds * 1000 || settings.streamIdleTimeoutMs),
+      isClientClosed: () => clientClosed,
+      clientAbortSignal: clientAbort.signal
     }).finally(() => {
       reply.raw.off('close', onClientClose);
     });
@@ -271,11 +277,33 @@ async function handleAnthropicPassthrough(
   });
   output.pipe(reply.raw);
 
+  let clientClosed = false;
+  const clientAbort = new AbortController();
+  const onClientClose = () => {
+    clientClosed = true;
+    clientAbort.abort();
+    output.destroy();
+  };
+  reply.raw.once('close', onClientClose);
+
   const idleTimeoutMs = Math.max(1000, provider.stream_idle_timeout_seconds * 1000 || settings.streamIdleTimeoutMs);
-  void pipeUpstreamSse({ upstreamResponse, output, requestId, sessionId, providerId: provider.provider_id, clientModel: payload.model, upstreamModel: route.upstream_model, idleTimeoutMs });
+  void pipeUpstreamSse({
+    upstreamResponse,
+    output,
+    requestId,
+    sessionId,
+    providerId: provider.provider_id,
+    clientModel: payload.model,
+    upstreamModel: route.upstream_model,
+    idleTimeoutMs,
+    isClientClosed: () => clientClosed,
+    clientAbortSignal: clientAbort.signal
+  }).finally(() => {
+    reply.raw.off('close', onClientClose);
+  });
 }
 
-async function pipeUpstreamSse(params: {
+export async function pipeUpstreamSse(params: {
   upstreamResponse: Response;
   output: PassThrough;
   requestId: string;
@@ -284,8 +312,10 @@ async function pipeUpstreamSse(params: {
   clientModel: string;
   upstreamModel: string;
   idleTimeoutMs: number;
+  isClientClosed?: () => boolean;
+  clientAbortSignal?: AbortSignal;
 }): Promise<void> {
-  const { upstreamResponse, output, requestId, sessionId, providerId, clientModel, upstreamModel, idleTimeoutMs } = params;
+  const { upstreamResponse, output, requestId, sessionId, providerId, clientModel, upstreamModel, idleTimeoutMs, isClientClosed, clientAbortSignal } = params;
   try {
     if (!upstreamResponse.ok) {
       const errorText = await upstreamResponse.text();
@@ -301,12 +331,7 @@ async function pipeUpstreamSse(params: {
     const decoder = new TextDecoder();
     try {
       while (true) {
-        let timer: ReturnType<typeof setTimeout>;
-        const readResult = await Promise.race([
-          reader.read(),
-          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`SSE idle timeout: ${idleTimeoutMs}ms`)), idleTimeoutMs); })
-        ]);
-        clearTimeout(timer!);
+        const readResult = await readStreamChunk(reader, idleTimeoutMs, `SSE idle timeout: ${idleTimeoutMs}ms`, clientAbortSignal);
         const { value, done } = readResult;
         if (done) break;
         output.write(value);
@@ -321,6 +346,19 @@ async function pipeUpstreamSse(params: {
       upstream_model: upstreamModel
     });
   } catch (error) {
+    const clientClosed = isClientClosed?.() === true;
+    if (!clientClosed) {
+      const message = error instanceof Error ? error.message : String(error);
+      markUpstreamResponseStreamError(upstreamResponse, message, 'network');
+    }
+    if (clientClosed) {
+      log('info', '客户端断开，停止 Anthropic 流式透传', {
+        provider_id: providerId,
+        client_model: clientModel,
+        upstream_model: upstreamModel
+      });
+      return;
+    }
     log('error', '流式透传失败', { error });
     output.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'api_error', message: '流式透传失败。' } })}\n\n`);
   } finally {

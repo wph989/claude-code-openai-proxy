@@ -1,7 +1,7 @@
 import { setGlobalDispatcher, Agent } from 'undici';
 import { settings } from '../config.js';
 import type { ResolvedProvider, ResolvedRoute } from '../models.js';
-import type { ApiKeyRotator, KeyLease } from './api-key-rotator.js';
+import type { ApiKeyRotator, KeyErrorCategory, KeyLease } from './api-key-rotator.js';
 import { log } from '../utils/logger.js';
 
 interface ResponseMeta {
@@ -272,7 +272,9 @@ export class UpstreamService {
 
       lastResponse = response;
 
-      if (classification.category === 'hard_limit') return response;
+      // hard_limit 表示当前 Key 不可继续使用；有 rotator 时应先切换到下一个健康 Key，
+      // 避免单个 Key 额度耗尽或失效直接中断下游客户端。
+      if (classification.category === 'hard_limit' && !params.rotator) return response;
       if (classification.category === 'request_limit') return response;
       if (classification.category === 'rate_limit' && !retry.retry_on_rate_limit) return response;
       if (classification.category === 'transient' && !retry.retry_on_transient) return response;
@@ -475,6 +477,13 @@ export function releaseUpstreamResponse(response: Response, usage?: { requests: 
   if (usage) meta.rotator.recordUsage(meta.key, usage.requests, usage.tokens);
   if (meta.lease) meta.rotator.release(meta.lease);
   responseMeta.delete(response);
+}
+
+export function markUpstreamResponseStreamError(response: Response, message: string, category: KeyErrorCategory = 'network'): void {
+  const meta = responseMeta.get(response);
+  if (!meta) return;
+  // 流式 body 阶段的错误发生在 fetch 已成功之后，只能通过 Response 元数据回写 Key 健康状态。
+  meta.rotator.markError(meta.key, message, category);
 }
 
 async function readResponseText(response: Response): Promise<string> {

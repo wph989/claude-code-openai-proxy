@@ -47,6 +47,18 @@ describe('UsageStore', () => {
     expect(existsSync(file)).toBe(true);
   });
 
+  it('serializes concurrent forceFlush calls to avoid tmp-file races', async () => {
+    const file = path.join(tmp, 'usage.json');
+    const s = new UsageStore(file, { every_n: 999, critical_threshold: 0.99 });
+    await s.load();
+    s.update('p:k1', { requests_used: 1, tokens_used: 10 }, 0);
+
+    await Promise.all(Array.from({ length: 20 }, () => s.forceFlush()));
+
+    const json = JSON.parse(readFileSync(file, 'utf-8'));
+    expect(json.usage['p:k1']).toEqual({ requests_used: 1, tokens_used: 10 });
+  });
+
   it('load reads previously persisted data', async () => {
     const file = path.join(tmp, 'usage.json');
     const s1 = new UsageStore(file, { every_n: 1, critical_threshold: 0.85 });

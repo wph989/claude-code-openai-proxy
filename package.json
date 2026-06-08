@@ -26,8 +26,8 @@
     "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
     "start": "node dist/cli.js start",
     "init-config": "node dist/cli.js init-config",
-    "prepublishOnly": "npm run build",
-    "postversion": "npm run build",
+    "prepublishOnly": "pnpm run build",
+    "postversion": "pnpm run build",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"

@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { RuntimeConfigManager } from '../src/services/runtime-config.js';
 import { createApp } from '../src/server.js';
+import { settings } from '../src/config.js';
 
 let tmp: string;
 beforeEach(() => { tmp = mkdtempSync(path.join(tmpdir(), 'rcm-')); });
@@ -511,5 +512,115 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
 
     const usageAfter = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
     expect(usageAfter.usage['p1:ANTHUSE001']).toEqual({ requests_used: 1, tokens_used: 12 });
+  });
+
+  it('Admin 刷新 Key 状态前会把未达阈值的内存配额写入 usage 文件', async () => {
+    const cfgPath = path.join(tmp, 'runtime_models.json');
+    writeConfig(cfgPath, {
+      providers: [{
+        provider_id: 'p1',
+        provider_type: 'openai_compatible',
+        base_url: 'https://example.com/v1',
+        api_key: [{ id: 'REFRESH001', key: 'sk-1', quota: { max_requests: 1000, max_tokens: 1000, soft_stop_threshold: 1 } }],
+        timeout_seconds: 300,
+        enabled: true,
+        headers: {},
+        anti_ban: { min_interval_ms: 0, retry: { max_attempts: 1 } }
+      }],
+      models: [{ client_model: 'm', provider_id: 'p1', upstream_model: 'u', enabled: true }],
+      default_client_model: 'm',
+      anti_ban: { quota: { persist_every_n_requests: 100, persist_critical_threshold: 1 } }
+    });
+
+    const app = await createApp(cfgPath);
+    try {
+      const { rotator } = app.runtimeConfigManager.resolveModel('m');
+      rotator.recordUsage('sk-1', 3, 12);
+
+      const usageBefore = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
+      expect(usageBefore.usage['p1:REFRESH001']).toEqual({ requests_used: 0, tokens_used: 0 });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/keys/p1',
+        cookies: { [settings.adminCookieName]: settings.adminAuthToken }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().keys[0].usage).toEqual({ requests_used: 3, tokens_used: 12 });
+      const usageAfter = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
+      expect(usageAfter.usage['p1:REFRESH001']).toEqual({ requests_used: 3, tokens_used: 12 });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('保存配置重建 rotator 前会先持久化内存配额，避免刷新后显示归零', async () => {
+    const cfgPath = path.join(tmp, 'runtime_models.json');
+    writeConfig(cfgPath, {
+      providers: [{
+        provider_id: 'p1',
+        provider_type: 'openai_compatible',
+        base_url: 'https://example.com/v1',
+        api_key: [{ id: 'SAVEFLUSH1', key: 'sk-1', quota: { max_requests: 1000, max_tokens: 1000, soft_stop_threshold: 1 } }],
+        timeout_seconds: 300,
+        enabled: true,
+        headers: {},
+        anti_ban: { min_interval_ms: 0, retry: { max_attempts: 1 } }
+      }],
+      models: [{ client_model: 'm', provider_id: 'p1', upstream_model: 'u', enabled: true }],
+      default_client_model: 'm',
+      anti_ban: { quota: { persist_every_n_requests: 100, persist_critical_threshold: 1 } }
+    });
+
+    const mgr = new RuntimeConfigManager(cfgPath);
+    await mgr.init();
+    const { rotator } = mgr.resolveModel('m');
+    rotator.recordUsage('sk-1', 4, 21);
+
+    const usageBefore = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
+    expect(usageBefore.usage['p1:SAVEFLUSH1']).toEqual({ requests_used: 0, tokens_used: 0 });
+
+    await mgr.saveConfig(mgr.getConfig());
+
+    expect(mgr.getKeyStates('p1')[0].usage).toEqual({ requests_used: 4, tokens_used: 21 });
+    const usageAfter = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
+    expect(usageAfter.usage['p1:SAVEFLUSH1']).toEqual({ requests_used: 4, tokens_used: 21 });
+    await mgr.shutdown();
+  });
+
+  it('自动禁用 Key 时会把未达阈值的内存配额写入 usage 文件', async () => {
+    const cfgPath = path.join(tmp, 'runtime_models.json');
+    writeConfig(cfgPath, {
+      providers: [{
+        provider_id: 'p1',
+        provider_type: 'openai_compatible',
+        base_url: 'https://example.com/v1',
+        api_key: [{ id: 'AUTOOFF001', key: 'sk-1', quota: { max_requests: 1000, max_tokens: 1000, soft_stop_threshold: 1 } }],
+        timeout_seconds: 300,
+        enabled: true,
+        headers: {},
+        anti_ban: { min_interval_ms: 0, retry: { max_attempts: 1 } }
+      }],
+      models: [{ client_model: 'm', provider_id: 'p1', upstream_model: 'u', enabled: true }],
+      default_client_model: 'm',
+      anti_ban: { quota: { persist_every_n_requests: 100, persist_critical_threshold: 1 } }
+    });
+
+    const mgr = new RuntimeConfigManager(cfgPath);
+    await mgr.init();
+    const { rotator } = mgr.resolveModel('m');
+    rotator.recordUsage('sk-1', 2, 9);
+
+    const usageBefore = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
+    expect(usageBefore.usage['p1:AUTOOFF001']).toEqual({ requests_used: 0, tokens_used: 0 });
+
+    rotator.markQuotaError('sk-1', 'quota exceeded');
+
+    await vi.waitFor(() => {
+      const usageAfter = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
+      expect(usageAfter.usage['p1:AUTOOFF001']).toEqual({ requests_used: 2, tokens_used: 9 });
+    });
+    await mgr.shutdown();
   });
 });

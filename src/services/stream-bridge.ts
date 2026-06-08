@@ -1,7 +1,8 @@
 import { PassThrough } from 'node:stream';
 import { log } from '../utils/logger.js';
+import { readStreamChunk } from './stream-read.js';
 import { mapFinishReason } from './transformers.js';
-import { releaseUpstreamResponse } from './upstream.js';
+import { markUpstreamResponseStreamError, releaseUpstreamResponse } from './upstream.js';
 
 interface StreamMetrics {
   requestId: string;
@@ -23,6 +24,8 @@ interface ToolBlockState {
 interface StreamState {
   messageId: string;
   clientModel: string;
+  messageStarted: boolean;
+  messageStopped: boolean;
   textStarted: boolean;
   textStopped: boolean;
   textIndex: number;
@@ -41,11 +44,15 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
   messageId: string;
   metrics: StreamMetrics;
   idleTimeoutMs: number;
+  isClientClosed?: () => boolean;
+  clientAbortSignal?: AbortSignal;
 }): Promise<void> {
-  const { upstreamResponse, output, clientModel, messageId, metrics, idleTimeoutMs } = params;
+  const { upstreamResponse, output, clientModel, messageId, metrics, idleTimeoutMs, isClientClosed, clientAbortSignal } = params;
   const state: StreamState = {
     messageId,
     clientModel,
+    messageStarted: false,
+    messageStopped: false,
     textStarted: false,
     textStopped: false,
     textIndex: 0,
@@ -84,8 +91,9 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
         usage: { input_tokens: 0, output_tokens: 0 }
       }
     });
+    state.messageStarted = true;
 
-    for await (const event of iterateSse(upstreamResponse, idleTimeoutMs)) {
+    for await (const event of iterateSse(upstreamResponse, idleTimeoutMs, clientAbortSignal)) {
       if (event.data === '[DONE]') {
         break;
       }
@@ -183,26 +191,7 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
       }
     }
 
-    if (state.textStarted && !state.textStopped) {
-      state.textStopped = true;
-      writeSse(output, 'content_block_stop', { type: 'content_block_stop', index: state.textIndex });
-    }
-    for (const [, toolState] of Array.from(state.tools.entries()).sort((a, b) => a[0] - b[0])) {
-      if (!toolState.stopped) {
-        toolState.stopped = true;
-        writeSse(output, 'content_block_stop', { type: 'content_block_stop', index: toolState.anthropicIndex });
-      }
-    }
-
-    writeSse(output, 'message_delta', {
-      type: 'message_delta',
-      delta: { stop_reason: state.stopReason, stop_sequence: null },
-      usage: {
-        input_tokens: state.usageInputTokens ?? 0,
-        output_tokens: state.usageOutputTokens ?? 0
-      }
-    });
-    writeSse(output, 'message_stop', { type: 'message_stop' });
+    closeAnthropicMessage(output, state);
 
     log('info', '流式响应完成', {
       provider_id: metrics.providerId,
@@ -219,6 +208,19 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
     output.end();
     return;
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const clientClosed = isClientClosed?.() === true;
+    if (!clientClosed) {
+      markUpstreamResponseStreamError(upstreamResponse, message, 'network');
+    }
+    if (clientClosed) {
+      log('info', '客户端断开，停止流式桥接', {
+        provider_id: metrics.providerId,
+        client_model: metrics.clientModel,
+        upstream_model: metrics.upstreamModel
+      });
+      return;
+    }
     log('error', '流式桥接失败', {
       provider_id: metrics.providerId,
       client_model: metrics.clientModel,
@@ -232,10 +234,37 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
         message: '流式桥接失败。'
       }
     });
+    // 已经向客户端发出 message_start 后，必须补齐关闭事件，避免客户端一直等待未闭合的 content block。
+    closeAnthropicMessage(output, state);
   } finally {
     releaseUpstreamResponse(upstreamResponse);
     output.end();
   }
+}
+
+function closeAnthropicMessage(output: PassThrough, state: StreamState): void {
+  if (!state.messageStarted || state.messageStopped) return;
+  if (state.textStarted && !state.textStopped) {
+    state.textStopped = true;
+    writeSse(output, 'content_block_stop', { type: 'content_block_stop', index: state.textIndex });
+  }
+  for (const [, toolState] of Array.from(state.tools.entries()).sort((a, b) => a[0] - b[0])) {
+    if (!toolState.stopped) {
+      toolState.stopped = true;
+      writeSse(output, 'content_block_stop', { type: 'content_block_stop', index: toolState.anthropicIndex });
+    }
+  }
+
+  writeSse(output, 'message_delta', {
+    type: 'message_delta',
+    delta: { stop_reason: state.stopReason, stop_sequence: null },
+    usage: {
+      input_tokens: state.usageInputTokens ?? 0,
+      output_tokens: state.usageOutputTokens ?? 0
+    }
+  });
+  writeSse(output, 'message_stop', { type: 'message_stop' });
+  state.messageStopped = true;
 }
 
 function writeSse(output: PassThrough, event: string, data: Record<string, unknown>): void {
@@ -243,7 +272,7 @@ function writeSse(output: PassThrough, event: string, data: Record<string, unkno
   output.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-async function* iterateSse(response: Response, idleTimeoutMs: number): AsyncGenerator<{ event?: string; data: string }> {
+async function* iterateSse(response: Response, idleTimeoutMs: number, clientAbortSignal?: AbortSignal): AsyncGenerator<{ event?: string; data: string }> {
   const body = response.body;
   if (!body) {
     return;
@@ -257,14 +286,7 @@ async function* iterateSse(response: Response, idleTimeoutMs: number): AsyncGene
 
   try {
     while (true) {
-      let timer: ReturnType<typeof setTimeout>;
-      const readResult = await Promise.race([
-        reader.read(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`SSE idle timeout: ${idleTimeoutMs}ms 内未收到数据`)), idleTimeoutMs);
-        })
-      ]);
-      clearTimeout(timer!);
+      const readResult = await readStreamChunk(reader, idleTimeoutMs, `SSE idle timeout: ${idleTimeoutMs}ms 内未收到数据`, clientAbortSignal);
 
       const { value, done } = readResult;
       if (done) break;

@@ -80,13 +80,27 @@ export class UsageStore {
   }
 
   async forceFlush(): Promise<void> {
-    await this.write();
+    await this.queueWrite();
   }
 
   private schedule(): void {
     if (this.pending) return;
     this.pending = true;
-    this.writing = this.write().finally(() => { this.pending = false; this.writing = null; });
+    void this.queueWrite();
+  }
+
+  private queueWrite(): Promise<void> {
+    const previous = this.writing;
+    const queued = (previous ? previous.catch(() => {}) : Promise.resolve()).then(() => this.write());
+    const tracked = queued.finally(() => {
+      if (this.writing === tracked) {
+        this.pending = false;
+        this.writing = null;
+      }
+    });
+    // 所有强制刷新和批量刷新必须串行，否则多个 writer 会抢同一个 .tmp 文件。
+    this.writing = tracked;
+    return tracked;
   }
 
   private async write(): Promise<void> {

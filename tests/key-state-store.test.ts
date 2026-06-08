@@ -35,6 +35,23 @@ describe('KeyStateStore', () => {
     expect(existsSync(file)).toBe(true);
   });
 
+  it('serializes forceFlush calls when new state arrives while a write is in flight', async () => {
+    const file = path.join(tmp, 'state.json');
+    const s = new KeyStateStore(file, 5000);
+    await s.load();
+    for (let i = 0; i < 5000; i++) {
+      s.update(`p:seed-${i}`, { error_count: i });
+    }
+
+    const first = s.forceFlush();
+    await Promise.resolve();
+    s.update('p:k1', { error_count: 1, last_error_message: 'quota exceeded' });
+    await Promise.all([first, s.forceFlush()]);
+
+    const json = JSON.parse(readFileSync(file, 'utf-8'));
+    expect(json.states['p:k1']).toEqual({ error_count: 1, last_error_message: 'quota exceeded' });
+  });
+
   it('reads previously persisted records', async () => {
     const file = path.join(tmp, 'state.json');
     const s1 = new KeyStateStore(file, 0);

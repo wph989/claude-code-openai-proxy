@@ -87,19 +87,26 @@ describe('UpstreamService retry loop', () => {
     expect(calls).toBe(2);
   });
 
-  it('does not retry hard_limit', async () => {
+  it('retries hard_limit on the next available key before exposing it to the client', async () => {
     const svc = new UpstreamService();
     const ab = resolveAntiBanConfig({ mode: 'conservative', max_concurrent: 5, min_interval_ms: 0, rate_limit_delay_min_ms: 0, rate_limit_delay_max_ms: 0, retry: { max_attempts: 5, max_total_ms: 5000, retry_on_rate_limit: true, retry_on_transient: true } });
     const rotator = new ApiKeyRotator([keyEntry('a'), keyEntry('b')], KeyRotationStrategy.round_robin, true, ab);
     let calls = 0;
-    globalThis.fetch = (async () => { calls += 1; return new Response('quota exceeded', { status: 429 }); }) as typeof fetch;
+    globalThis.fetch = (async (_url, init) => {
+      calls += 1;
+      const auth = init?.headers instanceof Headers ? init.headers.get('authorization') : null;
+      if (calls === 1) return new Response('quota exceeded', { status: 429 });
+      expect(auth).toBe('Bearer b');
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
 
     const resp = await svc.postChatCompletions({
       provider: provider(rotator.getKeys(), ab), route: route(), rotator,
       payload: { model: 'u', messages: [] }, requestId: 'r', sessionId: 's'
     });
-    expect(resp.status).toBe(429);
-    expect(calls).toBe(1);
+    expect(resp.status).toBe(200);
+    expect(calls).toBe(2);
+    expect(rotator.getKeyStatuses()[0].status).toBe('disabled');
   });
 
   it('does not retry or penalize a key for request-size limits', async () => {

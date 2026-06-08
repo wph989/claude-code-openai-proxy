@@ -2,7 +2,8 @@ import { PassThrough } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { verifyProxyAuth } from '../auth.js';
 import { settings } from '../config.js';
-import { releaseUpstreamResponse, safeJson } from '../services/upstream.js';
+import { readStreamChunk } from '../services/stream-read.js';
+import { markUpstreamResponseStreamError, releaseUpstreamResponse, safeJson } from '../services/upstream.js';
 import { log } from '../utils/logger.js';
 
 export async function registerChatCompletionsRoutes(app: FastifyInstance): Promise<void> {
@@ -90,12 +91,34 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
     });
     output.pipe(reply.raw);
 
+    let clientClosed = false;
+    const clientAbort = new AbortController();
+    const onClientClose = () => {
+      clientClosed = true;
+      clientAbort.abort();
+      output.destroy();
+    };
+    reply.raw.once('close', onClientClose);
+
     const idleTimeoutMs = Math.max(1000, provider.stream_idle_timeout_seconds * 1000 || settings.streamIdleTimeoutMs);
-    void pipeOpenAISse({ upstreamResponse, output, requestId, sessionId, providerId: provider.provider_id, clientModel: modelName, upstreamModel: route.upstream_model, idleTimeoutMs });
+    void pipeOpenAISse({
+      upstreamResponse,
+      output,
+      requestId,
+      sessionId,
+      providerId: provider.provider_id,
+      clientModel: modelName,
+      upstreamModel: route.upstream_model,
+      idleTimeoutMs,
+      isClientClosed: () => clientClosed,
+      clientAbortSignal: clientAbort.signal
+    }).finally(() => {
+      reply.raw.off('close', onClientClose);
+    });
   });
 }
 
-async function pipeOpenAISse(params: {
+export async function pipeOpenAISse(params: {
   upstreamResponse: Response;
   output: PassThrough;
   requestId: string;
@@ -104,8 +127,10 @@ async function pipeOpenAISse(params: {
   clientModel: string;
   upstreamModel: string;
   idleTimeoutMs: number;
+  isClientClosed?: () => boolean;
+  clientAbortSignal?: AbortSignal;
 }): Promise<void> {
-  const { upstreamResponse, output, requestId, sessionId, providerId, clientModel, upstreamModel, idleTimeoutMs } = params;
+  const { upstreamResponse, output, requestId, sessionId, providerId, clientModel, upstreamModel, idleTimeoutMs, isClientClosed, clientAbortSignal } = params;
   try {
     if (!upstreamResponse.ok) {
       const errorText = await upstreamResponse.text();
@@ -121,12 +146,7 @@ async function pipeOpenAISse(params: {
     const reader = body.getReader();
     try {
       while (true) {
-        let timer: ReturnType<typeof setTimeout>;
-        const readResult = await Promise.race([
-          reader.read(),
-          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`SSE idle timeout: ${idleTimeoutMs}ms`)), idleTimeoutMs); })
-        ]);
-        clearTimeout(timer!);
+        const readResult = await readStreamChunk(reader, idleTimeoutMs, `SSE idle timeout: ${idleTimeoutMs}ms`, clientAbortSignal);
         const { value, done } = readResult;
         if (done) break;
         output.write(value);
@@ -141,6 +161,19 @@ async function pipeOpenAISse(params: {
       upstream_model: upstreamModel
     });
   } catch (error) {
+    const clientClosed = isClientClosed?.() === true;
+    if (!clientClosed) {
+      const message = error instanceof Error ? error.message : String(error);
+      markUpstreamResponseStreamError(upstreamResponse, message, 'network');
+    }
+    if (clientClosed) {
+      log('info', '客户端断开，停止 OpenAI 流式透传', {
+        provider_id: providerId,
+        client_model: clientModel,
+        upstream_model: upstreamModel
+      });
+      return;
+    }
     log('error', 'OpenAI 流式透传失败', { error });
     output.write(`data: ${JSON.stringify({ error: { message: '流式透传失败。', type: 'api_error' } })}\n\n`);
     output.write('data: [DONE]\n\n');

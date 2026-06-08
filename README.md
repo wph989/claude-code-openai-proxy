@@ -173,8 +173,8 @@ ccop ui
 HOST=0.0.0.0
 PORT=8765
 
-# 认证令牌
-ADMIN_AUTH_TOKEN=admin123
+# 认证令牌（生产首次运行会在 ~/.ccop/.env 中自动生成随机值）
+ADMIN_AUTH_TOKEN=change-me-random-admin-token
 
 # 配置文件（可选，覆盖默认位置）
 # CONFIG_FILE=./runtime_models.json  # 开发模式
@@ -251,7 +251,7 @@ admin 页面的所有 anti_ban 字段——含 `health.*`、`selector.min_weight
 代理内置三层防御，专为 Claude Code 长任务被 429 / 配额错误中断而设计：
 
 1. **健康评分 + 智能选择器**（`HealthTracker` + `Sticky` / `Balanced`）：以滑动窗口跟踪每个 Key 的近期错误，把流量倾斜到健康度高的 Key。
-2. **代理内有预算重试**（`UpstreamService`）：遇到 429 / 5xx 等可恢复错误，在 `max_attempts` 与 `max_total_ms` 双重限制下自动换 Key 重试，对路由层透明。
+2. **代理内有预算重试**（`UpstreamService`）：遇到 429 / 5xx 等可恢复错误，以及单个 Key 配额耗尽、失效等 Key 级 hard limit 时，在 `max_attempts` 与 `max_total_ms` 双重限制下自动换 Key 重试，对路由层透明。
 3. **本地配额守护**（`QuotaGuard` + `UsageStore`）：每个 Key 可配 `max_requests` / `max_tokens` / `soft_stop_threshold`，接近上限自动软停用（不翻 `enabled`，admin 重置后立刻恢复）；usage 计数事件驱动落盘到 `runtime_usage.json`，进程重启不丢失。
 
 `anti_ban.mode` 提供两套预设：`conservative`（默认，保守串行）与 `throughput`（更高并发与更短间隔）。建议优先只改这个字段；确实需要细调时，provider 级 `anti_ban` 会覆盖全局值。常用覆盖项：
@@ -259,9 +259,13 @@ admin 页面的所有 anti_ban 字段——含 `health.*`、`selector.min_weight
 - `key_selection: sticky | balanced` —— sticky 模式粘住健康分最高的 Key；balanced 模式按健康分加权随机。
 - `sticky_on_cooldown: fallthrough | wait` —— sticky 命中冷却时是否降级到下一个候选。
 - `retry.max_attempts` / `retry.max_total_ms` —— 控制代理内自动重试的次数与总耗时预算。
-- `stream_idle_timeout_seconds`（provider 级）—— 流式响应超过该空闲时长视为僵死，立刻断开换 Key。
+- `stream_idle_timeout_seconds`（provider 级）—— 流式响应超过该空闲时长视为僵死，记录当前 Key 故障并用兼容事件结束本次流；后续请求会自动避开故障 Key。
 
 `health`、`selector.min_weight`、`quota.persist_*` 属于高级调参项，默认值通常不需要改；完整字段见 `src/services/anti-ban-config.ts` 的 `ANTI_BAN_DEFAULTS`。admin 页面通过【高级调参】折叠面板暴露这些字段，保存即生效。
+
+### 自动切换与流式边界
+
+代理会在尚未向客户端输出响应体前自动切换可用 Key，因此 429、5xx、网络瞬时错误、单 Key 配额耗尽或 Key 失效通常不会直接暴露给客户端。流式响应已经开始输出后，代理不会尝试 token 级续写；上游中途断流时会输出协议兼容的结束/错误事件、释放当前 Key，并让后续请求自动选择健康 Key。
 
 ### Admin 端点
 

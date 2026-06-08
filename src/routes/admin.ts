@@ -10,6 +10,16 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const staticDir = path.join(__dirname, '..', 'static');
 
+export function safeKeyExportFilename(providerId: string): string {
+  // provider_id 来自用户配置；下载头只允许保守字符，避免异常字符污染响应头。
+  const cleaned = String(providerId || '')
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80);
+  return `${cleaned || 'provider'}-keys.txt`;
+}
+
 export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
   const staticCache = new Map<string, string>();
 
@@ -72,6 +82,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/config', async (request, reply) => {
     if (!(await verifyAdminAuth(request, reply))) return;
+    await app.runtimeConfigManager.flushRuntimeStores();
     return app.runtimeConfigManager.adminView();
   });
 
@@ -93,6 +104,7 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/keys/:providerId', async (request, reply) => {
     if (!(await verifyAdminAuth(request, reply))) return;
     const { providerId } = request.params as { providerId: string };
+    await app.runtimeConfigManager.flushRuntimeStores();
     const keys = app.runtimeConfigManager.getKeyStates(providerId);
     return { provider_id: providerId, keys };
   });
@@ -100,9 +112,10 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/keys/:providerId/export', async (request, reply) => {
     if (!(await verifyAdminAuth(request, reply))) return;
     const { providerId } = request.params as { providerId: string };
+    await app.runtimeConfigManager.flushRuntimeStores();
     const keys = app.runtimeConfigManager.getKeyStates(providerId);
     const text = keys.map((k) => k.key).join('\n');
-    void reply.type('text/plain; charset=utf-8').header('content-disposition', `attachment; filename="${providerId}-keys.txt"`).send(text);
+    void reply.type('text/plain; charset=utf-8').header('content-disposition', `attachment; filename="${safeKeyExportFilename(providerId)}"`).send(text);
   });
 
   app.put('/api/keys/:providerId/:keyIndex/enable', async (request, reply) => {

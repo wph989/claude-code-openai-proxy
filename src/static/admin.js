@@ -115,14 +115,14 @@ const Dialog = {
   },
 
   confirm(title, message, onConfirm, confirmText = '确认', cancelText = '取消', confirmClass = 'btn-primary') {
-    this.show(title, `<p>${message}</p>`, [
+    this.show(title, `<p>${esc(message)}</p>`, [
       { text: cancelText, class: 'btn-secondary' },
       { text: confirmText, class: confirmClass, action: onConfirm }
     ]);
   },
 
   alert(title, message, onClose) {
-    this.show(title, `<p>${message}</p>`, [
+    this.show(title, `<p>${esc(message)}</p>`, [
       { text: '确定', class: 'btn-primary', action: onClose }
     ]);
   }

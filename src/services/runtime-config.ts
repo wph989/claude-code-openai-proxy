@@ -58,7 +58,16 @@ export class RuntimeConfigManager {
     return structuredClone(this.config);
   }
 
+  async flushRuntimeStores(): Promise<void> {
+    // Admin 展示或重建 rotator 前必须先落盘，避免未达批量阈值的 usage 被旧 JSON 覆盖成 0。
+    const tasks: Promise<void>[] = [];
+    if (this.usageStore) tasks.push(this.usageStore.forceFlush());
+    if (this.stateStore) tasks.push(this.stateStore.forceFlush());
+    if (tasks.length) await Promise.all(tasks);
+  }
+
   async reload(): Promise<RuntimeConfig> {
+    await this.flushRuntimeStores();
     const text = await readFile(this.configPath, 'utf-8');
     const raw = JSON.parse(text) as RuntimeConfig;
     const needsIdRewrite = detectMissingIds(raw);
@@ -160,6 +169,7 @@ export class RuntimeConfigManager {
   }
 
   async saveConfig(raw: RuntimeConfig): Promise<RuntimeConfig> {
+    await this.flushRuntimeStores();
     const validated = validateRuntimeConfig(raw);
 
     if (!this.stateStore) await this.initStateStore();
@@ -325,6 +335,11 @@ export class RuntimeConfigManager {
     const userFieldChanged = patch.enabled !== undefined || patch.note !== undefined;
     if (userFieldChanged) {
       this.schedulePersist();
+    }
+    if (patch.enabled === false || patch.auto_disabled_at !== undefined) {
+      void this.flushRuntimeStores().catch((err) => {
+        console.error('[config] Key 禁用时持久化运行态失败:', err);
+      });
     }
   }
 

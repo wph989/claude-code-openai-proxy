@@ -1,14 +1,70 @@
 import dotenv from 'dotenv';
 import { homedir } from 'node:os';
-import { mkdirSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdirSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomBytes } from 'node:crypto';
 
 const currentFile = fileURLToPath(import.meta.url);
 const currentDir = dirname(currentFile);
 
+export function hasExplicitDevMode(argv: readonly string[]): boolean {
+  // 只把 --dev 视为开发模式；-d 是 CLI 的 daemon 简写，不能改变配置目录。
+  return argv.includes('--dev');
+}
+
+export function resolveUserConfigFile(configRoot: string, isProdMode: boolean): string {
+  return join(configRoot, isProdMode ? 'config.json' : 'runtime_models.json');
+}
+
+export function generateAdminAuthToken(): string {
+  // 首次生产安装不能使用固定默认口令；随机值写入 .env，用户可自行修改。
+  return `ccop_${randomBytes(24).toString('base64url')}`;
+}
+
+export function logGeneratedAdminAuthToken(envFile: string, token: string): void {
+  // 只在实际生成随机口令时打印，避免用户首次启动后不知道管理后台密码。
+  console.log('[config] 随机管理口令已写入:', envFile);
+  console.log(`[config] ADMIN_AUTH_TOKEN=${token}`);
+}
+
+export function resolveAdminAuthToken(raw: string | undefined, isProdMode: boolean): string {
+  const token = raw?.trim();
+  if (token) return token;
+  if (isProdMode) {
+    // 生产模式如果已有 .env 却漏配管理口令，继续启动会暴露管理后台。
+    throw new Error('生产模式必须配置 ADMIN_AUTH_TOKEN；可删除 ~/.ccop/.env 后让程序重新生成随机口令。');
+  }
+  return 'admin123';
+}
+
+export function ensureEnvTextHasAdminAuthToken(text: string, token: string): { text: string; changed: boolean } {
+  const lines = text.split(/\r?\n/);
+  let found = false;
+  let changed = false;
+  const next = lines.map((line) => {
+    if (/^\s*#/.test(line)) return line;
+    const match = line.match(/^\s*ADMIN_AUTH_TOKEN\s*=(.*)$/);
+    if (!match) return line;
+    found = true;
+    if (match[1].trim()) return line;
+    changed = true;
+    return `ADMIN_AUTH_TOKEN=${token}`;
+  });
+
+  if (!found) {
+    // 已有 .env 可能来自旧版本或手工创建，只补必要口令，不改动其他配置。
+    if (next.length > 0 && next[next.length - 1] !== '') next.push('');
+    next.push('# 管理后台密码（自动补齐，修改后需重启生效）');
+    next.push(`ADMIN_AUTH_TOKEN=${token}`);
+    changed = true;
+  }
+
+  return { text: next.join('\n'), changed };
+}
+
 // 模式检测（优先级：--dev > NODE_ENV > 目录检测）
-const hasDevFlag = process.argv.includes('--dev') || process.argv.includes('-d');
+const hasDevFlag = hasExplicitDevMode(process.argv);
 const nodeEnv = process.env.NODE_ENV;
 const isRunningFromDist = basename(currentDir) === 'dist' || currentDir.includes('node_modules');
 
@@ -24,7 +80,7 @@ export const CONFIG_ROOT = IS_PROD_MODE ? join(homedir(), '.ccop') : process.cwd
 
 // 动态路径配置
 export const USER_CONFIG_DIR = CONFIG_ROOT;
-export const USER_CONFIG_FILE = join(CONFIG_ROOT, IS_PROD_MODE ? 'config.json' : 'runtime_models.json');
+export const USER_CONFIG_FILE = resolveUserConfigFile(CONFIG_ROOT, IS_PROD_MODE);
 export const USER_ENV_FILE = join(CONFIG_ROOT, '.env');
 export const USER_LOG_DIR = join(CONFIG_ROOT, 'logs');
 export const USER_PID_DIR = join(CONFIG_ROOT, 'pids');
@@ -46,6 +102,7 @@ function ensureUserConfig(): void {
 
   // 创建默认 .env 文件（如果不存在，不覆盖）
   if (!existsSync(USER_ENV_FILE)) {
+    const adminAuthToken = generateAdminAuthToken();
     const defaultEnv = `# CCOP 配置文件
 # 首次运行时自动生成，可手动修改
 
@@ -56,8 +113,8 @@ PORT=8765
 # 配置文件路径（指向运行时配置 JSON）
 CONFIG_FILE=${USER_CONFIG_FILE}
 
-# 管理后台密码（修改后需重启生效）
-ADMIN_AUTH_TOKEN=admin123
+# 管理后台密码（首次运行随机生成，修改后需重启生效）
+ADMIN_AUTH_TOKEN=${adminAuthToken}
 
 # 日志配置
 LOG_LEVEL=info
@@ -81,6 +138,15 @@ RATE_LIMIT_TIME_WINDOW=60000
 CLUSTER_WORKERS=0
 `;
     writeFileSync(USER_ENV_FILE, defaultEnv, 'utf-8');
+    logGeneratedAdminAuthToken(USER_ENV_FILE, adminAuthToken);
+  } else {
+    const currentEnv = readFileSync(USER_ENV_FILE, 'utf-8');
+    const adminAuthToken = generateAdminAuthToken();
+    const repaired = ensureEnvTextHasAdminAuthToken(currentEnv, adminAuthToken);
+    if (repaired.changed) {
+      writeFileSync(USER_ENV_FILE, repaired.text.endsWith('\n') ? repaired.text : `${repaired.text}\n`, 'utf-8');
+      logGeneratedAdminAuthToken(USER_ENV_FILE, adminAuthToken);
+    }
   }
 }
 
@@ -157,7 +223,7 @@ export const settings: AppSettings = {
   host: process.env.HOST?.trim() || '0.0.0.0',
   port: toNumber(process.env.PORT, 8765),
   proxyAuthToken: '', // 从 config.json 的 proxy_auth_token 读取，不从这里配置
-  adminAuthToken: process.env.ADMIN_AUTH_TOKEN?.trim() || 'admin123',
+  adminAuthToken: resolveAdminAuthToken(process.env.ADMIN_AUTH_TOKEN, IS_PROD_MODE),
   adminCookieName: 'ccgp_admin_session',
   adminCookieMaxAgeSeconds: 60 * 60 * 12,
   configFile: configFilePath,

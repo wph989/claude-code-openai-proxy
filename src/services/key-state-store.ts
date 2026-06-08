@@ -134,9 +134,11 @@ export class KeyStateStore {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    if (this.writing) await this.writing;
-    if (!this.dirty) return;
-    await this.write();
+    if (!this.dirty) {
+      if (this.writing) await this.writing;
+      return;
+    }
+    await this.queueWrite();
   }
 
   private schedule(): void {
@@ -148,14 +150,24 @@ export class KeyStateStore {
   }
 
   private async flushNow(): Promise<void> {
-    if (this.writing) {
-      await this.writing;
+    if (!this.dirty) return;
+    await this.queueWrite();
+  }
+
+  private queueWrite(): Promise<void> {
+    const previous = this.writing;
+    const queued = (previous ? previous.catch(() => {}) : Promise.resolve()).then(async () => {
       if (!this.dirty) return;
-    }
-    this.writing = this.write().finally(() => {
-      this.writing = null;
+      await this.write();
     });
-    await this.writing;
+    const tracked = queued.finally(() => {
+      if (this.writing === tracked) {
+        this.writing = null;
+      }
+    });
+    // state / usage 都走固定 .tmp 文件；并发写必须排队，避免 rename 时 tmp 已被其他 writer 消耗。
+    this.writing = tracked;
+    return tracked;
   }
 
   private async write(): Promise<void> {
