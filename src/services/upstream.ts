@@ -1,19 +1,35 @@
 import { setGlobalDispatcher, Agent } from 'undici';
 import { settings } from '../config.js';
 import type { ResolvedProvider, ResolvedRoute } from '../models.js';
-import type { ApiKeyRotator, KeyErrorCategory, KeyLease } from './api-key-rotator.js';
+import type { ApiKeyRotator, KeyLease } from './api-key-rotator.js';
 import { log } from '../utils/logger.js';
 import { buildForwardRequestHeaders } from './http-headers.js';
+import {
+  classifyUpstreamError,
+  isQuotaLimitError,
+  type UpstreamErrorClassification,
+} from './upstream/error-classifier.js';
+import {
+  buildChatCompletionsUrl,
+  buildCountTokensUrl,
+  buildMessagesUrl,
+  normalizeAnthropicBaseUrl,
+} from './upstream/url-builder.js';
+import {
+  attachResponseMeta,
+  markUpstreamResponseStreamError,
+  releaseUpstreamResponse,
+} from './upstream/response-meta.js';
 
-interface ResponseMeta {
-  rotator: ApiKeyRotator;
-  key: string;
-  lease?: KeyLease;
-}
-
-type UpstreamErrorCategory = 'hard_limit' | 'rate_limit' | 'transient' | 'request_limit';
-
-const responseMeta = new WeakMap<Response, ResponseMeta>();
+// 历史兼容：早期路由 / passthrough 从 'upstream.js' 直接导入这些工具。
+// 经过重构后实际实现已经搬到 ./upstream/* 子模块，这里集中 re-export 保留旧 import。
+export {
+  classifyUpstreamError,
+  isQuotaLimitError,
+  markUpstreamResponseStreamError,
+  releaseUpstreamResponse,
+};
+export type { UpstreamErrorClassification };
 
 const agent = new Agent({
   keepAliveTimeout: settings.keepAliveTimeout,
@@ -27,14 +43,11 @@ setGlobalDispatcher(agent);
  * 上游请求服务：
  * - 保留原始请求 headers 和 body，仅替换 auth、model 等必要字段
  * - 支持多 API Key 轮询和 429 自动切换
+ * - 错误分类 / URL 构造 / lease 元数据分别拆到 ./upstream/* 子模块
  */
 export class UpstreamService {
   buildChatCompletionsUrl(provider: ResolvedProvider): string {
-    return `${provider.base_url.replace(/\/$/, '')}/chat/completions`;
-  }
-
-  private buildMessagesUrl(provider: ResolvedProvider): string {
-    return `${normalizeAnthropicBaseUrl(provider.base_url)}/messages`;
+    return buildChatCompletionsUrl(provider);
   }
 
   private buildHeadersWithKey(params: {
@@ -105,7 +118,7 @@ export class UpstreamService {
   }): Promise<Response> {
     return this.postToUpstream({
       ...params,
-      url: this.buildChatCompletionsUrl(params.provider)
+      url: buildChatCompletionsUrl(params.provider)
     });
   }
 
@@ -122,7 +135,7 @@ export class UpstreamService {
   }): Promise<Response> {
     return this.postToUpstream({
       ...params,
-      url: this.buildMessagesUrl(params.provider)
+      url: buildMessagesUrl(params.provider)
     });
   }
 
@@ -200,9 +213,9 @@ export class UpstreamService {
         if (params.rotator && usedKey) {
           params.rotator.markSuccess(usedKey);
           if (isStream && result.lease) {
-            responseMeta.set(response, { rotator: params.rotator, key: usedKey, lease: result.lease });
+            attachResponseMeta(response, { rotator: params.rotator, key: usedKey, lease: result.lease });
           } else {
-            responseMeta.set(response, { rotator: params.rotator, key: usedKey });
+            attachResponseMeta(response, { rotator: params.rotator, key: usedKey });
             if (result.lease) params.rotator.release(result.lease);
           }
         }
@@ -214,17 +227,15 @@ export class UpstreamService {
       const classification = classifyUpstreamError(response.status, response.statusText, bodyText);
 
       // 排查 429 / 4xx 自动禁用是否生效：把分类结果与原始 body 一起打出来。
-      if (!response.ok) {
-        log('warn', '上游错误响应分类', {
-          provider_id: params.provider.provider_id,
-          status: response.status,
-          status_text: response.statusText,
-          category: classification.category,
-          reason: classification.reason,
-          used_key: usedKey ? usedKey.slice(0, 6) + '***' : null,
-          body_preview: bodyText.slice(0, 500)
-        });
-      }
+      log('warn', '上游错误响应分类', {
+        provider_id: params.provider.provider_id,
+        status: response.status,
+        status_text: response.statusText,
+        category: classification.category,
+        reason: classification.reason,
+        used_key: usedKey ? usedKey.slice(0, 6) + '***' : null,
+        body_preview: bodyText.slice(0, 500)
+      });
 
       if (params.rotator && usedKey) {
         if (classification.category === 'hard_limit') {
@@ -299,7 +310,7 @@ export class UpstreamService {
     anthropicVersion?: string;
     anthropicBeta?: string;
   }): Promise<number> {
-    const url = `${normalizeAnthropicBaseUrl(params.provider.base_url)}/messages/count_tokens`;
+    const url = buildCountTokensUrl(params.provider);
     const body = JSON.stringify({
       ...params.anthropicPayload,
       model: params.route.upstream_model,
@@ -350,14 +361,6 @@ export class UpstreamService {
   }
 }
 
-function normalizeAnthropicBaseUrl(baseUrl: string): string {
-  const trimmed = baseUrl.replace(/\/+$/, '');
-  // Anthropic 供应商通常配置到站点/API 根路径；Messages API 固定在 /v1 下。
-  // 如果用户已经显式写了 /v1，则保持原样，避免重复拼成 /v1/v1。
-  if (/\/v1$/i.test(trimmed)) return trimmed;
-  return `${trimmed}/v1`;
-}
-
 export async function safeJson(response: Response): Promise<Record<string, unknown>> {
   const text = await response.text();
   try {
@@ -365,100 +368,6 @@ export async function safeJson(response: Response): Promise<Record<string, unkno
   } catch {
     return { raw: text };
   }
-}
-
-export function isQuotaLimitError(text: string): boolean {
-  return classifyUpstreamError(400, '', text).category === 'hard_limit';
-}
-
-export function classifyUpstreamError(status: number, statusText: string, bodyText: string): { category: UpstreamErrorCategory; reason: string } {
-  const normalized = bodyText.toLowerCase();
-
-  // hardLimit 必须最先判：quota / insufficient / 账号封禁 等是真正不可恢复，
-  // 不能被「token limit」「context length」这类同样含 limit 字样的临时错误抢先。
-  const hardLimit = [
-    'quota',
-    'insufficient_quota',
-    'insufficient quota',
-    'insufficient_user_quota',
-    'billing hard limit',
-    'usage limit',
-    'exceeded your current quota',
-    'exceeded your quota',
-    'quota exceeded',
-    'out of quota',
-    'invalid api key',
-    'invalid_api_key',
-    'unauthorized key',
-    'incorrect api key',
-    'api key is invalid',
-    'account banned',
-    'account suspended',
-    '限额',
-    '配额',
-    '额度',
-    '余额不足',
-    '用量不足',
-    '用量已达',
-    '账单硬限制',
-    '账单限制',
-    '封禁',
-    '账号封禁',
-    '账号停用',
-    '账号异常'
-  ];
-  if (hardLimit.some((keyword) => normalized.includes(keyword))) {
-    return { category: 'hard_limit', reason: 'hard limit or invalid key' };
-  }
-
-  // 上下文 / 输入过长不是 key 的问题，换 key 只会额外消耗配额并污染健康分。
-  const tokenLimit = [
-    'token-limit',
-    'token limit',
-    'context length',
-    'maximum context length',
-    'max tokens',
-    'tokens too long',
-    '请求 token',
-    '上下文长度',
-    '最大上下文',
-    '输入过长'
-  ];
-  if (tokenLimit.some((keyword) => normalized.includes(keyword))) {
-    return { category: 'request_limit', reason: 'request token or context limit' };
-  }
-
-  const rateLimit = [
-    'rate limit',
-    'rate_limit',
-    'ratelimit',
-    'too many requests',
-    '限流',
-    '请求过多',
-    '频率限制'
-  ];
-  if (status === 429 || rateLimit.some((keyword) => normalized.includes(keyword))) {
-    return { category: 'rate_limit', reason: 'temporary rate limit' };
-  }
-  if (status === 401 || status === 403) {
-    return { category: 'hard_limit', reason: statusText || 'unauthorized' };
-  }
-  return { category: 'transient', reason: statusText || 'transient upstream error' };
-}
-
-export function releaseUpstreamResponse(response: Response, usage?: { requests: number; tokens: number }): void {
-  const meta = responseMeta.get(response);
-  if (!meta) return;
-  if (usage) meta.rotator.recordUsage(meta.key, usage.requests, usage.tokens);
-  if (meta.lease) meta.rotator.release(meta.lease);
-  responseMeta.delete(response);
-}
-
-export function markUpstreamResponseStreamError(response: Response, message: string, category: KeyErrorCategory = 'network'): void {
-  const meta = responseMeta.get(response);
-  if (!meta) return;
-  // 流式 body 阶段的错误发生在 fetch 已成功之后，只能通过 Response 元数据回写 Key 健康状态。
-  meta.rotator.markError(meta.key, message, category);
 }
 
 async function readResponseText(response: Response): Promise<string> {
@@ -483,3 +392,7 @@ function isAcquireTimeout(error: unknown): boolean {
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
+
+// 历史兼容：早期 normalizeAnthropicBaseUrl 通过 upstream.ts 暴露给少数模块直接调用，
+// 拆出 url-builder 后保留这个 re-export。
+export { normalizeAnthropicBaseUrl };
