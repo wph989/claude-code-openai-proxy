@@ -5,10 +5,13 @@
  * 具体协议转换、SSE 处理放在子模块或 services/ 下。
  */
 
+import type { PassThrough } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { verifyProxyAuth } from '../auth.js';
 import type { AnthropicMessagesRequest, CountTokensRequest } from '../models.js';
+import { pipeAnthropicSseWithRepair } from '../services/passthrough.js';
 import { anthropicToOpenAIMessages } from '../services/transformers.js';
+import { releaseUpstreamResponse } from '../services/upstream.js';
 import { log } from '../utils/logger.js';
 import { handleAnthropicPassthrough } from './messages/anthropic-handler.js';
 import { handleOpenAICompatibleMessages } from './messages/openai-handler.js';
@@ -147,4 +150,41 @@ function readHeader(value: string | string[] | undefined): string | undefined {
     return value[0];
   }
   return value;
+}
+
+/**
+ * SSE 管线测试用便捷入口：上游非 200 时先吐 error 事件，否则委托给 pipeAnthropicSseWithRepair。
+ *
+ * 生产路径走 handleAnthropicPassthrough；保留此函数是为了让 stream-failure 测试可以
+ * 在路由层之外直接驱动管线，验证客户端断开、流中错误等边界场景。
+ */
+export async function pipeUpstreamSse(params: {
+  upstreamResponse: Response;
+  output: PassThrough;
+  requestId: string;
+  sessionId: string;
+  providerId: string;
+  clientModel: string;
+  upstreamModel: string;
+  idleTimeoutMs: number;
+  isClientClosed?: () => boolean;
+  clientAbortSignal?: AbortSignal;
+}): Promise<void> {
+  const { upstreamResponse, output, requestId, sessionId, providerId, clientModel, upstreamModel, idleTimeoutMs, isClientClosed, clientAbortSignal } = params;
+  if (!upstreamResponse.ok) {
+    const errorText = await upstreamResponse.text();
+    output.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'api_error', message: errorText || `上游请求失败，状态码=${upstreamResponse.status}` } })}\n\n`);
+    releaseUpstreamResponse(upstreamResponse);
+    output.end();
+    return;
+  }
+
+  await pipeAnthropicSseWithRepair({
+    upstreamResponse,
+    output,
+    metrics: { requestId, sessionId, providerId, clientModel, upstreamModel, endpoint: '/v1/messages' },
+    idleTimeoutMs,
+    isClientClosed,
+    clientAbortSignal,
+  });
 }
