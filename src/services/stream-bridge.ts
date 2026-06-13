@@ -88,7 +88,15 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
         content: [],
         stop_reason: null,
         stop_sequence: null,
-        usage: { input_tokens: 0, output_tokens: 0 }
+        // Anthropic 客户端严格校验 message.usage 必填五字段；上游 OpenAI 流不返回
+        // cache_* 字段，这里统一补齐 0 / null，避免 schema 校验失败。
+        usage: {
+          input_tokens: 0,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+          output_tokens: 0,
+          server_tool_use: null,
+        }
       }
     });
     state.messageStarted = true;

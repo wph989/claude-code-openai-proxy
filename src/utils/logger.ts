@@ -309,6 +309,10 @@ export function logDetailed(level: LogLevel, message: string, extra: Record<stri
   log(level, message, extra);
 }
 
+export function isLogDetailedEnabled(): boolean {
+  return detailedLogging;
+}
+
 export async function flushLogs(): Promise<void> {
   if (pendingWrites.length === 0) return;
   await Promise.allSettled(pendingWrites);

@@ -182,14 +182,30 @@ body {
 
 /* ── Main ── */
 .main-content {
-  padding-top: 100px; max-width: 1600px; margin: 0 auto;
+  max-width: 1600px; margin: 0 auto;
   padding-left: 32px; padding-right: 32px; padding-bottom: 60px;
 }
 
 /* ── Status bar ── */
 .status-bar {
-  padding: 14px 24px; background: var(--bg-card); border: 1px solid var(--border);
-  margin-bottom: 24px; font-size: 14px; display: flex; align-items: center; gap: 12px;
+  position: fixed;
+  top: 77px; /* header 高度 + 边距 */
+  left: 32px;
+  right: 32px;
+  max-width: calc(1600px - 64px);
+  margin: 0 auto;
+  padding: 14px 24px;
+  background: rgba(26, 26, 26, 0.95);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  z-index: 999;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  transition: opacity 0.3s, transform 0.3s;
 }
 .status-bar::before { content: ''; width: 8px; height: 8px; border-radius: 50%; }
 .status-bar.success { color: var(--success); }
@@ -199,6 +215,9 @@ body {
 .status-bar.loading { color: var(--text-muted); }
 .status-bar.loading::before { background: var(--text-muted); animation: pulse 1.5s infinite; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+/* 给主内容区域留出状态栏的空间 */
+.main-content { padding-top: 150px; }
 
 /* ── Stats ── */
 .stats-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 16px; margin-bottom: 32px; }

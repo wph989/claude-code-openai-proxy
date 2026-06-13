@@ -217,7 +217,7 @@ describe('stream failure handling', () => {
     expect(text).toContain('data: [DONE]');
   });
 
-  it('marks Anthropic native passthrough stream failures and writes an error event', async () => {
+  it('marks Anthropic native passthrough stream failures and closes the Anthropic event sequence', async () => {
     const rotator = new ApiKeyRotator(
       [keyEntry('key-a'), keyEntry('key-b')],
       KeyRotationStrategy.round_robin,
@@ -230,7 +230,11 @@ describe('stream failure handling', () => {
       pull(controller) {
         if (!pulled) {
           pulled = true;
-          controller.enqueue(encoder.encode('event: message_start\ndata: {"type":"message_start"}\n\n'));
+          controller.enqueue(encoder.encode(
+            'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_partial","type":"message","role":"assistant","content":[]}}\n\n' +
+            'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n' +
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}\n\n'
+          ));
           return;
         }
         throw new Error('anthropic stream broke');
@@ -265,7 +269,10 @@ describe('stream failure handling', () => {
 
     const text = Buffer.concat(chunks).toString('utf8');
     const [first] = rotator.getKeyStatuses();
-    expect(text).toContain('event: error');
+    expect(text).toContain('event: content_block_stop');
+    expect(text).toContain('event: message_delta');
+    expect(text).toContain('event: message_stop');
+    expect(text).not.toContain('流式修复失败');
     expect(first.active_requests).toBe(0);
     expect(first.error_count).toBe(1);
     expect(first.last_error_category).toBe('network');

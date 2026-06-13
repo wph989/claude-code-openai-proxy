@@ -184,6 +184,7 @@ export interface AppSettings {
   logMaxSize?: number;
   maxSockets: number;
   keepAliveTimeout: number;
+  forceIdentityAcceptEncoding: boolean;
   rateLimitMax: number;
   rateLimitTimeWindow: number;
   clusterWorkers: number;
@@ -240,6 +241,9 @@ export const settings: AppSettings = {
   logMaxSize: toNumber(process.env.LOG_MAX_SIZE, 50 * 1024 * 1024),
   maxSockets: toNumber(process.env.MAX_SOCKETS, 100),
   keepAliveTimeout: toNumber(process.env.KEEP_ALIVE_TIMEOUT, 60000),
+  // 强制上游返回未压缩（identity）响应；一些 OpenAI 兼容网关会回 br/gzip，需要在
+  // 某些解压环境里手动关掉避免 Node fetch 解码歧义。默认关。
+  forceIdentityAcceptEncoding: toBoolean(process.env.FORCE_IDENTITY_ACCEPT_ENCODING, false),
   rateLimitMax: toNumber(process.env.RATE_LIMIT_MAX, 100),
   rateLimitTimeWindow: toNumber(process.env.RATE_LIMIT_TIME_WINDOW, 60000),
   clusterWorkers: (() => { const v = Number(process.env.CLUSTER_WORKERS); return Number.isFinite(v) && v >= 0 ? v : 0; })(),

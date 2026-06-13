@@ -3,6 +3,7 @@ import { settings } from '../config.js';
 import type { ResolvedProvider, ResolvedRoute } from '../models.js';
 import type { ApiKeyRotator, KeyErrorCategory, KeyLease } from './api-key-rotator.js';
 import { log } from '../utils/logger.js';
+import { buildForwardRequestHeaders } from './http-headers.js';
 
 interface ResponseMeta {
   rotator: ApiKeyRotator;
@@ -22,13 +23,6 @@ const agent = new Agent({
 });
 setGlobalDispatcher(agent);
 
-const HEADERS_TO_STRIP = new Set([
-  'host', 'connection', 'keep-alive', 'transfer-encoding',
-  'content-length', 'te', 'trailer', 'upgrade',
-  'proxy-authorization', 'proxy-connection',
-  'authorization', 'x-api-key',
-]);
-
 /**
  * 上游请求服务：
  * - 保留原始请求 headers 和 body，仅替换 auth、model 等必要字段
@@ -40,7 +34,7 @@ export class UpstreamService {
   }
 
   private buildMessagesUrl(provider: ResolvedProvider): string {
-    return `${provider.base_url.replace(/\/$/, '')}/messages`;
+    return `${normalizeAnthropicBaseUrl(provider.base_url)}/messages`;
   }
 
   private buildHeadersWithKey(params: {
@@ -52,38 +46,7 @@ export class UpstreamService {
     anthropicVersion?: string;
     anthropicBeta?: string;
   }): Headers {
-    const headers = new Headers();
-
-    if (params.incomingHeaders) {
-      for (const [key, value] of Object.entries(params.incomingHeaders)) {
-        if (value == null) continue;
-        if (HEADERS_TO_STRIP.has(key.toLowerCase())) continue;
-        headers.set(key, Array.isArray(value) ? value.join(', ') : value);
-      }
-    }
-
-    headers.set('content-type', 'application/json');
-    headers.set('x-request-id', params.requestId);
-    headers.set('x-claude-code-session-id', params.sessionId);
-
-    if (params.apiKey) {
-      if (params.provider.provider_type === 'anthropic') {
-        headers.set('x-api-key', params.apiKey);
-      } else {
-        headers.set('authorization', `Bearer ${params.apiKey}`);
-      }
-    }
-
-    if (params.anthropicVersion) {
-      headers.set('anthropic-version', params.anthropicVersion);
-    }
-    if (params.anthropicBeta) {
-      headers.set('anthropic-beta', params.anthropicBeta);
-    }
-    for (const [key, value] of Object.entries(params.provider.headers || {})) {
-      headers.set(key, value);
-    }
-    return headers;
+    return buildForwardRequestHeaders(params);
   }
 
   private async doFetch(params: {
@@ -101,6 +64,7 @@ export class UpstreamService {
   }): Promise<{ response: Response; lease: KeyLease | undefined }> {
     const lease = params.rotator ? await params.rotator.acquire({ deadline: params.acquireDeadline }) : undefined;
     const apiKey = lease?.key;
+
     const fetchParams: RequestInit = {
       method: 'POST',
       headers: this.buildHeadersWithKey({
@@ -149,7 +113,7 @@ export class UpstreamService {
     provider: ResolvedProvider;
     route: ResolvedRoute;
     rotator?: ApiKeyRotator;
-    payload: Record<string, unknown>;
+    payload: Record<string, unknown> | string;
     requestId: string;
     sessionId: string;
     incomingHeaders?: Record<string, string | string[] | undefined>;
@@ -166,7 +130,7 @@ export class UpstreamService {
     provider: ResolvedProvider;
     route: ResolvedRoute;
     rotator?: ApiKeyRotator;
-    payload: Record<string, unknown>;
+    payload: Record<string, unknown> | string;
     url: string;
     requestId: string;
     sessionId: string;
@@ -174,8 +138,11 @@ export class UpstreamService {
     anthropicVersion?: string;
     anthropicBeta?: string;
   }): Promise<Response> {
-    const body = JSON.stringify(params.payload);
-    const isStream = params.payload.stream === true;
+    const body = typeof params.payload === 'string' ? params.payload : JSON.stringify(params.payload);
+
+    const isStream = typeof params.payload === 'string'
+      ? body.includes('"stream":true')
+      : params.payload.stream === true;
     const timeoutMs = isStream
       ? undefined
       : Math.max(1000, params.provider.timeout_seconds * 1000 || settings.requestTimeoutMs);
@@ -332,7 +299,7 @@ export class UpstreamService {
     anthropicVersion?: string;
     anthropicBeta?: string;
   }): Promise<number> {
-    const url = `${params.provider.base_url.replace(/\/$/, '')}/messages/count_tokens`;
+    const url = `${normalizeAnthropicBaseUrl(params.provider.base_url)}/messages/count_tokens`;
     const body = JSON.stringify({
       ...params.anthropicPayload,
       model: params.route.upstream_model,
@@ -381,6 +348,14 @@ export class UpstreamService {
       }
     }
   }
+}
+
+function normalizeAnthropicBaseUrl(baseUrl: string): string {
+  const trimmed = baseUrl.replace(/\/+$/, '');
+  // Anthropic 供应商通常配置到站点/API 根路径；Messages API 固定在 /v1 下。
+  // 如果用户已经显式写了 /v1，则保持原样，避免重复拼成 /v1/v1。
+  if (/\/v1$/i.test(trimmed)) return trimmed;
+  return `${trimmed}/v1`;
 }
 
 export async function safeJson(response: Response): Promise<Record<string, unknown>> {

@@ -2,20 +2,28 @@ import { PassThrough } from 'node:stream';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { verifyProxyAuth } from '../auth.js';
 import { settings } from '../config.js';
-import type { AnthropicMessagesRequest, CountTokensRequest } from '../models.js';
-import { readStreamChunk } from '../services/stream-read.js';
+import type { AnthropicMessagesRequest, CountTokensRequest, ResolvedProvider, ResolvedRoute } from '../models.js';
+import type { ApiKeyRotator } from '../services/api-key-rotator.js';
+import {
+  buildAnthropicPassthroughPayload,
+  pipeAnthropicSseWithRepair,
+  sendAnthropicPassthroughResponse,
+  sendUpstreamErrorResponse,
+  writeStreamHeaders,
+} from '../services/passthrough.js';
 import { bridgeOpenAIStreamToAnthropic } from '../services/stream-bridge.js';
 import { anthropicToOpenAIMessages, anthropicToolsToOpenAI, openAIToAnthropicResponse } from '../services/transformers.js';
-import { markUpstreamResponseStreamError, releaseUpstreamResponse, safeJson } from '../services/upstream.js';
+import { setForwardResponseHeaders } from '../services/http-headers.js';
+import { releaseUpstreamResponse, safeJson } from '../services/upstream.js';
 import { createId } from '../utils/id.js';
-import { log, logDetailed } from '../utils/logger.js';
+import { log } from '../utils/logger.js';
 
 export async function registerMessageRoutes(app: FastifyInstance): Promise<void> {
   app.get('/v1/models', async (request, reply) => {
     if (!(await verifyProxyAuth(request, reply))) return;
     return {
       object: 'list',
-      data: app.runtimeConfigManager.listModels()
+      data: app.runtimeConfigManager.listModels(),
     };
   });
 
@@ -44,7 +52,7 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
           requestId,
           sessionId,
           anthropicVersion,
-          anthropicBeta
+          anthropicBeta,
         });
       } else {
         const openAIMessages = anthropicToOpenAIMessages(payload.system, payload.messages as unknown as Array<Record<string, unknown>>);
@@ -56,15 +64,16 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
           requestId,
           sessionId,
           anthropicVersion,
-          anthropicBeta
+          anthropicBeta,
         });
       }
+
       log('info', '根据上游响应获取输入 token 完成', {
         provider_id: provider.provider_id,
         client_model: modelName,
         upstream_model: route.upstream_model,
         input_tokens: tokens,
-        output_tokens: 0
+        output_tokens: 0,
       });
       return { input_tokens: tokens };
     } catch (error) {
@@ -74,6 +83,7 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
 
   app.post('/v1/messages', async (request, reply) => {
     if (!(await verifyProxyAuth(request, reply))) return;
+
     const payload = (request.body || {}) as AnthropicMessagesRequest;
     const requestId = request.requestId;
     const sessionId = request.sessionId;
@@ -95,7 +105,7 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
       client_model: payload.model,
       upstream_model: route.upstream_model,
       stream: payload.stream === true,
-      request_body: payload
+      request_body: payload,
     });
 
     if (provider.provider_type === 'anthropic') {
@@ -108,112 +118,20 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
         sessionId,
         incomingHeaders: request.headers as Record<string, string | string[] | undefined>,
         anthropicVersion,
-        anthropicBeta
+        anthropicBeta,
       });
     }
 
-    const openAIPayload: Record<string, unknown> = {
-      model: route.upstream_model,
-      messages: anthropicToOpenAIMessages(payload.system, payload.messages as unknown as Array<Record<string, unknown>>),
-      max_tokens: payload.max_tokens ?? 4096,
-      stream: payload.stream === true
-    };
-    if (payload.temperature != null) {
-      openAIPayload.temperature = payload.temperature;
-    }
-    if (payload.top_p != null) {
-      openAIPayload.top_p = payload.top_p;
-    }
-    if (payload.stop_sequences?.length) {
-      openAIPayload.stop = payload.stop_sequences;
-    }
-    const tools = anthropicToolsToOpenAI(payload.tools as unknown as Array<Record<string, unknown>> | undefined);
-    if (tools?.length) {
-      openAIPayload.tools = tools;
-    }
-    if (openAIPayload.stream === true) {
-      openAIPayload.stream_options = { include_usage: true };
-    }
-
-    if (payload.stream !== true) {
-      const upstreamResponse = await app.upstreamService.postChatCompletions({
-        provider,
-        route,
-        rotator,
-        payload: openAIPayload,
-        requestId,
-        sessionId,
-        incomingHeaders: request.headers as Record<string, string | string[] | undefined>,
-        anthropicVersion,
-        anthropicBeta
-      });
-      const data = await safeJson(upstreamResponse);
-      if (!upstreamResponse.ok) {
-        return reply.code(upstreamResponse.status).send(data);
-      }
-      const { body, usage } = openAIToAnthropicResponse(payload.model, data);
-      releaseUpstreamResponse(upstreamResponse, { requests: 1, tokens: (usage.input_tokens || 0) + (usage.output_tokens || 0) });
-      log('info', '非流式响应完成', {
-        provider_id: provider.provider_id,
-        client_model: payload.model,
-        upstream_model: route.upstream_model,
-        upstream_status: upstreamResponse.status,
-        input_tokens: usage.input_tokens,
-        output_tokens: usage.output_tokens,
-        response_body: body
-      });
-      return body;
-    }
-
-    const messageId = createId('msg');
-    const upstreamResponse = await app.upstreamService.postChatCompletions({
-      provider,
+    return handleOpenAICompatibleMessages(app, reply, {
+      payload,
       route,
+      provider,
       rotator,
-      payload: openAIPayload,
       requestId,
       sessionId,
       incomingHeaders: request.headers as Record<string, string | string[] | undefined>,
       anthropicVersion,
-      anthropicBeta
-    });
-
-    const output = new PassThrough();
-    reply.hijack();
-    reply.raw.writeHead(200, {
-      'content-type': 'text/event-stream; charset=utf-8',
-      'cache-control': 'no-cache, no-transform',
-      connection: 'keep-alive'
-    });
-    output.pipe(reply.raw);
-
-    // 客户端断开时取消上游 body，让 bridge 的 finally 释放 lease，避免 activeRequests 泄漏。
-    let clientClosed = false;
-    const clientAbort = new AbortController();
-    const onClientClose = () => {
-      clientClosed = true;
-      clientAbort.abort();
-      output.destroy();
-    };
-    reply.raw.once('close', onClientClose);
-
-    void bridgeOpenAIStreamToAnthropic({
-      upstreamResponse,
-      output,
-      clientModel: payload.model,
-      messageId,
-      metrics: {
-        requestId,
-        sessionId,
-        providerId: provider.provider_id,
-        clientModel: payload.model,
-        upstreamModel: route.upstream_model
-      },
-      idleTimeoutMs: Math.max(1000, provider.stream_idle_timeout_seconds * 1000 || settings.streamIdleTimeoutMs),
-      isClientClosed: () => clientClosed,
-      clientAbortSignal: clientAbort.signal
-    }).finally(() => {
-      reply.raw.off('close', onClientClose);
+      anthropicBeta,
     });
   });
 }
@@ -223,9 +141,9 @@ async function handleAnthropicPassthrough(
   reply: FastifyReply,
   params: {
     payload: AnthropicMessagesRequest;
-    route: { client_model: string; upstream_model: string; extra_body: Record<string, unknown> };
-    provider: { provider_id: string; stream_idle_timeout_seconds: number };
-    rotator: unknown;
+    route: ResolvedRoute;
+    provider: ResolvedProvider;
+    rotator?: ApiKeyRotator;
     requestId: string;
     sessionId: string;
     incomingHeaders?: Record<string, string | string[] | undefined>;
@@ -234,47 +152,50 @@ async function handleAnthropicPassthrough(
   }
 ): Promise<unknown> {
   const { payload, route, provider, rotator, requestId, sessionId, incomingHeaders, anthropicVersion, anthropicBeta } = params;
-
-  const upstreamPayload: Record<string, unknown> = {
-    ...(payload as unknown as Record<string, unknown>),
-    model: route.upstream_model,
-    ...route.extra_body
-  };
-
+  const upstreamPayload = buildAnthropicPassthroughPayload(payload, route);
   const upstreamResponse = await app.upstreamService.postMessages({
-    provider: provider as Parameters<typeof app.upstreamService.postMessages>[0]['provider'],
-    route: route as Parameters<typeof app.upstreamService.postMessages>[0]['route'],
-    rotator: rotator as Parameters<typeof app.upstreamService.postMessages>[0]['rotator'],
+    provider,
+    route,
+    rotator,
     payload: upstreamPayload,
     requestId,
     sessionId,
     incomingHeaders,
     anthropicVersion,
-    anthropicBeta
+    anthropicBeta,
   });
 
   if (payload.stream !== true) {
-    const data = await safeJson(upstreamResponse);
-    if (!upstreamResponse.ok) {
-      return reply.code(upstreamResponse.status).send(data);
-    }
-    if (data.model) data.model = payload.model;
-    releaseUpstreamResponse(upstreamResponse, { requests: 1, tokens: extractAnthropicUsageTokens(data.usage) });
-    log('info', 'Anthropic 透传响应完成', {
-      provider_id: provider.provider_id,
-      client_model: payload.model,
-      upstream_model: route.upstream_model
+    return sendAnthropicPassthroughResponse({
+      reply,
+      upstreamResponse,
+      fallbackModel: payload.model,
+      context: {
+        requestId,
+        sessionId,
+        providerId: provider.provider_id,
+        clientModel: payload.model,
+        upstreamModel: route.upstream_model,
+        stream: false,
+        endpoint: '/v1/messages',
+      },
     });
-    return data;
+  }
+
+  if (!upstreamResponse.ok) {
+    return sendUpstreamErrorResponse(reply, upstreamResponse, {
+      requestId,
+      sessionId,
+      providerId: provider.provider_id,
+      clientModel: payload.model,
+      upstreamModel: route.upstream_model,
+      stream: true,
+      endpoint: '/v1/messages',
+    });
   }
 
   const output = new PassThrough();
-  reply.hijack();
-  reply.raw.writeHead(200, {
-    'content-type': 'text/event-stream; charset=utf-8',
-    'cache-control': 'no-cache, no-transform',
-    connection: 'keep-alive'
-  });
+  writeStreamHeaders(reply, upstreamResponse);
   output.pipe(reply.raw);
 
   let clientClosed = false;
@@ -287,20 +208,181 @@ async function handleAnthropicPassthrough(
   reply.raw.once('close', onClientClose);
 
   const idleTimeoutMs = Math.max(1000, provider.stream_idle_timeout_seconds * 1000 || settings.streamIdleTimeoutMs);
-  void pipeUpstreamSse({
+  void pipeAnthropicSseWithRepair({
     upstreamResponse,
     output,
+    metrics: {
+      requestId,
+      sessionId,
+      providerId: provider.provider_id,
+      clientModel: payload.model,
+      upstreamModel: route.upstream_model,
+      endpoint: '/v1/messages',
+    },
+    idleTimeoutMs,
+    isClientClosed: () => clientClosed,
+    clientAbortSignal: clientAbort.signal,
+  }).finally(() => {
+    reply.raw.off('close', onClientClose);
+  });
+}
+
+async function handleOpenAICompatibleMessages(
+  app: FastifyInstance,
+  reply: FastifyReply,
+  params: {
+    payload: AnthropicMessagesRequest;
+    route: ResolvedRoute;
+    provider: ResolvedProvider;
+    rotator?: ApiKeyRotator;
+    requestId: string;
+    sessionId: string;
+    incomingHeaders?: Record<string, string | string[] | undefined>;
+    anthropicVersion?: string;
+    anthropicBeta?: string;
+  }
+): Promise<unknown> {
+  const { payload, route, provider, rotator, requestId, sessionId, incomingHeaders, anthropicVersion, anthropicBeta } = params;
+  const openAIPayload = buildOpenAICompatiblePayload(payload, route);
+
+  const upstreamResponse = await app.upstreamService.postChatCompletions({
+    provider,
+    route,
+    rotator,
+    payload: openAIPayload,
+    requestId,
+    sessionId,
+    incomingHeaders,
+    anthropicVersion,
+    anthropicBeta,
+  });
+
+  if (payload.stream !== true) {
+    if (!upstreamResponse.ok) {
+      return sendUpstreamErrorResponse(reply, upstreamResponse, {
+        requestId,
+        sessionId,
+        providerId: provider.provider_id,
+        clientModel: payload.model,
+        upstreamModel: route.upstream_model,
+        stream: false,
+        endpoint: '/v1/messages',
+      });
+    }
+
+    const data = await safeJson(upstreamResponse);
+    // oneapi 这类网关可能已经返回 Anthropic JSON；此时只兜底补字段，避免误走 OpenAI 转换。
+    const isAnthropicJson = isPlainObject(data) && data.type === 'message';
+    let body: Record<string, unknown>;
+    let usageTokens: number;
+    if (isAnthropicJson) {
+      body = ensureAnthropicJsonShape(data, payload.model);
+      usageTokens = extractAnthropicUsageTokens(body.usage);
+    } else {
+      const converted = openAIToAnthropicResponse(payload.model, data);
+      body = converted.body;
+      usageTokens = (converted.usage.input_tokens || 0) + (converted.usage.output_tokens || 0);
+    }
+
+    releaseUpstreamResponse(upstreamResponse, { requests: 1, tokens: usageTokens });
+    setForwardResponseHeaders(reply, upstreamResponse);
+    log('info', '非流式响应完成', {
+      provider_id: provider.provider_id,
+      client_model: payload.model,
+      upstream_model: route.upstream_model,
+      upstream_status: upstreamResponse.status,
+      downstream_status: upstreamResponse.status,
+      stream: false,
+      response_kind: isAnthropicJson ? 'anthropic-json' : 'openai-json',
+      response_id: body.id,
+      stop_reason: body.stop_reason ?? null,
+      input_tokens: isPlainObject(body.usage) ? toNonNegInt(body.usage.input_tokens) : 0,
+      output_tokens: isPlainObject(body.usage) ? toNonNegInt(body.usage.output_tokens) : 0,
+      content_blocks: Array.isArray(body.content) ? body.content.length : 0,
+      response_body: body,
+    });
+    return reply.code(upstreamResponse.status).send(body);
+  }
+
+  if (!upstreamResponse.ok) {
+    return sendUpstreamErrorResponse(reply, upstreamResponse, {
+      requestId,
+      sessionId,
+      providerId: provider.provider_id,
+      clientModel: payload.model,
+      upstreamModel: route.upstream_model,
+      stream: true,
+      endpoint: '/v1/messages',
+    });
+  }
+
+  const output = new PassThrough();
+  const messageId = createId('msg');
+  writeStreamHeaders(reply, upstreamResponse);
+  output.pipe(reply.raw);
+
+  // 客户端断开时主动 abort 上游 reader，避免流式 lease 一直占用。
+  let clientClosed = false;
+  const clientAbort = new AbortController();
+  const onClientClose = () => {
+    clientClosed = true;
+    clientAbort.abort();
+    output.destroy();
+  };
+  reply.raw.once('close', onClientClose);
+
+  const idleTimeoutMs = Math.max(1000, provider.stream_idle_timeout_seconds * 1000 || settings.streamIdleTimeoutMs);
+  const metrics = {
     requestId,
     sessionId,
     providerId: provider.provider_id,
     clientModel: payload.model,
     upstreamModel: route.upstream_model,
+    endpoint: '/v1/messages',
+  };
+
+  void bridgeOpenAIStreamToAnthropic({
+    upstreamResponse,
+    output,
+    clientModel: payload.model,
+    messageId,
+    metrics,
     idleTimeoutMs,
     isClientClosed: () => clientClosed,
-    clientAbortSignal: clientAbort.signal
+    clientAbortSignal: clientAbort.signal,
   }).finally(() => {
     reply.raw.off('close', onClientClose);
   });
+}
+
+function buildOpenAICompatiblePayload(payload: AnthropicMessagesRequest, route: ResolvedRoute): Record<string, unknown> {
+  const openAIPayload: Record<string, unknown> = {
+    model: route.upstream_model,
+    messages: anthropicToOpenAIMessages(payload.system, payload.messages as unknown as Array<Record<string, unknown>>),
+    max_tokens: payload.max_tokens ?? 4096,
+    stream: payload.stream === true,
+    ...route.extra_body,
+  };
+  if (payload.temperature != null) {
+    openAIPayload.temperature = payload.temperature;
+  }
+  if (payload.top_p != null) {
+    openAIPayload.top_p = payload.top_p;
+  }
+  if (payload.stop_sequences?.length) {
+    openAIPayload.stop = payload.stop_sequences;
+  }
+  const tools = anthropicToolsToOpenAI(payload.tools as unknown as Array<Record<string, unknown>> | undefined);
+  if (tools?.length) {
+    openAIPayload.tools = tools;
+  }
+  if (openAIPayload.stream === true) {
+    openAIPayload.stream_options = {
+      include_usage: true,
+      ...(isPlainObject(openAIPayload.stream_options) ? openAIPayload.stream_options as Record<string, unknown> : {}),
+    };
+  }
+  return openAIPayload;
 }
 
 export async function pipeUpstreamSse(params: {
@@ -316,55 +398,22 @@ export async function pipeUpstreamSse(params: {
   clientAbortSignal?: AbortSignal;
 }): Promise<void> {
   const { upstreamResponse, output, requestId, sessionId, providerId, clientModel, upstreamModel, idleTimeoutMs, isClientClosed, clientAbortSignal } = params;
-  try {
-    if (!upstreamResponse.ok) {
-      const errorText = await upstreamResponse.text();
-      output.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'api_error', message: errorText || `上游请求失败，状态码=${upstreamResponse.status}` } })}\n\n`);
-      output.end();
-      return;
-    }
-
-    const body = upstreamResponse.body;
-    if (!body) { output.end(); return; }
-
-    const reader = body.getReader();
-    const decoder = new TextDecoder();
-    try {
-      while (true) {
-        const readResult = await readStreamChunk(reader, idleTimeoutMs, `SSE idle timeout: ${idleTimeoutMs}ms`, clientAbortSignal);
-        const { value, done } = readResult;
-        if (done) break;
-        output.write(value);
-      }
-    } finally {
-      reader.cancel().catch(() => {});
-    }
-
-    log('info', 'Anthropic 流式透传完成', {
-      provider_id: providerId,
-      client_model: clientModel,
-      upstream_model: upstreamModel
-    });
-  } catch (error) {
-    const clientClosed = isClientClosed?.() === true;
-    if (!clientClosed) {
-      const message = error instanceof Error ? error.message : String(error);
-      markUpstreamResponseStreamError(upstreamResponse, message, 'network');
-    }
-    if (clientClosed) {
-      log('info', '客户端断开，停止 Anthropic 流式透传', {
-        provider_id: providerId,
-        client_model: clientModel,
-        upstream_model: upstreamModel
-      });
-      return;
-    }
-    log('error', '流式透传失败', { error });
-    output.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'api_error', message: '流式透传失败。' } })}\n\n`);
-  } finally {
+  if (!upstreamResponse.ok) {
+    const errorText = await upstreamResponse.text();
+    output.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'api_error', message: errorText || `上游请求失败，状态码=${upstreamResponse.status}` } })}\n\n`);
     releaseUpstreamResponse(upstreamResponse);
     output.end();
+    return;
   }
+
+  await pipeAnthropicSseWithRepair({
+    upstreamResponse,
+    output,
+    metrics: { requestId, sessionId, providerId, clientModel, upstreamModel, endpoint: '/v1/messages' },
+    idleTimeoutMs,
+    isClientClosed,
+    clientAbortSignal,
+  });
 }
 
 function buildAnthropicError(requestId: string, errorType: string, message: string): Record<string, unknown> {
@@ -372,9 +421,9 @@ function buildAnthropicError(requestId: string, errorType: string, message: stri
     type: 'error',
     error: {
       type: errorType,
-      message
+      message,
     },
-    request_id: requestId
+    request_id: requestId,
   };
 }
 
@@ -391,6 +440,26 @@ function extractAnthropicUsageTokens(value: unknown): number {
   return toInt(value.input_tokens) + toInt(value.output_tokens);
 }
 
+function ensureAnthropicJsonShape(data: Record<string, unknown>, fallbackModel: string): Record<string, unknown> {
+  if (data.type !== 'message') data.type = 'message';
+  if (data.role !== 'assistant') data.role = 'assistant';
+  if (typeof data.id !== 'string' || !data.id || data.id.startsWith('chatcmpl-')) {
+    data.id = createId('msg');
+  }
+  if (typeof data.model !== 'string' || !data.model) data.model = fallbackModel;
+  if (!Array.isArray(data.content)) data.content = [];
+  if (data.stop_reason === undefined) data.stop_reason = null;
+  if (data.stop_sequence === undefined) data.stop_sequence = null;
+  const usage = (isPlainObject(data.usage) ? data.usage : {}) as Record<string, unknown>;
+  usage.input_tokens = toNonNegInt(usage.input_tokens);
+  usage.cache_creation_input_tokens = toNonNegInt(usage.cache_creation_input_tokens);
+  usage.cache_read_input_tokens = toNonNegInt(usage.cache_read_input_tokens);
+  usage.output_tokens = Math.max(1, toNonNegInt(usage.output_tokens));
+  usage.server_tool_use = usage.server_tool_use ?? null;
+  data.usage = usage;
+  return data;
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -398,4 +467,9 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 function toInt(value: unknown): number {
   const num = Number(value ?? 0);
   return Number.isFinite(num) && num > 0 ? Math.trunc(num) : 0;
+}
+
+function toNonNegInt(value: unknown): number {
+  const num = Number(value ?? 0);
+  return Number.isFinite(num) && num >= 0 ? Math.trunc(num) : 0;
 }

@@ -7,6 +7,35 @@ Claude Code 多供应商代理（TypeScript / npm 版）：
 - 支持多供应商、多模型映射、Web UI 配置管理、配置热生效、JSON 日志
 - 全局安装后通过 `ccop` 命令快速启动
 
+## 最近更新
+
+**v0.4.4 (2026-06-13)**
+- 重构 `/v1/messages` 与 `/v1/chat/completions` 透传链路，统一请求头、响应头和错误状态码处理
+- 修复 Anthropic 原生 SSE：补齐 usage/id/index/收尾事件，并正确丢弃 thinking 块
+- 修复流式 SSE 事件分隔符问题，避免 Claude Code 客户端收不到已修复响应
+- Anthropic 上游地址自动补 `/v1`，OpenAI-compatible 保持配置原样
+- `LOG_DETAILED=true` 时可记录透传响应体，方便排查上游返回内容
+
+**v0.4.3 (2026-06-12)**
+- 🔧 **修复 Claude Code 客户端兼容性问题**：
+  - 完整转发上游响应头（`anthropic-version`, `anthropic-beta`, `x-request-id`, `x-ratelimit-*`）
+  - 自动移除 `content-encoding` 头（Node.js fetch 已自动解压缩）
+  - 保留客户端所有请求头（只移除 hop-by-hop 头，不强制覆盖 `content-type`）
+  - 与 Python 参考脚本 `http_forward.py` 行为完全对齐
+
+**v0.4.2 (2026-06-12)**
+- ✅ **模型重名支持**：允许多个路由使用相同的 `client_model`，请求时随机选择（负载均衡/容错）
+- ✅ **UI 优化**：管理页面的状态提示固定在屏幕顶部，不随页面滚动
+
+**v0.4.1**
+- 防封重试和运行态持久化优化
+- API Key 轮询与防封重试增强
+
+**v0.4.0**
+- 流式 SSE 修复（`StreamingAnthropicSSEFixer`）
+- 请求头透传优化（保留客户端身份信息）
+- Anthropic 协议严格校验（5 字段 usage、stop_reason 映射）
+
 ## 主要特性
 
 - **协议转换**：Anthropic ↔ OpenAI 自动转换
@@ -229,6 +258,38 @@ LOG_DETAILED=false      # 是否记录详细请求/响应
 ```
 
 `api_key` 支持单字符串或对象数组：数组项可单独配 `enabled`、`quota`、`note` 等字段。多数场景只需要配置 `anti_ban.mode`，其他字段都有保守默认值。
+
+### 模型重名与负载均衡
+
+从 v0.4.2 开始，**允许多个路由使用相同的 `client_model` 名称**。请求时会从所有启用的匹配路由中**随机选择**一个，实现简单的负载均衡或多供应商容错：
+
+```json
+{
+  "providers": [
+    { "provider_id": "openai", "base_url": "https://api.openai.com/v1", "api_key": "sk-..." },
+    { "provider_id": "azure", "base_url": "https://azure.openai.azure.com", "api_key": "..." },
+    { "provider_id": "deepseek", "base_url": "https://api.deepseek.com", "api_key": "sk-..." }
+  ],
+  "models": [
+    { "client_model": "gpt-4", "provider_id": "openai", "upstream_model": "gpt-4-turbo" },
+    { "client_model": "gpt-4", "provider_id": "azure", "upstream_model": "gpt-4" },
+    { "client_model": "gpt-4", "provider_id": "deepseek", "upstream_model": "gpt-4" }
+  ]
+}
+```
+
+每次客户端请求 `gpt-4` 时，代理会从三个供应商中随机选一个。配合 `enabled: false` 可以临时禁用某个路由：
+
+```json
+{ "client_model": "gpt-4", "provider_id": "azure", "upstream_model": "gpt-4", "enabled": false }
+```
+
+**使用场景：**
+- **负载分散**：把流量分散到多个供应商，避免单点配额消耗
+- **容错冗余**：某个供应商故障时，其他供应商自动接管
+- **成本优化**：混合使用价格不同的供应商，平摊成本
+- **地域优化**：配置多个地域的同款模型，自动选择可用节点
+
 
 ## 配置文件分层
 

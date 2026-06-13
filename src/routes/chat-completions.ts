@@ -2,7 +2,9 @@ import { PassThrough } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { verifyProxyAuth } from '../auth.js';
 import { settings } from '../config.js';
+import { sendUpstreamErrorResponse, writeStreamHeaders } from '../services/passthrough.js';
 import { readStreamChunk } from '../services/stream-read.js';
+import { setForwardResponseHeaders } from '../services/http-headers.js';
 import { markUpstreamResponseStreamError, releaseUpstreamResponse, safeJson } from '../services/upstream.js';
 import { log } from '../utils/logger.js';
 
@@ -54,7 +56,8 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
       provider_id: provider.provider_id,
       client_model: modelName,
       upstream_model: route.upstream_model,
-      stream: payload.stream === true
+      stream: payload.stream === true,
+      request_body: payload
     });
 
     const upstreamResponse = await app.upstreamService.postChatCompletions({
@@ -68,27 +71,51 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
     });
 
     if (payload.stream !== true) {
-      const data = await safeJson(upstreamResponse);
       if (!upstreamResponse.ok) {
-        return reply.code(upstreamResponse.status).send(data);
+        return sendUpstreamErrorResponse(reply, upstreamResponse, {
+          requestId,
+          sessionId,
+          providerId: provider.provider_id,
+          clientModel: modelName,
+          upstreamModel: route.upstream_model,
+          stream: false,
+          endpoint: '/v1/chat/completions'
+        });
       }
+      const data = await safeJson(upstreamResponse);
       releaseUpstreamResponse(upstreamResponse, { requests: 1, tokens: extractOpenAIUsageTokens(data.usage) });
       if (data.model) data.model = modelName;
+      setForwardResponseHeaders(reply, upstreamResponse);
       log('info', 'OpenAI 透传响应完成', {
         provider_id: provider.provider_id,
         client_model: modelName,
-        upstream_model: route.upstream_model
+        upstream_model: route.upstream_model,
+        upstream_status: upstreamResponse.status,
+        downstream_status: upstreamResponse.status,
+        stream: false,
+        response_kind: 'openai-json',
+        input_tokens: isPlainObject(data.usage) ? toInt(data.usage.prompt_tokens) : 0,
+        output_tokens: isPlainObject(data.usage) ? toInt(data.usage.completion_tokens) : 0,
+        total_tokens: isPlainObject(data.usage) ? toInt(data.usage.total_tokens) : 0,
+        response_body: data
       });
-      return data;
+      return reply.code(upstreamResponse.status).send(data);
+    }
+
+    if (!upstreamResponse.ok) {
+      return sendUpstreamErrorResponse(reply, upstreamResponse, {
+        requestId,
+        sessionId,
+        providerId: provider.provider_id,
+        clientModel: modelName,
+        upstreamModel: route.upstream_model,
+        stream: true,
+        endpoint: '/v1/chat/completions'
+      });
     }
 
     const output = new PassThrough();
-    reply.hijack();
-    reply.raw.writeHead(200, {
-      'content-type': 'text/event-stream; charset=utf-8',
-      'cache-control': 'no-cache, no-transform',
-      connection: 'keep-alive'
-    });
+    writeStreamHeaders(reply, upstreamResponse);
     output.pipe(reply.raw);
 
     let clientClosed = false;
@@ -158,7 +185,13 @@ export async function pipeOpenAISse(params: {
     log('info', 'OpenAI 流式透传完成', {
       provider_id: providerId,
       client_model: clientModel,
-      upstream_model: upstreamModel
+      upstream_model: upstreamModel,
+      request_id: requestId,
+      session_id: sessionId,
+      upstream_status: upstreamResponse.status,
+      downstream_status: upstreamResponse.status,
+      stream: true,
+      sse_kind: 'openai-sse-raw'
     });
   } catch (error) {
     const clientClosed = isClientClosed?.() === true;

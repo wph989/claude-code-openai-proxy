@@ -240,11 +240,12 @@ export function validateRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
     throw new Error(`providers 中存在重复的 provider_id: ${repeatedProviderIds.join(', ')}`);
   }
 
-  const modelIds = config.models.map((item) => item.client_model);
-  const repeatedModelIds = findDuplicates(modelIds);
-  if (repeatedModelIds.length > 0) {
-    throw new Error(`models 中存在重复的 client_model: ${repeatedModelIds.join(', ')}`);
-  }
+  // 允许模型重名：多个路由使用相同 client_model 时，请求时随机选择
+  // const modelIds = config.models.map((item) => item.client_model);
+  // const repeatedModelIds = findDuplicates(modelIds);
+  // if (repeatedModelIds.length > 0) {
+  //   throw new Error(`models 中存在重复的 client_model: ${repeatedModelIds.join(', ')}`);
+  // }
 
   const providerSet = new Set(providerIds);
   const invalidRefs = Array.from(new Set(config.models.filter((item) => !providerSet.has(item.provider_id)).map((item) => item.provider_id)));
@@ -253,7 +254,8 @@ export function validateRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
   }
 
   if (config.default_client_model) {
-    const modelSet = new Set(modelIds);
+    const modelNames = config.models.map((item) => item.client_model);
+    const modelSet = new Set(modelNames);
     if (!modelSet.has(config.default_client_model)) {
       throw new Error('default_client_model 未在 models 中定义');
     }

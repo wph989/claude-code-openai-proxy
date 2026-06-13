@@ -2,6 +2,8 @@
  * 协议转换：Anthropic Messages <-> OpenAI Compatible Chat Completions
  */
 
+import { createId } from '../utils/id.js';
+
 export function anthropicContentToText(content: unknown): string {
   if (typeof content === 'string') {
     return content;
@@ -138,10 +140,19 @@ export function anthropicToolsToOpenAI(tools?: Array<Record<string, unknown>> | 
 
 export function mapFinishReason(reason?: string | null): string | null {
   if (!reason) return null;
-  if (reason === 'stop') return 'end_turn';
-  if (reason === 'length') return 'max_tokens';
-  if (reason === 'tool_calls') return 'tool_use';
-  return reason;
+  switch (reason) {
+    case 'stop':
+      return 'end_turn';
+    case 'length':
+      return 'max_tokens';
+    case 'tool_calls':
+    case 'function_call':
+      return 'tool_use';
+    case 'content_filter':
+      return 'refusal';
+    default:
+      return reason;
+  }
 }
 
 export function openAIToAnthropicResponse(originalModel: string, data: Record<string, unknown>): {
@@ -177,18 +188,30 @@ export function openAIToAnthropicResponse(originalModel: string, data: Record<st
   const inputTokens = toInt(usage.prompt_tokens);
   const outputTokens = toInt(usage.completion_tokens);
 
+  // 上游（OpenAI 兼容网关）不会返回 Anthropic 必填的 cache_* 字段；Claude Code 客户端
+  // 严格要求 message.usage 五字段齐全，此处补齐 0 / null。
+  // Anthropic 客户端要求 output_tokens >= 1（message_stop 之前不能是 0），上游空响应时
+  // 至少补成 1，避免 schema 校验失败。
+  const rawId = String(data.id ?? '');
+  const fixedId = rawId.startsWith('chatcmpl-') || !rawId
+    ? createId('msg')
+    : rawId;
+
   return {
     body: {
-      id: String(data.id ?? ''),
+      id: fixedId,
       type: 'message',
       role: 'assistant',
       model: originalModel,
       content: contentBlocks,
-      stop_reason: mapFinishReason(String(choice?.finish_reason ?? '')),
+      stop_reason: mapFinishReason(String(choice?.finish_reason ?? '')) ?? 'end_turn',
       stop_sequence: null,
       usage: {
         input_tokens: inputTokens,
-        output_tokens: outputTokens
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        output_tokens: outputTokens || 1,
+        server_tool_use: null,
       }
     },
     usage: {

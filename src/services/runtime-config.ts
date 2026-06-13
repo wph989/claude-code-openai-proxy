@@ -214,10 +214,18 @@ export class RuntimeConfigManager {
 
   resolveModel(clientModel: string): { route: ResolvedRoute; provider: ResolvedProvider; rotator: ApiKeyRotator } {
     const normalizedModel = String(clientModel || '').trim();
-    const route = this.config.models.find((item) => item.client_model === normalizedModel);
-    if (!route || route.enabled === false) {
+
+    // 支持模型重名：找到所有匹配的路由，随机选择一个
+    const matchedRoutes = this.config.models.filter((item) => item.client_model === normalizedModel && item.enabled !== false);
+
+    if (matchedRoutes.length === 0) {
       throw new Error(`未找到可用的模型映射：${normalizedModel}`);
     }
+
+    // 多个路由时随机选择
+    const route = matchedRoutes.length === 1
+      ? matchedRoutes[0]
+      : matchedRoutes[Math.floor(Math.random() * matchedRoutes.length)];
 
     const provider = this.config.providers.find((item) => item.provider_id === route.provider_id);
 
