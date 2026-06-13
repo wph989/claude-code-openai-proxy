@@ -160,6 +160,8 @@ export class StreamingAnthropicSSEFixer {
   private remap = new Map<number, number>();
   private nextIndex = 0;
   private thinkingIndices = new Set<number>();
+  private droppedBlockIndices = new Set<number>();
+  private blockTypes = new Map<number, string>();
   private firstPass = true; // 第一遍扫描 thinking 块
   private openedIndices: number[] = [];
   private closedIndices = new Set<number>();
@@ -334,26 +336,46 @@ export class StreamingAnthropicSSEFixer {
       // 5.1) content_block_start: 首次出现时建立 remap，识别 thinking 块
       if (name === 'content_block_start') {
         const block = (parsed.content_block as Record<string, unknown> | undefined) || null;
-        if (block && block.type === 'thinking') {
+        const blockType = typeof block?.type === 'string' ? block.type : '';
+        if (blockType === 'thinking' || blockType === 'redacted_thinking') {
           this.thinkingIndices.add(idx);
           if (this.dropThinking) {
+            this.droppedBlockIndices.add(idx);
             this.droppedIndices.push(idx);
             return null; // 丢弃 thinking 块的 start
           }
           // 保留但改为 text 块
           parsed.content_block = { type: 'text', text: '' };
+        } else if (blockType === 'text') {
+          // 兼容网关偶尔只给 type 不给 text；Claude Code 渲染 text 块时需要稳定的字符串字段。
+          const textBlock = block ?? {};
+          parsed.content_block = { ...textBlock, text: typeof textBlock.text === 'string' ? textBlock.text : '' };
+        } else if (blockType === 'tool_use') {
+          const toolBlock = block ?? {};
+          parsed.content_block = {
+            ...toolBlock,
+            id: typeof toolBlock.id === 'string' ? toolBlock.id : createId('toolu'),
+            name: typeof toolBlock.name === 'string' ? toolBlock.name : '',
+            input: isPlainObject(toolBlock.input) ? toolBlock.input : {},
+          };
+        } else {
+          // Claude Code 对未知 content block 很严格；整段丢弃比透出半成品事件更安全。
+          this.droppedBlockIndices.add(idx);
+          return null;
         }
         if (!this.remap.has(idx)) {
           this.remap.set(idx, this.nextIndex);
           this.nextIndex += 1;
         }
         parsed.index = this.remap.get(idx);
+        this.blockTypes.set(idx, ((parsed.content_block as Record<string, unknown>).type as string) || blockType);
         this.openedIndices.push(this.remap.get(idx)!);
         return { event: name, data: JSON.stringify(parsed) };
       }
 
       // 5.2) content_block_delta: thinking_delta 改为 text_delta，或丢弃
       if (name === 'content_block_delta') {
+        if (this.droppedBlockIndices.has(idx)) return null;
         if (this.thinkingIndices.has(idx)) {
           if (this.dropThinking) return null;
           const delta = (parsed.delta as Record<string, unknown> | undefined) || null;
@@ -361,14 +383,19 @@ export class StreamingAnthropicSSEFixer {
             parsed.delta = { type: 'text_delta', text: String(delta.thinking ?? '') };
           }
         }
-        parsed.index = this.remap.get(idx) ?? idx;
+        if (!this.remap.has(idx)) return null;
+        const delta = (parsed.delta as Record<string, unknown> | undefined) || null;
+        const blockType = this.blockTypes.get(idx);
+        if (!normalizeContentBlockDelta(parsed, delta, blockType)) return null;
+        parsed.index = this.remap.get(idx);
         return { event: name, data: JSON.stringify(parsed) };
       }
 
       // 5.3) content_block_stop: 记录关闭状态，或丢弃 thinking 块
       if (name === 'content_block_stop') {
-        if (this.thinkingIndices.has(idx) && this.dropThinking) return null;
-        const newIdx = this.remap.get(idx) ?? idx;
+        if (this.droppedBlockIndices.has(idx) || (this.thinkingIndices.has(idx) && this.dropThinking)) return null;
+        if (!this.remap.has(idx)) return null;
+        const newIdx = this.remap.get(idx)!;
         parsed.index = newIdx;
         this.closedIndices.add(newIdx);
         return { event: name, data: JSON.stringify(parsed) };
@@ -377,6 +404,29 @@ export class StreamingAnthropicSSEFixer {
 
     return name && name !== ev.event ? { event: name, data: JSON.stringify(parsed) } : ev;
   }
+}
+
+function normalizeContentBlockDelta(
+  parsed: Record<string, unknown>,
+  delta: Record<string, unknown> | null,
+  blockType: string | undefined
+): boolean {
+  if (!delta || typeof delta.type !== 'string') return false;
+  if (blockType === 'text') {
+    if (delta.type !== 'text_delta' || typeof delta.text !== 'string') return false;
+    parsed.delta = { type: 'text_delta', text: delta.text };
+    return true;
+  }
+  if (blockType === 'tool_use') {
+    if (delta.type !== 'input_json_delta' || typeof delta.partial_json !== 'string') return false;
+    parsed.delta = { type: 'input_json_delta', partial_json: delta.partial_json };
+    return true;
+  }
+  return false;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 /**

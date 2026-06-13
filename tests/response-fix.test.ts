@@ -229,6 +229,20 @@ describe('StreamingAnthropicSSEFixer', () => {
     expect(text.includes('"text":"hmm"')).toBe(true);
     expect(text.includes('thinking')).toBe(false);
   });
+
+  it('drops malformed content block deltas that would expose undefined text fields to Claude Code', () => {
+    const input = Buffer.from(
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg-ok","role":"assistant","content":[]}}\n\n' +
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n' +
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta"}}\n\n' +
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n'
+    );
+    const fixer = new StreamingAnthropicSSEFixer();
+    const fixed = fixer.push(input)?.toString('utf8') ?? '';
+
+    expect(fixed).not.toContain('"delta":{"type":"text_delta"}');
+    expect(fixed).toContain('"delta":{"type":"text_delta","text":"ok"}');
+  });
 });
 
 describe('transformOpenAISSEToAnthropicSSE', () => {
