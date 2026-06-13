@@ -1,12 +1,11 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import path from 'node:path';
 import { settings } from '../config.js';
 import { setRuntimeProxyToken } from '../auth.js';
 import { ApiKeyRotator, type KeyStateChange } from './api-key-rotator.js';
 import { resolveAntiBanConfig, type ResolvedAntiBan } from './anti-ban-config.js';
-import { UsageStore } from './usage-store.js';
-import { KeyStateStore, type KeyRuntimeRecord } from './key-state-store.js';
-import { writeJsonAtomic } from '../utils/atomic-write.js';
+import type { UsageStore } from './usage-store.js';
+import type { KeyStateStore, KeyRuntimeRecord } from './key-state-store.js';
+import type { ConfigRepository } from './config/repository.js';
+import { JsonFileConfigRepository } from './config/json-file-repository.js';
 import { nanoid } from '../utils/nanoid.js';
 import {
   KeyRotationStrategy,
@@ -29,9 +28,13 @@ import {
  * - 保存配置后立即热生效
  * - 对 provider_id / client_model / 引用关系做强校验
  * - 管理 API Key 状态（错误计数、启用/禁用）并持久化
+ *
+ * 实际的存储后端通过 ConfigRepository 抽象注入。默认使用 JsonFileConfigRepository
+ * （runtime_models.json + runtime_state.json + runtime_usage.json），未来可替换为
+ * SqliteConfigRepository 等而无需改动本类。
  */
 export class RuntimeConfigManager {
-  private configPath: string;
+  private repository: ConfigRepository;
   private config: RuntimeConfig = { providers: [], models: [], default_client_model: null };
   private rotators: Map<string, ApiKeyRotator> = new Map();
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -41,8 +44,10 @@ export class RuntimeConfigManager {
   private stateStore: KeyStateStore | null = null;
   private preloadedState: Record<string, KeyRuntimeRecord> = {};
 
-  constructor(configPath = settings.configFile) {
-    this.configPath = path.resolve(configPath);
+  constructor(configPathOrRepository: string | ConfigRepository = settings.configFile) {
+    this.repository = typeof configPathOrRepository === 'string'
+      ? new JsonFileConfigRepository(configPathOrRepository)
+      : configPathOrRepository;
   }
 
   async init(): Promise<void> {
@@ -68,8 +73,7 @@ export class RuntimeConfigManager {
 
   async reload(): Promise<RuntimeConfig> {
     await this.flushRuntimeStores();
-    const text = await readFile(this.configPath, 'utf-8');
-    const raw = JSON.parse(text) as RuntimeConfig;
+    const raw = await this.repository.loadConfig();
     const needsIdRewrite = detectMissingIds(raw);
     const validated = validateRuntimeConfig(raw);
 
@@ -91,8 +95,7 @@ export class RuntimeConfigManager {
   }
 
   private async initStateStore(): Promise<void> {
-    const stateFile = path.resolve(path.dirname(this.configPath), 'runtime_state.json');
-    this.stateStore = new KeyStateStore(stateFile);
+    this.stateStore = this.repository.createKeyStateStore();
     this.preloadedState = await this.stateStore.load();
   }
 
@@ -119,12 +122,10 @@ export class RuntimeConfigManager {
 
   private async initUsageStore(): Promise<void> {
     const ab = resolveAntiBanConfig(this.config.anti_ban);
-    const usageFile = path.isAbsolute(ab.quota.usage_file)
-      ? ab.quota.usage_file
-      : path.resolve(path.dirname(this.configPath), ab.quota.usage_file);
-    this.usageStore = new UsageStore(usageFile, {
+    this.usageStore = this.repository.createUsageStore({
       every_n: ab.quota.persist_every_n_requests,
-      critical_threshold: ab.quota.persist_critical_threshold
+      critical_threshold: ab.quota.persist_critical_threshold,
+      usageFileHint: ab.quota.usage_file
     });
     this.preloadedUsage = await this.usageStore.load();
   }
@@ -162,10 +163,7 @@ export class RuntimeConfigManager {
   }
 
   async ensureDefaultConfig(): Promise<void> {
-    const dir = path.dirname(this.configPath);
-    await mkdir(dir, { recursive: true });
-    await writeFile(this.configPath, JSON.stringify(buildDefaultRuntimeConfig(), null, 2) + '\n', 'utf-8');
-    console.log(`[init] 配置文件已创建: ${this.configPath}`);
+    await this.repository.ensureDefaultConfig(buildDefaultRuntimeConfig);
   }
 
   async saveConfig(raw: RuntimeConfig): Promise<RuntimeConfig> {
@@ -364,7 +362,7 @@ export class RuntimeConfigManager {
     this.persisting = (async () => {
       try {
         const { config: cleaned } = stripRuntimeFromConfig(this.config);
-        await writeJsonAtomic(this.configPath, cleaned);
+        await this.repository.saveConfig(cleaned);
       } catch (err) {
         console.error('[config] 持久化配置失败:', err);
       } finally {
