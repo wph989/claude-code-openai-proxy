@@ -1,7 +1,6 @@
 import type { ApiKeyEntry, KeyUsage, KeyQuotaConfig } from '../models.js';
 import { KeyRotationStrategy } from '../models.js';
 import { settings } from '../config.js';
-import { HealthTracker, type RecentEvents } from './health-tracker.js';
 import { StickySelector, BalancedSelector, type KeySelector } from './key-selectors.js';
 import type { ResolvedAntiBan } from './anti-ban-config.js';
 import { QuotaGuard } from './quota-guard.js';
@@ -22,7 +21,6 @@ export type KeyRuntimeStatus = ApiKeyEntry & {
   next_available_at: number | null;
   last_error_category: KeyErrorCategory;
   disabled_reason: string | null;
-  health_score: number;
   usage?: KeyUsage;
   quota?: KeyQuotaConfig | null;
   quota_blocked?: boolean;
@@ -57,26 +55,26 @@ export class ApiKeyRotator {
   private _strategy: KeyRotationStrategy;
   private _autoDisable: boolean;
   private _antiBan: ResolvedAntiBan;
-  private tracker: HealthTracker;
+  private _providerQuota: KeyQuotaConfig | null;
   private selector: KeySelector;
   private runtime = new Map<string, RuntimeState>();
   private _onChange?: (key: string, patch: KeyStateChange) => void;
   private quotaGuard = new QuotaGuard();
   private usageListener: ((key: string, usage: KeyUsage, ratio: number) => void) | null = null;
 
-  constructor(keys: ApiKeyEntry[], strategy: KeyRotationStrategy, autoDisable: boolean = true, antiBan: ResolvedAntiBan) {
+  constructor(keys: ApiKeyEntry[], strategy: KeyRotationStrategy, autoDisable: boolean = true, antiBan: ResolvedAntiBan, providerQuota: KeyQuotaConfig | null = null) {
     this._keys = keys;
     this._keyIndex = new Map(keys.map((k, i) => [k.key, i]));
     this._strategy = strategy;
     this._autoDisable = autoDisable;
     this._antiBan = antiBan;
-    this.tracker = new HealthTracker(this._antiBan.health);
+    this._providerQuota = providerQuota;
     const selectionMode = this.resolveSelectionMode();
-    this.selector = selectionMode === 'balanced'
-      ? new BalancedSelector(this.tracker, this._antiBan.selector.min_weight)
-      : new StickySelector(this.tracker);
+    this.selector = selectionMode === 'balanced' ? new BalancedSelector() : new StickySelector();
     for (const k of this._keys) {
-      this.quotaGuard.setQuota(k.key, k.quota ?? null);
+      // undefined → 使用供应商配额；null → 显式不使用配额；其他 → 使用 Key 自己的配额
+      const effectiveQuota = k.quota !== undefined ? k.quota : this._providerQuota;
+      this.quotaGuard.setQuota(k.key, effectiveQuota);
     }
   }
 
@@ -222,7 +220,6 @@ export class ApiKeyRotator {
 
     Object.assign(entry, patch);
     this._onChange?.(key, patch);
-    this.tracker.recordError(key);
     // transient/network 说明当前 key 或链路刚失败过，sticky 模式继续咬住它会放大中断概率。
     this.selector.notifyKeyUnavailable(key);
   }
@@ -242,7 +239,6 @@ export class ApiKeyRotator {
     this.getRuntimeState(key).lastErrorCategory = 'hard_limit';
     Object.assign(entry, patch);
     this._onChange?.(key, patch);
-    this.tracker.recordError(key);
     this.selector.notifyKeyUnavailable(key);
   }
 
@@ -266,14 +262,12 @@ export class ApiKeyRotator {
     };
     Object.assign(entry, patch);
     this._onChange?.(key, patch);
-    this.tracker.recordRateLimit(key);
     if (this._antiBan.sticky_on_cooldown === 'fallthrough') {
       this.selector.notifyKeyUnavailable(key);
     }
   }
 
   markSuccess(key: string): void {
-    this.tracker.recordSuccess(key);
     const entry = this.entryFor(key);
     if (!entry) return;
     if (entry.error_count === 0 && entry.last_error_at === null) return;
@@ -305,11 +299,13 @@ export class ApiKeyRotator {
     this.notifyUsage(key);
   }
 
-  setKeyQuota(key: string, quota: KeyQuotaConfig | null): void {
+  setKeyQuota(key: string, quota: KeyQuotaConfig | null | undefined): void {
     const entry = this.entryFor(key);
     if (!entry) return;
     entry.quota = quota;
-    this.quotaGuard.setQuota(key, quota);
+    // undefined → 使用供应商配额；null → 显式不使用配额；其他 → 使用 Key 自己的配额
+    const effectiveQuota = quota !== undefined ? quota : this._providerQuota;
+    this.quotaGuard.setQuota(key, effectiveQuota);
     this.notifyUsage(key);
   }
 
@@ -329,7 +325,16 @@ export class ApiKeyRotator {
 
   allUnavailable(): boolean {
     if (this._keys.length === 0) return true;
-    return this._keys.every((entry) => !entry.enabled);
+    const now = Date.now();
+    // 检查所有 Key 是否都不可用（禁用、配额阻塞、或冷却中）
+    return this._keys.every((entry) => {
+      if (!entry.enabled) return true;
+      if (this.quotaGuard.isBlocked(entry.key)) return true;
+      const state = this.getRuntimeState(entry.key);
+      // 冷却中也算不可用
+      if (state.nextAvailableAt != null && state.nextAvailableAt > now) return true;
+      return false;
+    });
   }
 
   hasAvailableKey(): boolean {
@@ -406,21 +411,12 @@ export class ApiKeyRotator {
         next_available_at: delayed ? state.nextAvailableAt : null,
         last_error_category: state.lastErrorCategory,
         disabled_reason: !entry.enabled ? entry.last_error_message || null : null,
-        health_score: this.tracker.getScore(entry.key),
         usage: snap.usage,
         quota: snap.quota,
         quota_blocked: snap.blocked,
         quota_reason: snap.reason
       };
     });
-  }
-
-  getHealthScore(key: string): number {
-    return this.tracker.getScore(key);
-  }
-
-  getRecentEvents(key: string): RecentEvents {
-    return this.tracker.getRecentEvents(key);
   }
 
   private entryFor(key: string): ApiKeyEntry | undefined {

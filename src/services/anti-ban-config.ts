@@ -4,8 +4,6 @@ import type {
   KeySelectionMode,
   StickyOnCooldown,
   RetryConfig,
-  SelectorConfig,
-  HealthConfig,
   QuotaPersistConfig
 } from '../models.js';
 
@@ -18,8 +16,6 @@ export interface ResolvedAntiBan {
   key_selection: KeySelectionMode;
   sticky_on_cooldown: StickyOnCooldown;
   retry: Required<RetryConfig>;
-  selector: Required<SelectorConfig>;
-  health: Required<HealthConfig>;
   quota: Required<QuotaPersistConfig>;
 }
 
@@ -36,22 +32,6 @@ export const ANTI_BAN_DEFAULTS: ResolvedAntiBan = {
     max_total_ms: 30000,
     retry_on_rate_limit: true,
     retry_on_transient: true
-  },
-  selector: {
-    min_weight: 0.05
-  },
-  health: {
-    window_ms: 300000,
-    rate_limit_penalty_per_event: 0.15,
-    rate_limit_penalty_floor: 0.2,
-    transient_penalty_per_event: 0.10,
-    transient_penalty_floor: 0.3,
-    consecutive_penalty_per_event: 0.20,
-    consecutive_penalty_floor: 0.1,
-    fresh_success_boost: 1.05,
-    fresh_success_window_ms: 60000,
-    score_floor: 0.1,
-    score_ceiling: 1.05
   },
   quota: {
     persist_every_n_requests: 50,
@@ -82,8 +62,6 @@ export function resolveAntiBanConfig(
   const base: ResolvedAntiBan = {
     ...ANTI_BAN_DEFAULTS,
     retry: { ...ANTI_BAN_DEFAULTS.retry },
-    selector: { ...ANTI_BAN_DEFAULTS.selector },
-    health: { ...ANTI_BAN_DEFAULTS.health },
     quota: { ...ANTI_BAN_DEFAULTS.quota }
   };
   const mode = primary?.mode ?? fallback?.mode ?? base.mode;
@@ -99,7 +77,7 @@ function applyPartial(target: ResolvedAntiBan, src: Partial<AntiBanConfig> | Par
   const t = target as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(src)) {
     if (v === undefined || v === null) continue;
-    if (k === 'retry' || k === 'selector' || k === 'health' || k === 'quota') {
+    if (k === 'retry' || k === 'quota') {
       Object.assign(t[k] as object, v);
     } else {
       t[k] = v;
@@ -114,11 +92,6 @@ function clamp(c: ResolvedAntiBan): void {
   c.rate_limit_delay_max_ms = Math.max(c.rate_limit_delay_min_ms, Math.trunc(Number(c.rate_limit_delay_max_ms) || 0));
   c.retry.max_attempts = Math.max(1, Math.trunc(Number(c.retry.max_attempts) || 1));
   c.retry.max_total_ms = Math.max(0, Math.trunc(Number(c.retry.max_total_ms) || 0));
-  c.selector.min_weight = Math.max(0, Math.min(1, Number(c.selector.min_weight) || 0));
-  c.health.window_ms = Math.max(1000, Math.trunc(Number(c.health.window_ms) || 1000));
-  c.health.fresh_success_window_ms = Math.max(0, Math.trunc(Number(c.health.fresh_success_window_ms) || 0));
-  c.health.score_floor = Math.max(0, Math.min(1, Number(c.health.score_floor) || 0));
-  c.health.score_ceiling = Math.max(c.health.score_floor, Number(c.health.score_ceiling) || 1);
   c.quota.persist_every_n_requests = Math.max(0, Math.trunc(Number(c.quota.persist_every_n_requests) || 0));
   c.quota.persist_critical_threshold = Math.max(0, Math.min(1, Number(c.quota.persist_critical_threshold) || 0.85));
 }

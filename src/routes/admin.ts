@@ -255,8 +255,11 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     const idx = parseInt(keyIndex, 10);
     if (isNaN(idx) || idx < 0) return reply.code(400).send({ message: '无效的 keyIndex。' });
     const body = (request.body || {}) as { quota?: KeyQuotaConfig | null };
-    const quota = body.quota ?? null;
-    if (quota !== null) {
+
+    // ✅ 保持 undefined（继承供应商配额）和 null（显式不使用配额）的语义
+    const quota = body.quota;
+
+    if (quota !== null && quota !== undefined) {
       if (quota.soft_stop_threshold !== undefined) {
         if (typeof quota.soft_stop_threshold !== 'number' || quota.soft_stop_threshold <= 0 || quota.soft_stop_threshold > 1) {
           return reply.code(400).send({ message: 'soft_stop_threshold 必须在 (0, 1] 之间。' });

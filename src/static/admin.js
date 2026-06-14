@@ -5,7 +5,7 @@ let editingIndex = -1;        // -1 = add new
 let providerPage = 1;
 let modelPage = 1;
 const PAGE_SIZE = 10;
-let expandedKeyProvider = null; // provider_id of expanded key panel
+let expandedKeyProvider = localStorage.getItem('ccop-expanded-key-provider') || null; // provider_id of expanded key panel
 let keyStates = {}; // { providerId: [ApiKeyEntry, ...] }
 
 // sort state per tab
@@ -34,20 +34,6 @@ const antiBanRetryMaxAttemptsInput = $('#antiBanRetryMaxAttempts');
 const antiBanRetryMaxTotalMsInput = $('#antiBanRetryMaxTotalMs');
 const antiBanRetryOnRateLimitInput = $('#antiBanRetryOnRateLimit');
 const antiBanRetryOnTransientInput = $('#antiBanRetryOnTransient');
-const antiBanSelectorMinWeightInput = $('#antiBanSelectorMinWeight');
-const antiBanHealthInputs = {
-  window_ms: $('#antiBanHealthWindowMs'),
-  rate_limit_penalty_per_event: $('#antiBanHealthRlPenalty'),
-  rate_limit_penalty_floor: $('#antiBanHealthRlFloor'),
-  transient_penalty_per_event: $('#antiBanHealthTransPenalty'),
-  transient_penalty_floor: $('#antiBanHealthTransFloor'),
-  consecutive_penalty_per_event: $('#antiBanHealthConsPenalty'),
-  consecutive_penalty_floor: $('#antiBanHealthConsFloor'),
-  fresh_success_boost: $('#antiBanHealthSuccessBoost'),
-  fresh_success_window_ms: $('#antiBanHealthSuccessWindowMs'),
-  score_floor: $('#antiBanHealthScoreFloor'),
-  score_ceiling: $('#antiBanHealthScoreCeiling'),
-};
 const antiBanQuotaPersistEveryInput = $('#antiBanQuotaPersistEvery');
 const antiBanQuotaCriticalInput = $('#antiBanQuotaCritical');
 const antiBanQuotaUsageFileInput = $('#antiBanQuotaUsageFile');
@@ -64,13 +50,16 @@ const modalConfirm = $('#modal-confirm');
 const Dialog = {
   overlay: null,
   container: null,
+  escHandler: null,
+  keydownHandler: null,
+  previousFocus: null,
 
   init() {
     if (this.overlay) return;
     this.overlay = document.createElement('div');
     this.overlay.className = 'dialog-overlay';
     this.overlay.innerHTML = `
-      <div class="dialog-container">
+      <div class="dialog-container" role="dialog" aria-modal="true">
         <div class="dialog-header">
           <span class="dialog-title"></span>
           <button class="dialog-close" aria-label="关闭">×</button>
@@ -90,12 +79,14 @@ const Dialog = {
 
   show(title, content, buttons = []) {
     this.init();
+    this.previousFocus = document.activeElement;
     this.overlay.querySelector('.dialog-title').textContent = title;
     this.overlay.querySelector('.dialog-content').innerHTML = content;
 
     const footer = this.overlay.querySelector('.dialog-footer');
     footer.innerHTML = '';
 
+    let primaryButton = null;
     buttons.forEach(btn => {
       const button = document.createElement('button');
       button.className = `btn ${btn.class || ''}`;
@@ -105,13 +96,46 @@ const Dialog = {
         if (btn.close !== false) this.hide();
       });
       footer.appendChild(button);
+      if (btn.class && btn.class.includes('btn-primary')) primaryButton = button;
     });
 
     this.overlay.classList.add('show');
+
+    // 键盘交互：Esc 关闭、Enter 触发首个 primary 按钮（除非焦点已在按钮上）
+    this.keydownHandler = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        this.hide();
+        return;
+      }
+      if (e.key === 'Enter' && primaryButton) {
+        const tag = (e.target.tagName || '').toLowerCase();
+        // textarea 内回车不拦截；其余区域回车触发 primary 按钮
+        if (tag === 'textarea') return;
+        if (tag === 'button') return;
+        e.preventDefault();
+        primaryButton.click();
+      }
+    };
+    document.addEventListener('keydown', this.keydownHandler);
+
+    // 把焦点移到第一个可交互元素，方便键盘用户立即输入
+    setTimeout(() => {
+      const focusTarget = this.overlay.querySelector('input, textarea, select, button.btn-primary') || primaryButton;
+      if (focusTarget) focusTarget.focus();
+    }, 0);
   },
 
   hide() {
     if (this.overlay) this.overlay.classList.remove('show');
+    if (this.keydownHandler) {
+      document.removeEventListener('keydown', this.keydownHandler);
+      this.keydownHandler = null;
+    }
+    if (this.previousFocus && typeof this.previousFocus.focus === 'function') {
+      try { this.previousFocus.focus(); } catch { /* ignore */ }
+      this.previousFocus = null;
+    }
   },
 
   confirm(title, message, onConfirm, confirmText = '确认', cancelText = '取消', confirmClass = 'btn-primary') {
@@ -125,6 +149,85 @@ const Dialog = {
     this.show(title, `<p>${esc(message)}</p>`, [
       { text: '确定', class: 'btn-primary', action: onClose }
     ]);
+  }
+};
+
+// ── Toast 通知 ──
+// 叠加式右下角通知，3 秒自动消失。
+// 替代 alert + 顶部 status-bar 在"操作完成"场景下的反馈，避免操作连发时旧消息被覆盖。
+const Toast = {
+  stack: null,
+  ensureStack() {
+    if (this.stack) return this.stack;
+    this.stack = document.createElement('div');
+    this.stack.className = 'toast-stack';
+    document.body.appendChild(this.stack);
+    return this.stack;
+  },
+  show(message, type = 'info', durationMs = 3000) {
+    const stack = this.ensureStack();
+    const el = document.createElement('div');
+    el.className = `toast toast-${type}`;
+    const icon = type === 'success' ? '✓' : type === 'error' ? '!' : 'i';
+    el.innerHTML = `
+      <span class="toast-icon" aria-hidden="true">${icon}</span>
+      <div class="toast-body"></div>
+      <button class="toast-close" aria-label="关闭">×</button>
+    `;
+    el.querySelector('.toast-body').textContent = message;
+    stack.appendChild(el);
+    // 触发 transition：next frame 加 show
+    requestAnimationFrame(() => el.classList.add('show'));
+
+    let dismissed = false;
+    const dismiss = () => {
+      if (dismissed) return;
+      dismissed = true;
+      el.classList.remove('show');
+      setTimeout(() => el.remove(), 250);
+    };
+    el.querySelector('.toast-close').addEventListener('click', dismiss);
+    if (durationMs > 0) {
+      setTimeout(dismiss, durationMs);
+    }
+  },
+  success(message) { this.show(message, 'success'); },
+  error(message) { this.show(message, 'error', 5000); },
+  info(message) { this.show(message, 'info'); }
+};
+
+// ── 主题切换 ──
+// 在 :root 上预定义的 CSS 变量基础上，通过 body.theme-light 覆盖颜色。
+// 选择持久化在 localStorage，初始化在 DOMContentLoaded 之前完成以避免闪烁。
+const Theme = {
+  STORAGE_KEY: 'ccop-theme',
+  current: 'dark',
+  apply(name) {
+    this.current = name === 'light' ? 'light' : 'dark';
+    // 同时在 html 和 body 上挂 class：html 上的由内联脚本先设置避免闪烁，
+    // body 上的是为了 CSS 选择器兼容（其余组件样式都基于 body）。
+    document.documentElement.classList.toggle('theme-light', this.current === 'light');
+    document.body.classList.toggle('theme-light', this.current === 'light');
+    try { localStorage.setItem(this.STORAGE_KEY, this.current); } catch { /* localStorage 不可用时降级为仅本会话生效 */ }
+    this.updateToggleButton();
+  },
+  toggle() {
+    this.apply(this.current === 'dark' ? 'light' : 'dark');
+  },
+  updateToggleButton() {
+    const btn = document.getElementById('themeToggleBtn');
+    if (!btn) return;
+    btn.setAttribute('aria-label', this.current === 'dark' ? '切换到亮色主题' : '切换到暗色主题');
+    btn.innerHTML = this.current === 'dark'
+      ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>`
+      : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>`;
+  },
+  init() {
+    let saved = 'dark';
+    try { saved = localStorage.getItem(this.STORAGE_KEY) || 'dark'; } catch { /* ignore */ }
+    // documentElement 上可能已被 inline 脚本设置过 theme-light（防闪烁）；
+    // 在此再调一次 apply 以同步 body 和按钮图标。
+    this.apply(saved);
   }
 };
 
@@ -242,7 +345,7 @@ function submitQuota(providerId, keyIndex) {
   try {
     quota = readQuotaInputs('qf');
   } catch (err) {
-    Dialog.alert('错误', err.message);
+    Toast.error(err.message);
     return;
   }
   fetch(`/api/keys/${encodeURIComponent(providerId)}/${keyIndex}/quota`, {
@@ -254,16 +357,31 @@ function submitQuota(providerId, keyIndex) {
   .then(({ ok, data }) => {
     if (!ok) throw new Error(data.message || '保存失败');
     setStatus(data.message || '配额已更新');
-    renderKeyPanel(providerId);
+
+    // 同步更新 keyStates
+    if (keyStates[providerId] && keyStates[providerId][keyIndex]) {
+      keyStates[providerId][keyIndex].quota = data.quota;
+    }
+
+    // ✅ 同步更新 currentConfig，避免后续全局保存时覆盖
+    const provider = currentConfig.providers.find(p => p.provider_id === providerId);
+    if (provider && Array.isArray(provider.api_key) && provider.api_key[keyIndex]) {
+      provider.api_key[keyIndex].quota = data.quota;
+    }
+
+    renderTable();
+    Toast.success(data.message || '配额已更新');
   })
-  .catch(err => Dialog.alert('错误', '保存失败：' + err.message));
+  .catch(err => Toast.error('保存失败：' + err.message));
 }
 
 function readQuotaInputs(prefix) {
   const reqRaw = document.getElementById(`${prefix}-max-req`).value.trim();
   const tokRaw = document.getElementById(`${prefix}-max-tok`).value.trim();
   const thrRaw = document.getElementById(`${prefix}-threshold`).value.trim();
-  if (!reqRaw && !tokRaw && !thrRaw) return null;
+
+  // ✅ 清空所有输入 → undefined（继承供应商配额）
+  if (!reqRaw && !tokRaw && !thrRaw) return undefined;
 
   const max_requests = reqRaw ? Number(reqRaw) : null;
   const max_tokens = tokRaw ? Number(tokRaw) : null;
@@ -347,19 +465,6 @@ function readAntiBanConfig() {
   retry.retry_on_transient = antiBanRetryOnTransientInput.checked;
   result.retry = retry;
 
-  const minWeight = readRatio(antiBanSelectorMinWeightInput);
-  if (minWeight != null) result.selector = { min_weight: minWeight };
-
-  const health = {};
-  for (const [field, input] of Object.entries(antiBanHealthInputs)) {
-    if (!input.value.trim()) continue;
-    const v = field === 'window_ms' || field === 'fresh_success_window_ms'
-      ? readNonNegativeInt(input)
-      : readPositiveFloat(input);
-    if (v != null) health[field] = v;
-  }
-  if (Object.keys(health).length > 0) result.health = health;
-
   const quota = {};
   const persistEvery = readNonNegativeInt(antiBanQuotaPersistEveryInput);
   if (persistEvery != null) quota.persist_every_n_requests = persistEvery;
@@ -390,13 +495,6 @@ function fillAntiBanConfig(config) {
   antiBanRetryOnRateLimitInput.checked = retry.retry_on_rate_limit !== false;
   antiBanRetryOnTransientInput.checked = retry.retry_on_transient !== false;
 
-  setNumberInput(antiBanSelectorMinWeightInput, cfg.selector?.min_weight);
-
-  const health = cfg.health || {};
-  for (const [field, input] of Object.entries(antiBanHealthInputs)) {
-    setNumberInput(input, health[field]);
-  }
-
   const quota = cfg.quota || {};
   setNumberInput(antiBanQuotaPersistEveryInput, quota.persist_every_n_requests);
   setNumberInput(antiBanQuotaCriticalInput, quota.persist_critical_threshold);
@@ -415,6 +513,12 @@ async function loadConfig() {
   keyMaxErrorsInput.value = currentConfig.key_max_errors || '';
   fillAntiBanConfig(currentConfig.anti_ban);
   refreshDefaultModelSelect();
+
+  // 从 /api/config 响应中加载所有运行时状态（一次性，不需要单独调用）
+  if (data.key_states) {
+    keyStates = data.key_states;
+  }
+
   renderTable();
   updatePreviewNow();
   setStatus('配置已加载');
@@ -448,8 +552,10 @@ async function saveConfig() {
     renderTable();
     updatePreviewNow();
     setStatus(data.message || '保存成功');
+    Toast.success(data.message || '配置已保存并生效');
   } catch (error) {
     setStatus('保存失败：' + error.message, true);
+    Toast.error('保存失败：' + error.message);
   }
 }
 
@@ -473,11 +579,13 @@ async function keyAction(providerId, keyIndex, action) {
     const data = await res.json();
     if (!res.ok) throw new Error(data?.message || '操作失败');
     setStatus(data.message || '操作成功');
+    Toast.success(data.message || '操作成功');
     await loadKeyStates(providerId);
     await loadConfig();
     renderKeyPanel(providerId);
   } catch (err) {
     setStatus('操作失败：' + err.message, true);
+    Toast.error('操作失败：' + err.message);
   }
 }
 
@@ -675,13 +783,6 @@ function renderKeyPanelHtml(providerId) {
       ? `<span class="badge ${k.error_count >= 3 ? 'badge-warn' : 'badge-info'}">错误 ${k.error_count} 次</span>`
       : '<span class="text-dim">无错误</span>';
 
-    const healthBadge = (() => {
-      if (k.health_score == null) return '';
-      const s = Number(k.health_score);
-      const cls = s >= 0.7 ? 'health-good' : s >= 0.4 ? 'health-warn' : 'health-bad';
-      return `<span class="badge ${cls}" title="健康分（滑动窗口评分）">健康 ${s.toFixed(2)}</span>`;
-    })();
-
     const quotaBlock = (() => {
       if (!k.quota) return '<span class="text-dim">未配置配额</span>';
       const usage = k.usage || { requests_used: 0, tokens_used: 0 };
@@ -725,7 +826,7 @@ function renderKeyPanelHtml(providerId) {
       <td class="key-col-note">
         <input class="key-note-input" data-provider="${esc(providerId)}" data-idx="${i}" value="${esc(k.note || '')}" placeholder="备注..." />
       </td>
-      <td class="key-col-status">${enabledBadge}${healthBadge ? '<br>' + healthBadge : ''}</td>
+      <td class="key-col-status">${enabledBadge}</td>
       <td class="key-col-errors">${errorBadge}${lastError ? '<br>' + lastError : ''}</td>
       <td class="key-col-runtime">${runtimeInfo}<br>${quotaBlock}</td>
       <td class="key-col-time">${k.auto_disabled_at ? formatTime(k.auto_disabled_at) : (k.disabled_at ? formatTime(k.disabled_at) : '-')}</td>
@@ -816,10 +917,12 @@ function moveItem(idx, dir) {
 async function toggleKeyPanel(providerId) {
   if (expandedKeyProvider === providerId) {
     expandedKeyProvider = null;
+    localStorage.removeItem('ccop-expanded-key-provider');
     renderTable();
     return;
   }
   expandedKeyProvider = providerId;
+  localStorage.setItem('ccop-expanded-key-provider', providerId);
   await loadKeyStates(providerId);
   renderTable();
 }
@@ -852,7 +955,7 @@ tableContainer.addEventListener('change', (e) => {
       renderKeyPanel(providerId);
       loadConfig();
     })
-    .catch(err => Dialog.alert('错误', '备注更新失败：' + err.message));
+    .catch(err => Toast.error('备注更新失败：' + err.message));
     return;
   }
 });
@@ -923,7 +1026,7 @@ tableContainer.addEventListener('click', (e) => {
     const raw = input?.value || '';
     const keys = raw.split(/[,，\n]+/).map(k => k.trim()).filter(Boolean);
     if (keys.length === 0) {
-      Dialog.alert('提示', '请输入至少一个 Key 值');
+      Toast.info('请输入至少一个 Key 值');
       return;
     }
     fetch(`/api/keys/${encodeURIComponent(providerId)}`, {
@@ -936,11 +1039,12 @@ tableContainer.addEventListener('click', (e) => {
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.message || data.error || '添加失败');
       setStatus(data.message || `${keys.length} 个 Key 已添加到 ${providerId}`);
+      Toast.success(data.message || `${keys.length} 个 Key 已添加`);
       input.value = '';
       renderKeyPanel(providerId);
       loadConfig();
     })
-    .catch(err => Dialog.alert('错误', '添加失败：' + err.message));
+    .catch(err => Toast.error('添加失败：' + err.message));
     return;
   }
 
@@ -955,10 +1059,11 @@ tableContainer.addEventListener('click', (e) => {
       .then(({ ok, data }) => {
         if (!ok) throw new Error(data.message || '重置失败');
         setStatus(data.message || `${providerId} 所有 Key 已重置`);
+        Toast.success(data.message || `${providerId} 所有 Key 已重置`);
         renderKeyPanel(providerId);
         loadConfig();
       })
-      .catch(err => Dialog.alert('错误', '重置失败：' + err.message));
+      .catch(err => Toast.error('重置失败：' + err.message));
     }, '确认重置', '取消', 'btn-warning');
     return;
   }
@@ -975,10 +1080,11 @@ tableContainer.addEventListener('click', (e) => {
       .then(({ ok, data }) => {
         if (!ok) throw new Error(data.error || '删除失败');
         setStatus(`Key 已从 ${providerId} 删除`);
+        Toast.success(`Key 已删除`);
         renderKeyPanel(providerId);
         loadConfig();
       })
-      .catch(err => Dialog.alert('错误', '删除失败：' + err.message));
+      .catch(err => Toast.error('删除失败：' + err.message));
     }, '确认删除', '取消', 'btn-danger');
     return;
   }
@@ -1004,9 +1110,21 @@ tableContainer.addEventListener('click', (e) => {
       .then(({ ok, data }) => {
         if (!ok) throw new Error(data.message || '重置配额失败');
         setStatus(data.message || '配额计数已清零');
-        renderKeyPanel(providerId);
+        Toast.success(data.message || '配额计数已清零');
+
+        // 直接更新本地 keyStates 中的 usage 数据
+        if (keyStates[providerId] && keyStates[providerId][keyIndex]) {
+          if (keyStates[providerId][keyIndex].usage) {
+            keyStates[providerId][keyIndex].usage.requests_used = 0;
+            keyStates[providerId][keyIndex].usage.tokens_used = 0;
+          }
+          keyStates[providerId][keyIndex].quota_blocked = false;
+          keyStates[providerId][keyIndex].quota_reason = null;
+        }
+
+        renderTable();
       })
-      .catch(err => Dialog.alert('错误', '重置配额失败：' + err.message));
+      .catch(err => Toast.error('重置配额失败：' + err.message));
     }, '确认重置', '取消', 'btn-warning');
     return;
   }
@@ -1126,7 +1244,7 @@ function submitModal() {
     renderTable();
     updatePreviewNow();
   } catch (e) {
-    Dialog.alert('错误', e.message);
+    Toast.error(e.message);
   }
 }
 
@@ -1358,11 +1476,14 @@ antiBanRetryMaxAttemptsInput.addEventListener('input', updatePreview);
 antiBanRetryMaxTotalMsInput.addEventListener('input', updatePreview);
 antiBanRetryOnRateLimitInput.addEventListener('change', updatePreview);
 antiBanRetryOnTransientInput.addEventListener('change', updatePreview);
-antiBanSelectorMinWeightInput.addEventListener('input', updatePreview);
-for (const input of Object.values(antiBanHealthInputs)) input.addEventListener('input', updatePreview);
 antiBanQuotaPersistEveryInput.addEventListener('input', updatePreview);
 antiBanQuotaCriticalInput.addEventListener('input', updatePreview);
 antiBanQuotaUsageFileInput.addEventListener('input', updatePreview);
 
 // ── Init ──
+Theme.init();
+const themeToggleBtn = document.getElementById('themeToggleBtn');
+if (themeToggleBtn) {
+  themeToggleBtn.addEventListener('click', () => Theme.toggle());
+}
 ensureSession().then(loadConfig).catch(e => setStatus(e.message, true));
