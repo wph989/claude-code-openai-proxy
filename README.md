@@ -9,23 +9,10 @@ Claude Code 多供应商代理（TypeScript / npm 版）：
 
 ## 最近更新
 
-**v0.4.4 (2026-06-13)**
-- 重构 `/v1/messages` 与 `/v1/chat/completions` 透传链路，统一请求头、响应头和错误状态码处理
-- 修复 Anthropic 原生 SSE：补齐 usage/id/index/收尾事件，并正确丢弃 thinking 块
-- 修复流式 SSE 事件分隔符问题，避免 Claude Code 客户端收不到已修复响应
-- Anthropic 上游地址自动补 `/v1`，OpenAI-compatible 保持配置原样
-- `LOG_DETAILED=true` 时可记录透传响应体，方便排查上游返回内容
-
-**v0.4.3 (2026-06-12)**
-- 🔧 **修复 Claude Code 客户端兼容性问题**：
-  - 完整转发上游响应头（`anthropic-version`, `anthropic-beta`, `x-request-id`, `x-ratelimit-*`）
-  - 自动移除 `content-encoding` 头（Node.js fetch 已自动解压缩）
-  - 保留客户端所有请求头（只移除 hop-by-hop 头，不强制覆盖 `content-type`）
-  - 与 Python 参考脚本 `http_forward.py` 行为完全对齐
-
 **v0.4.2 (2026-06-12)**
-- ✅ **模型重名支持**：允许多个路由使用相同的 `client_model`，请求时随机选择（负载均衡/容错）
-- ✅ **UI 优化**：管理页面的状态提示固定在屏幕顶部，不随页面滚动
+- **模型重名支持**：允许多个路由使用相同的 `client_model`，请求时随机选择（负载均衡/容错）
+- **修复 Claude Code 客户端兼容性问题,支持请求透传，用于代理限制接收cc客户端请求的供应商**
+- **检查供应商Anthropic SSE 响应自动修复不合规的响应**
 
 **v0.4.1**
 - 防封重试和运行态持久化优化
@@ -297,15 +284,12 @@ LOG_DETAILED=false      # 是否记录详细请求/响应
 
 | 文件 | 写入来源 | 内容 |
 |---|---|---|
-| `runtime_models.json` | **用户**（admin UI / 手编） | providers / models / anti_ban / 全局设置 / `api_key` 的用户字段（id、key、enabled、note、quota） |
+| `config.json` | **用户**（admin UI / 手编） | providers / models / anti_ban / 全局设置 / `api_key` 的用户字段（id、key、enabled、note、quota） |
 | `runtime_state.json` | **程序自动**（v2，按 `providerId:id` 索引） | Key 运行态：`error_count` / `disabled_at` / `last_error_at` / `last_error_message` / `auto_disabled_at` |
 | `runtime_usage.json` | **程序自动**（v2，按 `providerId:id` 索引） | per-Key 配额计数（requests_used / tokens_used） |
 
 每个 `api_key` 项有一个稳定的 10 字符 nanoid `id`。state / usage 用 `providerId:id` 而非 key 字面量做主键，好处有二：(1) 改 token 续期不丢历史；(2) 持久化文件不再出现 key 字面量。手编 `runtime_models.json` 时漏写 `id` 字段也无妨——首次加载时自动补完并回写一次干净版本。
 
-旧版 `runtime_state.json` / `runtime_usage.json`（v1，按 key 字面量索引）会被识别并丢弃，等价于"重置"。`runtime_state.json` / `runtime_usage.json` 默认随 `runtime_models.json` 同目录创建，已加入 `.gitignore`。
-
-admin 页面的所有 anti_ban 字段——含 `health.*`、`selector.min_weight`、`retry.*`、`quota.persist_*`——都支持**保存即热更新**，无需重启。
 
 ## 防封策略（anti-ban）
 
@@ -440,4 +424,4 @@ MIT
 ## github地址
 
 如果觉得有用，还请给个star
-https://github.com/wph989/claude-code-openai-proxy
+**https://github.com/wph989/claude-code-openai-proxy**

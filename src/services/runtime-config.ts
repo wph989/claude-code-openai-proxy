@@ -189,13 +189,23 @@ export class RuntimeConfigManager {
   }
 
   adminView() {
+    // 收集所有供应商的运行时状态
+    const keyStates: Record<string, unknown[]> = {};
+    for (const provider of this.config.providers) {
+      const rotator = this.rotators.get(provider.provider_id);
+      if (rotator) {
+        keyStates[provider.provider_id] = rotator.getKeyStatuses();
+      }
+    }
+
     return {
       config: this.getConfig(),
       summary: this.summary(),
       provider_options: this.config.providers.map((item) => ({
         provider_id: item.provider_id,
         label: `${item.provider_id} (${item.enabled !== false ? '启用' : '停用'})`
-      }))
+      })),
+      key_states: keyStates  // 新增：所有运行时状态
     };
   }
 
@@ -266,11 +276,13 @@ export class RuntimeConfigManager {
   }
 
   private getOrCreateRotator(providerId: string, keys: ApiKeyEntry[], strategy: KeyRotationStrategy, autoDisable: boolean, antiBan: ResolvedAntiBan): ApiKeyRotator {
+    const provider = this.config.providers.find((p) => p.provider_id === providerId);
+    const providerQuota = provider?.quota ?? null;
     const existing = this.rotators.get(providerId);
     if (existing && keysEqual(existing.keys, keys) && existing.strategy === strategy && antiBanEqual(existing.antiBan, antiBan)) {
       return existing;
     }
-    const rotator = new ApiKeyRotator(keys, strategy, autoDisable, antiBan);
+    const rotator = new ApiKeyRotator(keys, strategy, autoDisable, antiBan, providerQuota);
     rotator.onChange = (key, patch) => this.onKeyStateChange(providerId, key, patch);
     this.attachUsageBridge(providerId, rotator);
     this.rotators.set(providerId, rotator);
@@ -284,8 +296,9 @@ export class RuntimeConfigManager {
       const strategy = provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin;
       const autoDisable = provider.auto_disable_on_error !== false;
       const antiBan = resolveAntiBanConfig(provider.anti_ban, this.config.anti_ban);
+      const providerQuota = provider.quota ?? null;
       if (apiKeys.length > 0) {
-        const rotator = new ApiKeyRotator(apiKeys, strategy, autoDisable, antiBan);
+        const rotator = new ApiKeyRotator(apiKeys, strategy, autoDisable, antiBan, providerQuota);
         rotator.onChange = (key, patch) => this.onKeyStateChange(provider.provider_id, key, patch);
         this.attachUsageBridge(provider.provider_id, rotator);
         this.rotators.set(provider.provider_id, rotator);
@@ -317,12 +330,13 @@ export class RuntimeConfigManager {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
     if (!provider) return;
 
+    // 确保 api_key 已归一化为数组（resolveApiKeys 会处理字符串/环境变量形式）
     const keys = resolveApiKeys(provider);
     const entry = keys.find((k) => k.key === key);
     if (!entry) return;
 
+    // 直接修改 entry（无需重新赋值 provider.api_key，因为 keys 就是 provider.api_key）
     Object.assign(entry, patch);
-    provider.api_key = keys;
 
     // 把运行态字段写入 state 文件；用户配置字段（enabled / note / quota）变化才需要持久化 config。
     const runtimePatch: KeyRuntimeRecord = {};
@@ -395,23 +409,15 @@ export class RuntimeConfigManager {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
     if (!provider) throw new Error(`未找到供应商：${providerId}`);
 
+    // 确保 api_key 已归一化为数组
     const keys = resolveApiKeys(provider);
     if (keyIndex < 0 || keyIndex >= keys.length) {
       throw new Error(`无效的 key 索引：${keyIndex}`);
     }
 
+    // 直接修改 entry（rotator._keys 指向同一数组，自动同步）
     const entry = keys[keyIndex];
     Object.assign(entry, patch);
-    provider.api_key = keys;
-
-    const rotator = this.rotators.get(providerId);
-    if (rotator) {
-      const rotatorKeys = rotator.getKeys();
-      const rotatorEntry = rotatorKeys.find((k) => k.key === entry.key);
-      if (rotatorEntry) {
-        Object.assign(rotatorEntry, patch);
-      }
-    }
 
     await this.persistNow();
   }
@@ -471,18 +477,29 @@ export class RuntimeConfigManager {
     if (this.usageStore) await this.usageStore.forceFlush();
   }
 
-  async updateKeyQuota(providerId: string, keyIndex: number, quota: KeyQuotaConfig | null): Promise<void> {
+  async updateKeyQuota(providerId: string, keyIndex: number, quota: KeyQuotaConfig | null | undefined): Promise<void> {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
     if (!provider) throw new Error(`未找到供应商：${providerId}`);
-    const keys = resolveApiKeys(provider);
-    if (keyIndex < 0 || keyIndex >= keys.length) {
+
+    // 直接从配置中获取 Key 数组（不要创建新数组）
+    if (!Array.isArray(provider.api_key)) {
+      throw new Error(`供应商 ${providerId} 的 api_key 不是数组`);
+    }
+
+    if (keyIndex < 0 || keyIndex >= provider.api_key.length) {
       throw new Error(`无效的 key 索引：${keyIndex}`);
     }
-    const entry = keys[keyIndex];
+
+    // 直接修改配置中的 quota（保持 undefined / null / {...} 语义）
+    const entry = provider.api_key[keyIndex];
     entry.quota = quota;
-    provider.api_key = keys;
+
+    // 同步更新 Rotator 的 QuotaGuard
     const rotator = this.rotators.get(providerId);
-    rotator?.setKeyQuota(entry.key, quota);
+    if (rotator) {
+      rotator.setKeyQuota(entry.key, quota);
+    }
+
     await this.persistNow();
   }
 
@@ -493,6 +510,7 @@ export class RuntimeConfigManager {
     const trimmed = keyValue.trim();
     if (!trimmed) throw new Error('Key 值不能为空');
 
+    // 确保 api_key 已归一化为数组
     const keys = resolveApiKeys(provider);
     if (keys.some((k) => k.key === trimmed)) {
       throw new Error('该 Key 已存在');
@@ -509,8 +527,8 @@ export class RuntimeConfigManager {
       auto_disabled_at: null
     };
 
+    // 直接 push 到数组（keys 就是 provider.api_key）
     keys.push(newKey);
-    provider.api_key = keys;
 
     this.rebuildRotators();
     await this.reconcileStores();
@@ -541,7 +559,7 @@ export class RuntimeConfigManager {
       rotator?.resetUsage(entry.key);
       count++;
     }
-    provider.api_key = keys;
+    // keys 就是 provider.api_key，无需重新赋值
     this.rebuildRotators();
     if (this.usageStore) await this.usageStore.forceFlush();
     if (this.stateStore) await this.stateStore.forceFlush();
@@ -553,6 +571,7 @@ export class RuntimeConfigManager {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
     if (!provider) throw new Error(`未找到供应商：${providerId}`);
 
+    // 确保 api_key 已归一化为数组
     const keys = resolveApiKeys(provider);
     const existingSet = new Set(keys.map((k) => k.key));
     const added: string[] = [];
@@ -581,7 +600,7 @@ export class RuntimeConfigManager {
     }
 
     if (added.length > 0) {
-      provider.api_key = keys;
+      // keys 就是 provider.api_key，无需重新赋值
       this.rebuildRotators();
       await this.reconcileStores();
       await this.persistNow();
@@ -594,6 +613,7 @@ export class RuntimeConfigManager {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
     if (!provider) throw new Error(`未找到供应商：${providerId}`);
 
+    // 确保 api_key 已归一化为数组
     const keys = resolveApiKeys(provider);
     if (keyIndex < 0 || keyIndex >= keys.length) {
       throw new Error(`无效的 key 索引：${keyIndex}`);
@@ -601,7 +621,7 @@ export class RuntimeConfigManager {
 
     const removed = keys[keyIndex];
     keys.splice(keyIndex, 1);
-    provider.api_key = keys;
+    // keys 就是 provider.api_key，splice 已直接修改
 
     if (this.stateStore && removed) {
       this.stateStore.remove(`${providerId}:${removed.id}`);
@@ -613,28 +633,49 @@ export class RuntimeConfigManager {
   }
 }
 
+/**
+ * 从 Provider 配置中解析出 ApiKeyEntry 数组。
+ *
+ * 重要变化（重构后）：
+ * - 如果 api_key 已经是数组，直接返回原引用（不修改 entry.quota）
+ * - 如果是字符串/环境变量，创建新数组并**立即设置回 provider**，然后返回
+ * - 保证调用后 provider.api_key 总是数组，且返回值与 provider.api_key 是同一引用
+ * - 归一化职责集中在这里，调用方不再需要 `provider.api_key = keys`
+ *
+ * 配额继承逻辑：
+ * - entry.quota === undefined → 使用供应商配额（在 QuotaGuard 层面动态继承）
+ * - entry.quota === null → 显式不使用配额
+ * - entry.quota === {...} → 使用 Key 自己的配额
+ *
+ * 这样可以保证：
+ * 1. Rotator 持有的 _keys 和 provider.api_key 始终是同一个数组
+ * 2. 修改 provider.api_key[i] 会直接影响 Rotator，无需手动同步
+ * 3. entry.quota 永远不会被覆盖，保持用户原始配置
+ */
 function resolveApiKeys(provider: ProviderConfig): ApiKeyEntry[] {
+  // 如果已经是数组，直接返回（不修改 entry.quota）
+  if (Array.isArray(provider.api_key)) {
+    return provider.api_key;
+  }
+
+  // 否则创建新数组（字符串或环境变量形式）
   const keys: ApiKeyEntry[] = [];
 
-  if (provider.api_key) {
-    if (typeof provider.api_key === 'string') {
-      for (const key of provider.api_key.split(',')) {
-        const trimmed = key.trim();
-        if (trimmed) {
-          keys.push({
-            id: nanoid(),
-            key: trimmed,
-            enabled: true,
-            error_count: 0,
-            disabled_at: null,
-            last_error_at: null,
-            last_error_message: null,
-            auto_disabled_at: null
-          });
-        }
+  if (typeof provider.api_key === 'string') {
+    for (const key of provider.api_key.split(',')) {
+      const trimmed = key.trim();
+      if (trimmed) {
+        keys.push({
+          id: nanoid(),
+          key: trimmed,
+          enabled: true,
+          error_count: 0,
+          disabled_at: null,
+          last_error_at: null,
+          last_error_message: null,
+          auto_disabled_at: null
+        });
       }
-    } else if (Array.isArray(provider.api_key)) {
-      keys.push(...provider.api_key);
     }
   }
 
@@ -659,22 +700,21 @@ function resolveApiKeys(provider: ProviderConfig): ApiKeyEntry[] {
     }
   }
 
+  // 去重（不应用供应商配额，保持 undefined）
   const seen = new Set<string>();
   const unique: ApiKeyEntry[] = [];
   for (const entry of keys) {
     if (!seen.has(entry.key)) {
       seen.add(entry.key);
-      unique.push(applyProviderQuota(entry, provider.quota));
+      unique.push(entry);
     }
   }
-  return unique;
-}
 
-function applyProviderQuota(entry: ApiKeyEntry, providerQuota: KeyQuotaConfig | null | undefined): ApiKeyEntry {
-  // quota: undefined 表示继承供应商默认值；null 表示该 key 显式不使用配额。
-  if (entry.quota !== undefined) return entry;
-  if (providerQuota === undefined) return entry;
-  return { ...entry, quota: providerQuota };
+  // 立即归一化：设置回 provider，后续返回 provider.api_key（保证引用一致）
+  provider.api_key = unique as unknown as ApiKeyEntry[];
+
+  // 返回的是 provider.api_key 的引用（不是 unique）
+  return provider.api_key;
 }
 
 function keysEqual(a: ApiKeyEntry[], b: ApiKeyEntry[]): boolean {

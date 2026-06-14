@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
 import { homedir } from 'node:os';
 import { mkdirSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
-import { join, dirname, basename } from 'node:path';
+import { join, dirname, basename, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 
@@ -217,8 +217,15 @@ const toBoolean = (raw: string | undefined, fallback: boolean): boolean => {
 };
 
 // 配置文件路径（优先环境变量，否则按模式选择）
-const configFilePath = process.env.CONFIG_FILE?.trim()
-  || (IS_PROD_MODE ? USER_CONFIG_FILE : join(process.cwd(), 'runtime_models.json'));
+// 相对路径会基于 CONFIG_ROOT 解析，确保无论从哪里启动都能找到配置文件
+const configFilePath = (() => {
+  const envPath = process.env.CONFIG_FILE?.trim();
+  if (!envPath) {
+    return IS_PROD_MODE ? USER_CONFIG_FILE : join(process.cwd(), 'runtime_models.json');
+  }
+  // 如果是绝对路径，直接使用；否则相对于 CONFIG_ROOT 解析
+  return isAbsolute(envPath) ? envPath : join(CONFIG_ROOT, envPath);
+})();
 
 export const settings: AppSettings = {
   host: process.env.HOST?.trim() || '0.0.0.0',
@@ -235,7 +242,12 @@ export const settings: AppSettings = {
   logLevel: process.env.LOG_LEVEL?.trim() || 'info',
   logFormat: validLogFormat(process.env.LOG_FORMAT),
   logDetailed: toBoolean(process.env.LOG_DETAILED, false),
-  logFile: process.env.LOG_FILE?.trim() || join(USER_LOG_DIR, 'app.log'),
+  logFile: (() => {
+    const envPath = process.env.LOG_FILE?.trim();
+    if (!envPath) return join(USER_LOG_DIR, 'app.log');
+    // 如果是绝对路径，直接使用；否则相对于 CONFIG_ROOT 解析
+    return isAbsolute(envPath) ? envPath : join(CONFIG_ROOT, envPath);
+  })(),
   logRotation: validLogRotation(process.env.LOG_ROTATION),
   logMaxFiles: toNumber(process.env.LOG_MAX_FILES, 30),
   logMaxSize: toNumber(process.env.LOG_MAX_SIZE, 50 * 1024 * 1024),

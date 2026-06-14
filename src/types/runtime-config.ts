@@ -53,24 +53,6 @@ export interface RetryConfig {
   retry_on_transient?: boolean;
 }
 
-export interface SelectorConfig {
-  min_weight?: number;
-}
-
-export interface HealthConfig {
-  window_ms?: number;
-  rate_limit_penalty_per_event?: number;
-  rate_limit_penalty_floor?: number;
-  transient_penalty_per_event?: number;
-  transient_penalty_floor?: number;
-  consecutive_penalty_per_event?: number;
-  consecutive_penalty_floor?: number;
-  fresh_success_boost?: number;
-  fresh_success_window_ms?: number;
-  score_floor?: number;
-  score_ceiling?: number;
-}
-
 export interface QuotaPersistConfig {
   persist_every_n_requests?: number;
   persist_critical_threshold?: number;
@@ -97,8 +79,6 @@ export interface AntiBanConfig {
   key_selection?: KeySelectionMode;
   sticky_on_cooldown?: StickyOnCooldown;
   retry?: RetryConfig;
-  selector?: SelectorConfig;
-  health?: HealthConfig;
   quota?: QuotaPersistConfig;
 }
 

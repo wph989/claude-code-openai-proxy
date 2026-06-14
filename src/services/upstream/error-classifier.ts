@@ -87,7 +87,13 @@ export function classifyUpstreamError(status: number, statusText: string, bodyTe
     return { category: 'request_limit', reason: 'request token or context limit' };
   }
 
-  if (status === 429 || RATE_LIMIT_KEYWORDS.some((keyword) => normalized.includes(keyword))) {
+  // 429 状态码优先判定为 rate_limit（触发冷却机制）
+  // 即使 body 没有明确的关键词，也应该尊重 HTTP 语义
+  if (status === 429) {
+    return { category: 'rate_limit', reason: 'HTTP 429 rate limit' };
+  }
+
+  if (RATE_LIMIT_KEYWORDS.some((keyword) => normalized.includes(keyword))) {
     return { category: 'rate_limit', reason: 'temporary rate limit' };
   }
   if (status === 401 || status === 403) {

@@ -13,14 +13,12 @@ import {
   type AntiBanConfig,
   type ApiKeyEntry,
   type ApiKeyRuntimeFields,
-  type HealthConfig,
   type KeyQuotaConfig,
   type PersistedApiKey,
   type QuotaPersistConfig,
   type RetryConfig,
   type RuntimeConfig,
   type RuntimeConfigSummary,
-  type SelectorConfig,
 } from '../../types/runtime-config.js';
 
 /**
@@ -272,10 +270,6 @@ function normalizeAntiBanConfig(value: unknown): AntiBanConfig | undefined {
   // 高级 anti-ban 配置需要白名单保留，否则 Admin 保存会意外清掉手写 JSON 调参。
   const retry = normalizeRetryConfig(value.retry);
   if (retry) result.retry = retry;
-  const selector = normalizeSelectorConfig(value.selector);
-  if (selector) result.selector = selector;
-  const health = normalizeHealthConfig(value.health);
-  if (health) result.health = health;
   const quota = normalizeQuotaPersistConfig(value.quota);
   if (quota) result.quota = quota;
   return Object.keys(result).length > 0 ? result : undefined;
@@ -293,29 +287,6 @@ function normalizeRetryConfig(value: unknown): RetryConfig | undefined {
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
-function normalizeSelectorConfig(value: unknown): SelectorConfig | undefined {
-  if (!isPlainObject(value)) return undefined;
-  const minWeight = normalizeRatio(value.min_weight);
-  return minWeight == null ? undefined : { min_weight: minWeight };
-}
-
-function normalizeHealthConfig(value: unknown): HealthConfig | undefined {
-  if (!isPlainObject(value)) return undefined;
-  const result: HealthConfig = {};
-  setHealthNumber(result, 'window_ms', value.window_ms, true);
-  setHealthNumber(result, 'rate_limit_penalty_per_event', value.rate_limit_penalty_per_event);
-  setHealthNumber(result, 'rate_limit_penalty_floor', value.rate_limit_penalty_floor);
-  setHealthNumber(result, 'transient_penalty_per_event', value.transient_penalty_per_event);
-  setHealthNumber(result, 'transient_penalty_floor', value.transient_penalty_floor);
-  setHealthNumber(result, 'consecutive_penalty_per_event', value.consecutive_penalty_per_event);
-  setHealthNumber(result, 'consecutive_penalty_floor', value.consecutive_penalty_floor);
-  setHealthNumber(result, 'fresh_success_boost', value.fresh_success_boost);
-  setHealthNumber(result, 'fresh_success_window_ms', value.fresh_success_window_ms, true);
-  setHealthNumber(result, 'score_floor', value.score_floor);
-  setHealthNumber(result, 'score_ceiling', value.score_ceiling);
-  return Object.keys(result).length > 0 ? result : undefined;
-}
-
 function normalizeQuotaPersistConfig(value: unknown): QuotaPersistConfig | undefined {
   if (!isPlainObject(value)) return undefined;
   const result: QuotaPersistConfig = {};
@@ -326,13 +297,6 @@ function normalizeQuotaPersistConfig(value: unknown): QuotaPersistConfig | undef
   const usageFile = typeof value.usage_file === 'string' ? value.usage_file.trim() : '';
   if (usageFile) result.usage_file = usageFile;
   return Object.keys(result).length > 0 ? result : undefined;
-}
-
-function setHealthNumber(target: HealthConfig, key: keyof HealthConfig, raw: unknown, integer = false): void {
-  const num = normalizeNonNegativeNumber(raw);
-  if (num != null) {
-    (target as Record<string, number>)[key] = integer ? Math.trunc(num) : num;
-  }
 }
 
 function normalizeRotationStrategy(value: unknown): KeyRotationStrategy {

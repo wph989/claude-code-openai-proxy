@@ -18,8 +18,6 @@ export {
   type KeySelectionMode,
   type StickyOnCooldown,
   type RetryConfig,
-  type SelectorConfig,
-  type HealthConfig,
   type QuotaPersistConfig,
   type KeyQuotaConfig,
   type KeyUsage,

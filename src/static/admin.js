@@ -5,7 +5,7 @@ let editingIndex = -1;        // -1 = add new
 let providerPage = 1;
 let modelPage = 1;
 const PAGE_SIZE = 10;
-let expandedKeyProvider = null; // provider_id of expanded key panel
+let expandedKeyProvider = localStorage.getItem('ccop-expanded-key-provider') || null; // provider_id of expanded key panel
 let keyStates = {}; // { providerId: [ApiKeyEntry, ...] }
 
 // sort state per tab
@@ -34,20 +34,6 @@ const antiBanRetryMaxAttemptsInput = $('#antiBanRetryMaxAttempts');
 const antiBanRetryMaxTotalMsInput = $('#antiBanRetryMaxTotalMs');
 const antiBanRetryOnRateLimitInput = $('#antiBanRetryOnRateLimit');
 const antiBanRetryOnTransientInput = $('#antiBanRetryOnTransient');
-const antiBanSelectorMinWeightInput = $('#antiBanSelectorMinWeight');
-const antiBanHealthInputs = {
-  window_ms: $('#antiBanHealthWindowMs'),
-  rate_limit_penalty_per_event: $('#antiBanHealthRlPenalty'),
-  rate_limit_penalty_floor: $('#antiBanHealthRlFloor'),
-  transient_penalty_per_event: $('#antiBanHealthTransPenalty'),
-  transient_penalty_floor: $('#antiBanHealthTransFloor'),
-  consecutive_penalty_per_event: $('#antiBanHealthConsPenalty'),
-  consecutive_penalty_floor: $('#antiBanHealthConsFloor'),
-  fresh_success_boost: $('#antiBanHealthSuccessBoost'),
-  fresh_success_window_ms: $('#antiBanHealthSuccessWindowMs'),
-  score_floor: $('#antiBanHealthScoreFloor'),
-  score_ceiling: $('#antiBanHealthScoreCeiling'),
-};
 const antiBanQuotaPersistEveryInput = $('#antiBanQuotaPersistEvery');
 const antiBanQuotaCriticalInput = $('#antiBanQuotaCritical');
 const antiBanQuotaUsageFileInput = $('#antiBanQuotaUsageFile');
@@ -371,7 +357,20 @@ function submitQuota(providerId, keyIndex) {
   .then(({ ok, data }) => {
     if (!ok) throw new Error(data.message || '保存失败');
     setStatus(data.message || '配额已更新');
-    renderKeyPanel(providerId);
+
+    // 同步更新 keyStates
+    if (keyStates[providerId] && keyStates[providerId][keyIndex]) {
+      keyStates[providerId][keyIndex].quota = data.quota;
+    }
+
+    // ✅ 同步更新 currentConfig，避免后续全局保存时覆盖
+    const provider = currentConfig.providers.find(p => p.provider_id === providerId);
+    if (provider && Array.isArray(provider.api_key) && provider.api_key[keyIndex]) {
+      provider.api_key[keyIndex].quota = data.quota;
+    }
+
+    renderTable();
+    Toast.success(data.message || '配额已更新');
   })
   .catch(err => Toast.error('保存失败：' + err.message));
 }
@@ -380,7 +379,9 @@ function readQuotaInputs(prefix) {
   const reqRaw = document.getElementById(`${prefix}-max-req`).value.trim();
   const tokRaw = document.getElementById(`${prefix}-max-tok`).value.trim();
   const thrRaw = document.getElementById(`${prefix}-threshold`).value.trim();
-  if (!reqRaw && !tokRaw && !thrRaw) return null;
+
+  // ✅ 清空所有输入 → undefined（继承供应商配额）
+  if (!reqRaw && !tokRaw && !thrRaw) return undefined;
 
   const max_requests = reqRaw ? Number(reqRaw) : null;
   const max_tokens = tokRaw ? Number(tokRaw) : null;
@@ -464,19 +465,6 @@ function readAntiBanConfig() {
   retry.retry_on_transient = antiBanRetryOnTransientInput.checked;
   result.retry = retry;
 
-  const minWeight = readRatio(antiBanSelectorMinWeightInput);
-  if (minWeight != null) result.selector = { min_weight: minWeight };
-
-  const health = {};
-  for (const [field, input] of Object.entries(antiBanHealthInputs)) {
-    if (!input.value.trim()) continue;
-    const v = field === 'window_ms' || field === 'fresh_success_window_ms'
-      ? readNonNegativeInt(input)
-      : readPositiveFloat(input);
-    if (v != null) health[field] = v;
-  }
-  if (Object.keys(health).length > 0) result.health = health;
-
   const quota = {};
   const persistEvery = readNonNegativeInt(antiBanQuotaPersistEveryInput);
   if (persistEvery != null) quota.persist_every_n_requests = persistEvery;
@@ -507,13 +495,6 @@ function fillAntiBanConfig(config) {
   antiBanRetryOnRateLimitInput.checked = retry.retry_on_rate_limit !== false;
   antiBanRetryOnTransientInput.checked = retry.retry_on_transient !== false;
 
-  setNumberInput(antiBanSelectorMinWeightInput, cfg.selector?.min_weight);
-
-  const health = cfg.health || {};
-  for (const [field, input] of Object.entries(antiBanHealthInputs)) {
-    setNumberInput(input, health[field]);
-  }
-
   const quota = cfg.quota || {};
   setNumberInput(antiBanQuotaPersistEveryInput, quota.persist_every_n_requests);
   setNumberInput(antiBanQuotaCriticalInput, quota.persist_critical_threshold);
@@ -532,6 +513,12 @@ async function loadConfig() {
   keyMaxErrorsInput.value = currentConfig.key_max_errors || '';
   fillAntiBanConfig(currentConfig.anti_ban);
   refreshDefaultModelSelect();
+
+  // 从 /api/config 响应中加载所有运行时状态（一次性，不需要单独调用）
+  if (data.key_states) {
+    keyStates = data.key_states;
+  }
+
   renderTable();
   updatePreviewNow();
   setStatus('配置已加载');
@@ -796,13 +783,6 @@ function renderKeyPanelHtml(providerId) {
       ? `<span class="badge ${k.error_count >= 3 ? 'badge-warn' : 'badge-info'}">错误 ${k.error_count} 次</span>`
       : '<span class="text-dim">无错误</span>';
 
-    const healthBadge = (() => {
-      if (k.health_score == null) return '';
-      const s = Number(k.health_score);
-      const cls = s >= 0.7 ? 'health-good' : s >= 0.4 ? 'health-warn' : 'health-bad';
-      return `<span class="badge ${cls}" title="健康分（滑动窗口评分）">健康 ${s.toFixed(2)}</span>`;
-    })();
-
     const quotaBlock = (() => {
       if (!k.quota) return '<span class="text-dim">未配置配额</span>';
       const usage = k.usage || { requests_used: 0, tokens_used: 0 };
@@ -846,7 +826,7 @@ function renderKeyPanelHtml(providerId) {
       <td class="key-col-note">
         <input class="key-note-input" data-provider="${esc(providerId)}" data-idx="${i}" value="${esc(k.note || '')}" placeholder="备注..." />
       </td>
-      <td class="key-col-status">${enabledBadge}${healthBadge ? '<br>' + healthBadge : ''}</td>
+      <td class="key-col-status">${enabledBadge}</td>
       <td class="key-col-errors">${errorBadge}${lastError ? '<br>' + lastError : ''}</td>
       <td class="key-col-runtime">${runtimeInfo}<br>${quotaBlock}</td>
       <td class="key-col-time">${k.auto_disabled_at ? formatTime(k.auto_disabled_at) : (k.disabled_at ? formatTime(k.disabled_at) : '-')}</td>
@@ -937,10 +917,12 @@ function moveItem(idx, dir) {
 async function toggleKeyPanel(providerId) {
   if (expandedKeyProvider === providerId) {
     expandedKeyProvider = null;
+    localStorage.removeItem('ccop-expanded-key-provider');
     renderTable();
     return;
   }
   expandedKeyProvider = providerId;
+  localStorage.setItem('ccop-expanded-key-provider', providerId);
   await loadKeyStates(providerId);
   renderTable();
 }
@@ -1129,7 +1111,18 @@ tableContainer.addEventListener('click', (e) => {
         if (!ok) throw new Error(data.message || '重置配额失败');
         setStatus(data.message || '配额计数已清零');
         Toast.success(data.message || '配额计数已清零');
-        renderKeyPanel(providerId);
+
+        // 直接更新本地 keyStates 中的 usage 数据
+        if (keyStates[providerId] && keyStates[providerId][keyIndex]) {
+          if (keyStates[providerId][keyIndex].usage) {
+            keyStates[providerId][keyIndex].usage.requests_used = 0;
+            keyStates[providerId][keyIndex].usage.tokens_used = 0;
+          }
+          keyStates[providerId][keyIndex].quota_blocked = false;
+          keyStates[providerId][keyIndex].quota_reason = null;
+        }
+
+        renderTable();
       })
       .catch(err => Toast.error('重置配额失败：' + err.message));
     }, '确认重置', '取消', 'btn-warning');
@@ -1483,8 +1476,6 @@ antiBanRetryMaxAttemptsInput.addEventListener('input', updatePreview);
 antiBanRetryMaxTotalMsInput.addEventListener('input', updatePreview);
 antiBanRetryOnRateLimitInput.addEventListener('change', updatePreview);
 antiBanRetryOnTransientInput.addEventListener('change', updatePreview);
-antiBanSelectorMinWeightInput.addEventListener('input', updatePreview);
-for (const input of Object.values(antiBanHealthInputs)) input.addEventListener('input', updatePreview);
 antiBanQuotaPersistEveryInput.addEventListener('input', updatePreview);
 antiBanQuotaCriticalInput.addEventListener('input', updatePreview);
 antiBanQuotaUsageFileInput.addEventListener('input', updatePreview);
