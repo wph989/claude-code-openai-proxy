@@ -7,7 +7,7 @@
 
 import type { PassThrough } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
-import { verifyProxyAuth } from '../auth.js';
+import { proxyAuthHook } from '../auth.js';
 import type { AnthropicMessagesRequest, CountTokensRequest } from '../models.js';
 import { pipeAnthropicSseWithRepair } from '../services/passthrough.js';
 import { anthropicToOpenAIMessages } from '../services/transformers.js';
@@ -17,16 +17,14 @@ import { handleAnthropicPassthrough } from './messages/anthropic-handler.js';
 import { handleOpenAICompatibleMessages } from './messages/openai-handler.js';
 
 export async function registerMessageRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/v1/models', async (request, reply) => {
-    if (!(await verifyProxyAuth(request, reply))) return;
+  app.get('/v1/models', { preHandler: [proxyAuthHook] }, async () => {
     return {
       object: 'list',
       data: app.runtimeConfigManager.listModels(),
     };
   });
 
-  app.post('/v1/messages/count_tokens', async (request, reply) => {
-    if (!(await verifyProxyAuth(request, reply))) return;
+  app.post('/v1/messages/count_tokens', { preHandler: [proxyAuthHook] }, async (request, reply) => {
     const payload = (request.body || {}) as CountTokensRequest;
     const requestId = request.requestId;
     const sessionId = request.sessionId;
@@ -79,9 +77,7 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
     }
   });
 
-  app.post('/v1/messages', async (request, reply) => {
-    if (!(await verifyProxyAuth(request, reply))) return;
-
+  app.post('/v1/messages', { preHandler: [proxyAuthHook] }, async (request, reply) => {
     const payload = (request.body || {}) as AnthropicMessagesRequest;
     const requestId = request.requestId;
     const sessionId = request.sessionId;

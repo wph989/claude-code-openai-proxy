@@ -1,8 +1,8 @@
 import { PassThrough } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
-import { verifyProxyAuth } from '../auth.js';
+import { proxyAuthHook } from '../auth.js';
 import { settings } from '../config.js';
-import { sendUpstreamErrorResponse, writeStreamHeaders } from '../services/passthrough.js';
+import { createSseSession, sendUpstreamErrorResponse, writeStreamHeaders } from '../services/passthrough.js';
 import { isPlainObject } from '../utils/guards.js';
 import { readStreamChunk } from '../services/stream-read.js';
 import { setForwardResponseHeaders } from '../services/http-headers.js';
@@ -10,8 +10,7 @@ import { markUpstreamResponseStreamError, releaseUpstreamResponse, safeJson } fr
 import { log } from '../utils/logger.js';
 
 export async function registerChatCompletionsRoutes(app: FastifyInstance): Promise<void> {
-  app.post('/v1/chat/completions', async (request, reply) => {
-    if (!(await verifyProxyAuth(request, reply))) return;
+  app.post('/v1/chat/completions', { preHandler: [proxyAuthHook] }, async (request, reply) => {
     const payload = (request.body || {}) as Record<string, unknown>;
     const requestId = request.requestId;
     const sessionId = request.sessionId;
@@ -118,17 +117,7 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
     const output = new PassThrough();
     writeStreamHeaders(reply, upstreamResponse);
     output.pipe(reply.raw);
-
-    let clientClosed = false;
-    const clientAbort = new AbortController();
-    const onClientClose = () => {
-      clientClosed = true;
-      clientAbort.abort();
-      output.destroy();
-    };
-    reply.raw.once('close', onClientClose);
-
-    const idleTimeoutMs = Math.max(1000, provider.stream_idle_timeout_seconds * 1000 || settings.streamIdleTimeoutMs);
+    const sse = createSseSession(reply, output, provider);
     void pipeOpenAISse({
       upstreamResponse,
       output,
@@ -137,12 +126,10 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
       providerId: provider.provider_id,
       clientModel: modelName,
       upstreamModel: route.upstream_model,
-      idleTimeoutMs,
-      isClientClosed: () => clientClosed,
-      clientAbortSignal: clientAbort.signal
-    }).finally(() => {
-      reply.raw.off('close', onClientClose);
-    });
+      idleTimeoutMs: sse.idleTimeoutMs,
+      isClientClosed: sse.isClientClosed,
+      clientAbortSignal: sse.clientAbortSignal
+    }).finally(sse.cleanup);
   });
 }
 

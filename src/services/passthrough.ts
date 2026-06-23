@@ -11,6 +11,8 @@
 
 import { PassThrough } from 'node:stream';
 import type { FastifyReply } from 'fastify';
+import { settings } from '../config.js';
+import type { ResolvedProvider } from '../models.js';
 import { log } from '../utils/logger.js';
 import {
   StreamingAnthropicSSEFixer,
@@ -43,6 +45,30 @@ import {
 
 export { buildAnthropicPassthroughPayload } from './passthrough/anthropic-payload.js';
 export type { PassthroughLogContext, StreamMetrics };
+
+/**
+ * 创建 SSE 流式会话的客户端断开检测和生命周期管理。
+ *
+ * 消除 3 个流式路由处理器中重复的 clientClosed / clientAbort / onClientClose / idleTimeoutMs 样板代码。
+ * 返回的 cleanup 必须在流结束后调用（通常在 .finally() 中），以移除事件监听器防止泄漏。
+ */
+export function createSseSession(reply: FastifyReply, output: PassThrough, provider: ResolvedProvider) {
+  let clientClosed = false;
+  const clientAbort = new AbortController();
+  const onClientClose = () => {
+    clientClosed = true;
+    clientAbort.abort();
+    output.destroy();
+  };
+  reply.raw.once('close', onClientClose);
+  const idleTimeoutMs = Math.max(1000, provider.stream_idle_timeout_seconds * 1000 || settings.streamIdleTimeoutMs);
+  return {
+    isClientClosed: () => clientClosed,
+    clientAbortSignal: clientAbort.signal,
+    idleTimeoutMs,
+    cleanup: () => { reply.raw.off('close', onClientClose); }
+  };
+}
 
 export async function sendUpstreamErrorResponse(
   reply: FastifyReply,

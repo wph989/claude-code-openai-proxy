@@ -82,7 +82,6 @@ export class RuntimeConfigManager {
 
     this.config = validated;
     setRuntimeProxyToken(this.config.proxy_auth_token ?? null);
-    applyGlobalSettings(this.config);
     await this.initUsageStore();
     this.rebuildRotators();
     await this.reconcileStores();
@@ -176,7 +175,6 @@ export class RuntimeConfigManager {
 
     this.config = validated;
     setRuntimeProxyToken(this.config.proxy_auth_token ?? null);
-    applyGlobalSettings(this.config);
     await this.initUsageStore();
     this.rebuildRotators();
     await this.reconcileStores();
@@ -282,7 +280,7 @@ export class RuntimeConfigManager {
     if (existing && keysEqual(existing.keys, keys) && existing.strategy === strategy && antiBanEqual(existing.antiBan, antiBan)) {
       return existing;
     }
-    const rotator = new ApiKeyRotator(keys, strategy, autoDisable, antiBan, providerQuota);
+    const rotator = new ApiKeyRotator(keys, strategy, autoDisable, antiBan, providerQuota, settings.keyMaxErrors);
     rotator.onChange = (key, patch) => this.onKeyStateChange(providerId, key, patch);
     this.attachUsageBridge(providerId, rotator);
     this.rotators.set(providerId, rotator);
@@ -726,12 +724,6 @@ function normalizeHeaders(headers: Record<string, string>): Record<string, strin
     result[key.trim()] = String(value).trim();
   }
   return result;
-}
-
-function applyGlobalSettings(config: RuntimeConfig): void {
-  if (config.key_max_errors != null && config.key_max_errors > 0) {
-    settings.keyMaxErrors = config.key_max_errors;
-  }
 }
 
 /**

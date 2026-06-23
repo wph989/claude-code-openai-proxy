@@ -7,11 +7,11 @@
 
 import { PassThrough } from 'node:stream';
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { settings } from '../../config.js';
 import type { AnthropicMessagesRequest, ResolvedProvider, ResolvedRoute } from '../../models.js';
 import type { ApiKeyRotator } from '../../services/api-key-rotator.js';
 import {
   buildAnthropicPassthroughPayload,
+  createSseSession,
   pipeAnthropicSseWithRepair,
   sendAnthropicPassthroughResponse,
   sendUpstreamErrorResponse,
@@ -79,17 +79,7 @@ export async function handleAnthropicPassthrough(
   const output = new PassThrough();
   writeStreamHeaders(reply, upstreamResponse);
   output.pipe(reply.raw);
-
-  let clientClosed = false;
-  const clientAbort = new AbortController();
-  const onClientClose = () => {
-    clientClosed = true;
-    clientAbort.abort();
-    output.destroy();
-  };
-  reply.raw.once('close', onClientClose);
-
-  const idleTimeoutMs = Math.max(1000, provider.stream_idle_timeout_seconds * 1000 || settings.streamIdleTimeoutMs);
+  const sse = createSseSession(reply, output, provider);
   void pipeAnthropicSseWithRepair({
     upstreamResponse,
     output,
@@ -101,10 +91,8 @@ export async function handleAnthropicPassthrough(
       upstreamModel: route.upstream_model,
       endpoint: '/v1/messages',
     },
-    idleTimeoutMs,
-    isClientClosed: () => clientClosed,
-    clientAbortSignal: clientAbort.signal,
-  }).finally(() => {
-    reply.raw.off('close', onClientClose);
-  });
+    idleTimeoutMs: sse.idleTimeoutMs,
+    isClientClosed: sse.isClientClosed,
+    clientAbortSignal: sse.clientAbortSignal,
+  }).finally(sse.cleanup);
 }

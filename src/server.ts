@@ -10,6 +10,8 @@ import { registerChatCompletionsRoutes } from './routes/chat-completions.js';
 import { registerMessageRoutes } from './routes/messages.js';
 import { createId } from './utils/id.js';
 import { log, configureLogger, flushLogs } from './utils/logger.js';
+import { AuthError } from './auth.js';
+import { AdminError } from './routes/admin.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -55,6 +57,14 @@ export async function createApp(configPath = settings.configFile): Promise<Fasti
   });
 
   app.setErrorHandler((error: unknown, request, reply) => {
+    if (error instanceof AuthError) {
+      void reply.code(error.statusCode).send(error.body);
+      return;
+    }
+    if (error instanceof AdminError) {
+      void reply.code(400).send({ message: error.message });
+      return;
+    }
     const err = error instanceof Error ? error : new Error(String(error));
     log('error', '服务处理失败', { error });
     void reply.code(500).send({

@@ -9,10 +9,9 @@
 
 import { PassThrough } from 'node:stream';
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { settings } from '../../config.js';
 import type { AnthropicMessagesRequest, ResolvedProvider, ResolvedRoute } from '../../models.js';
 import type { ApiKeyRotator } from '../../services/api-key-rotator.js';
-import { sendUpstreamErrorResponse, writeStreamHeaders } from '../../services/passthrough.js';
+import { createSseSession, sendUpstreamErrorResponse, writeStreamHeaders } from '../../services/passthrough.js';
 import {
   ensureAnthropicJsonShape,
   extractAnthropicUsageTokens,
@@ -119,18 +118,7 @@ export async function handleOpenAICompatibleMessages(
   const messageId = createId('msg');
   writeStreamHeaders(reply, upstreamResponse);
   output.pipe(reply.raw);
-
-  // 客户端断开时主动 abort 上游 reader，避免流式 lease 一直占用。
-  let clientClosed = false;
-  const clientAbort = new AbortController();
-  const onClientClose = () => {
-    clientClosed = true;
-    clientAbort.abort();
-    output.destroy();
-  };
-  reply.raw.once('close', onClientClose);
-
-  const idleTimeoutMs = Math.max(1000, provider.stream_idle_timeout_seconds * 1000 || settings.streamIdleTimeoutMs);
+  const sse = createSseSession(reply, output, provider);
   const metrics = {
     requestId,
     sessionId,
@@ -146,12 +134,10 @@ export async function handleOpenAICompatibleMessages(
     clientModel: payload.model,
     messageId,
     metrics,
-    idleTimeoutMs,
-    isClientClosed: () => clientClosed,
-    clientAbortSignal: clientAbort.signal,
-  }).finally(() => {
-    reply.raw.off('close', onClientClose);
-  });
+    idleTimeoutMs: sse.idleTimeoutMs,
+    isClientClosed: sse.isClientClosed,
+    clientAbortSignal: sse.clientAbortSignal,
+  }).finally(sse.cleanup);
 }
 
 function buildOpenAICompatiblePayload(payload: AnthropicMessagesRequest, route: ResolvedRoute): Record<string, unknown> {

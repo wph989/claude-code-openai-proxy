@@ -1,6 +1,5 @@
 import type { ApiKeyEntry, KeyUsage, KeyQuotaConfig } from '../models.js';
 import { KeyRotationStrategy } from '../models.js';
-import { settings } from '../config.js';
 import { StickySelector, BalancedSelector, type KeySelector } from './key-selectors.js';
 import type { ResolvedAntiBan } from './anti-ban-config.js';
 import { QuotaGuard } from './quota-guard.js';
@@ -56,19 +55,21 @@ export class ApiKeyRotator {
   private _autoDisable: boolean;
   private _antiBan: ResolvedAntiBan;
   private _providerQuota: KeyQuotaConfig | null;
+  private _keyMaxErrors: number;
   private selector: KeySelector;
   private runtime = new Map<string, RuntimeState>();
   private _onChange?: (key: string, patch: KeyStateChange) => void;
   private quotaGuard = new QuotaGuard();
   private usageListener: ((key: string, usage: KeyUsage, ratio: number) => void) | null = null;
 
-  constructor(keys: ApiKeyEntry[], strategy: KeyRotationStrategy, autoDisable: boolean = true, antiBan: ResolvedAntiBan, providerQuota: KeyQuotaConfig | null = null) {
+  constructor(keys: ApiKeyEntry[], strategy: KeyRotationStrategy, autoDisable: boolean = true, antiBan: ResolvedAntiBan, providerQuota: KeyQuotaConfig | null = null, keyMaxErrors: number = 5) {
     this._keys = keys;
     this._keyIndex = new Map(keys.map((k, i) => [k.key, i]));
     this._strategy = strategy;
     this._autoDisable = autoDisable;
     this._antiBan = antiBan;
     this._providerQuota = providerQuota;
+    this._keyMaxErrors = keyMaxErrors;
     const selectionMode = this.resolveSelectionMode();
     this.selector = selectionMode === 'balanced' ? new BalancedSelector() : new StickySelector();
     for (const k of this._keys) {
@@ -212,7 +213,7 @@ export class ApiKeyRotator {
       last_error_message: errorMessage
     };
 
-    if (settings.keyAutoDisable && this._autoDisable && entry.error_count + 1 >= settings.keyMaxErrors && entry.enabled) {
+    if (this._autoDisable && entry.error_count + 1 >= this._keyMaxErrors && entry.enabled) {
       patch.enabled = false;
       patch.auto_disabled_at = Date.now();
     }

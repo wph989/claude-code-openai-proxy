@@ -2,9 +2,24 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { getExpectedAdminToken, isValidAdminToken, verifyAdminAuth } from '../auth.js';
+import { adminAuthHook, getExpectedAdminToken, isValidAdminToken } from '../auth.js';
 import { settings } from '../config.js';
 import type { RuntimeConfig, KeyQuotaConfig } from '../models.js';
+
+/**
+ * Admin 路由业务错误，由 Fastify errorHandler 统一返回 400。
+ */
+export class AdminError extends Error {
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+function parseKeyIndex(params: Record<string, string>): number {
+  const idx = parseInt(params.keyIndex, 10);
+  if (isNaN(idx) || idx < 0) throw new AdminError('无效的 keyIndex。');
+  return idx;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -80,14 +95,14 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     await serveStatic(reply, 'index.html', 'text/html; charset=utf-8');
   });
 
-  app.get('/api/config', async (request, reply) => {
-    if (!(await verifyAdminAuth(request, reply))) return;
+  const api = { preHandler: [adminAuthHook] };
+
+  app.get('/api/config', api, async () => {
     await app.runtimeConfigManager.flushRuntimeStores();
     return app.runtimeConfigManager.adminView();
   });
 
-  app.put('/api/config', async (request, reply) => {
-    if (!(await verifyAdminAuth(request, reply))) return;
+  app.put('/api/config', api, async (request) => {
     const payload = (request.body || {}) as RuntimeConfig;
     const config = await app.runtimeConfigManager.saveConfig(payload);
     return {
@@ -101,16 +116,14 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  app.get('/api/keys/:providerId', async (request, reply) => {
-    if (!(await verifyAdminAuth(request, reply))) return;
+  app.get('/api/keys/:providerId', api, async (request) => {
     const { providerId } = request.params as { providerId: string };
     await app.runtimeConfigManager.flushRuntimeStores();
     const keys = app.runtimeConfigManager.getKeyStates(providerId);
     return { provider_id: providerId, keys };
   });
 
-  app.get('/api/keys/:providerId/export', async (request, reply) => {
-    if (!(await verifyAdminAuth(request, reply))) return;
+  app.get('/api/keys/:providerId/export', api, async (request, reply) => {
     const { providerId } = request.params as { providerId: string };
     await app.runtimeConfigManager.flushRuntimeStores();
     const keys = app.runtimeConfigManager.getKeyStates(providerId);
@@ -118,165 +131,91 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     void reply.type('text/plain; charset=utf-8').header('content-disposition', `attachment; filename="${safeKeyExportFilename(providerId)}"`).send(text);
   });
 
-  app.put('/api/keys/:providerId/:keyIndex/enable', async (request, reply) => {
-    if (!(await verifyAdminAuth(request, reply))) return;
-    const { providerId, keyIndex } = request.params as { providerId: string; keyIndex: string };
-    const idx = parseInt(keyIndex, 10);
-    if (isNaN(idx) || idx < 0) {
-      return reply.code(400).send({ message: '无效的 keyIndex。' });
-    }
-    try {
-      await app.runtimeConfigManager.enableKey(providerId, idx);
-      return { message: 'Key 已启用。', provider_id: providerId, key_index: idx };
-    } catch (err) {
-      return reply.code(400).send({ message: err instanceof Error ? err.message : '启用失败。' });
-    }
-  });
-
-  app.put('/api/keys/:providerId/:keyIndex/disable', async (request, reply) => {
-    if (!(await verifyAdminAuth(request, reply))) return;
-    const { providerId, keyIndex } = request.params as { providerId: string; keyIndex: string };
-    const idx = parseInt(keyIndex, 10);
-    if (isNaN(idx) || idx < 0) {
-      return reply.code(400).send({ message: '无效的 keyIndex。' });
-    }
-    try {
-      await app.runtimeConfigManager.disableKey(providerId, idx);
-      return { message: 'Key 已禁用。', provider_id: providerId, key_index: idx };
-    } catch (err) {
-      return reply.code(400).send({ message: err instanceof Error ? err.message : '禁用失败。' });
-    }
-  });
-
-  app.put('/api/keys/:providerId/:keyIndex/reset', async (request, reply) => {
-    if (!(await verifyAdminAuth(request, reply))) return;
-    const { providerId, keyIndex } = request.params as { providerId: string; keyIndex: string };
-    const idx = parseInt(keyIndex, 10);
-    if (isNaN(idx) || idx < 0) {
-      return reply.code(400).send({ message: '无效的 keyIndex。' });
-    }
-    try {
-      await app.runtimeConfigManager.resetKey(providerId, idx);
-      return { message: 'Key 已重置并启用。', provider_id: providerId, key_index: idx };
-    } catch (err) {
-      return reply.code(400).send({ message: err instanceof Error ? err.message : '重置失败。' });
-    }
-  });
-
-  app.put('/api/keys/:providerId/reset-all', async (request, reply) => {
-    if (!(await verifyAdminAuth(request, reply))) return;
+  app.put('/api/keys/:providerId/:keyIndex/enable', api, async (request) => {
     const { providerId } = request.params as { providerId: string };
-    try {
-      const count = await app.runtimeConfigManager.resetAllKeys(providerId);
-      return { message: `已重置 ${providerId} 的 ${count} 个 Key`, provider_id: providerId, count };
-    } catch (err) {
-      return reply.code(400).send({ message: err instanceof Error ? err.message : '重置失败。' });
-    }
+    const idx = parseKeyIndex(request.params as Record<string, string>);
+    await app.runtimeConfigManager.enableKey(providerId, idx);
+    return { message: 'Key 已启用。', provider_id: providerId, key_index: idx };
   });
 
-  app.post('/api/keys/:providerId', async (request, reply) => {
-    if (!(await verifyAdminAuth(request, reply))) return;
+  app.put('/api/keys/:providerId/:keyIndex/disable', api, async (request) => {
+    const { providerId } = request.params as { providerId: string };
+    const idx = parseKeyIndex(request.params as Record<string, string>);
+    await app.runtimeConfigManager.disableKey(providerId, idx);
+    return { message: 'Key 已禁用。', provider_id: providerId, key_index: idx };
+  });
+
+  app.put('/api/keys/:providerId/:keyIndex/reset', api, async (request) => {
+    const { providerId } = request.params as { providerId: string };
+    const idx = parseKeyIndex(request.params as Record<string, string>);
+    await app.runtimeConfigManager.resetKey(providerId, idx);
+    return { message: 'Key 已重置并启用。', provider_id: providerId, key_index: idx };
+  });
+
+  app.put('/api/keys/:providerId/reset-all', api, async (request) => {
+    const { providerId } = request.params as { providerId: string };
+    const count = await app.runtimeConfigManager.resetAllKeys(providerId);
+    return { message: `已重置 ${providerId} 的 ${count} 个 Key`, provider_id: providerId, count };
+  });
+
+  app.post('/api/keys/:providerId', api, async (request) => {
     const { providerId } = request.params as { providerId: string };
     const body = (request.body || {}) as { keys?: string[]; key?: string };
     const keyValues = body.keys || (body.key ? [body.key] : []);
-
     if (!Array.isArray(keyValues) || keyValues.length === 0) {
-      return reply.code(400).send({ message: '至少需要一个 Key 值。' });
+      throw new AdminError('至少需要一个 Key 值。');
     }
-
-    try {
-      const result = await app.runtimeConfigManager.addKeys(providerId, keyValues);
-      const addedCount = result.added.length;
-      const skippedCount = result.skipped.length;
-
-      let message = `添加完成：`;
-      if (addedCount > 0) message += `新增 ${addedCount} 个`;
-      if (skippedCount > 0) message += `${addedCount > 0 ? '，' : ''}跳过 ${skippedCount} 个（已存在）`;
-      if (addedCount === 0 && skippedCount === 0) message = '没有有效的 Key 值';
-
-      return {
-        message,
-        provider_id: providerId,
-        added: result.added,
-        skipped: result.skipped
-      };
-    } catch (err) {
-      return reply.code(400).send({ message: err instanceof Error ? err.message : '添加失败。' });
-    }
+    const result = await app.runtimeConfigManager.addKeys(providerId, keyValues);
+    const addedCount = result.added.length;
+    const skippedCount = result.skipped.length;
+    let message = '添加完成：';
+    if (addedCount > 0) message += `新增 ${addedCount} 个`;
+    if (skippedCount > 0) message += `${addedCount > 0 ? '，' : ''}跳过 ${skippedCount} 个（已存在）`;
+    if (addedCount === 0 && skippedCount === 0) message = '没有有效的 Key 值';
+    return { message, provider_id: providerId, added: result.added, skipped: result.skipped };
   });
 
-  app.put('/api/keys/:providerId/:keyIndex/note', async (request, reply) => {
-    if (!(await verifyAdminAuth(request, reply))) return;
-    const { providerId, keyIndex } = request.params as { providerId: string; keyIndex: string };
-    const idx = parseInt(keyIndex, 10);
-    if (isNaN(idx) || idx < 0) {
-      return reply.code(400).send({ message: '无效的 keyIndex。' });
-    }
+  app.put('/api/keys/:providerId/:keyIndex/note', api, async (request) => {
+    const { providerId } = request.params as { providerId: string };
+    const idx = parseKeyIndex(request.params as Record<string, string>);
     const body = (request.body || {}) as { note?: string };
-    try {
-      await app.runtimeConfigManager.updateKeyState(providerId, idx, { note: String(body.note ?? '').trim() || undefined });
-      return { message: '备注已更新。', provider_id: providerId, key_index: idx };
-    } catch (err) {
-      return reply.code(400).send({ message: err instanceof Error ? err.message : '更新备注失败。' });
-    }
+    await app.runtimeConfigManager.updateKeyState(providerId, idx, { note: String(body.note ?? '').trim() || undefined });
+    return { message: '备注已更新。', provider_id: providerId, key_index: idx };
   });
 
-  app.delete('/api/keys/:providerId/:keyIndex', async (request, reply) => {
-    if (!(await verifyAdminAuth(request, reply))) return;
-    const { providerId, keyIndex } = request.params as { providerId: string; keyIndex: string };
-    const idx = parseInt(keyIndex, 10);
-    if (isNaN(idx) || idx < 0) {
-      return reply.code(400).send({ message: '无效的 keyIndex。' });
-    }
-    try {
-      await app.runtimeConfigManager.deleteKey(providerId, idx);
-      return { message: 'Key 已删除。', provider_id: providerId, key_index: idx };
-    } catch (err) {
-      return reply.code(400).send({ message: err instanceof Error ? err.message : '删除失败。' });
-    }
+  app.delete('/api/keys/:providerId/:keyIndex', api, async (request) => {
+    const { providerId } = request.params as { providerId: string };
+    const idx = parseKeyIndex(request.params as Record<string, string>);
+    await app.runtimeConfigManager.deleteKey(providerId, idx);
+    return { message: 'Key 已删除。', provider_id: providerId, key_index: idx };
   });
 
-  app.post('/api/keys/:providerId/:keyIndex/quota/reset', async (request, reply) => {
-    if (!(await verifyAdminAuth(request, reply))) return;
-    const { providerId, keyIndex } = request.params as { providerId: string; keyIndex: string };
-    const idx = parseInt(keyIndex, 10);
-    if (isNaN(idx) || idx < 0) return reply.code(400).send({ message: '无效的 keyIndex。' });
-    try {
-      await app.runtimeConfigManager.resetKeyQuota(providerId, idx);
-      return { message: '配额计数已清零。', provider_id: providerId, key_index: idx };
-    } catch (err) {
-      return reply.code(400).send({ message: err instanceof Error ? err.message : '重置配额失败。' });
-    }
+  app.post('/api/keys/:providerId/:keyIndex/quota/reset', api, async (request) => {
+    const { providerId } = request.params as { providerId: string };
+    const idx = parseKeyIndex(request.params as Record<string, string>);
+    await app.runtimeConfigManager.resetKeyQuota(providerId, idx);
+    return { message: '配额计数已清零。', provider_id: providerId, key_index: idx };
   });
 
-  app.put('/api/keys/:providerId/:keyIndex/quota', async (request, reply) => {
-    if (!(await verifyAdminAuth(request, reply))) return;
-    const { providerId, keyIndex } = request.params as { providerId: string; keyIndex: string };
-    const idx = parseInt(keyIndex, 10);
-    if (isNaN(idx) || idx < 0) return reply.code(400).send({ message: '无效的 keyIndex。' });
+  app.put('/api/keys/:providerId/:keyIndex/quota', api, async (request) => {
+    const { providerId } = request.params as { providerId: string };
+    const idx = parseKeyIndex(request.params as Record<string, string>);
     const body = (request.body || {}) as { quota?: KeyQuotaConfig | null };
-
-    // ✅ 保持 undefined（继承供应商配额）和 null（显式不使用配额）的语义
     const quota = body.quota;
-
     if (quota !== null && quota !== undefined) {
       if (quota.soft_stop_threshold !== undefined) {
         if (typeof quota.soft_stop_threshold !== 'number' || quota.soft_stop_threshold <= 0 || quota.soft_stop_threshold > 1) {
-          return reply.code(400).send({ message: 'soft_stop_threshold 必须在 (0, 1] 之间。' });
+          throw new AdminError('soft_stop_threshold 必须在 (0, 1] 之间。');
         }
       }
       if (quota.max_requests != null && (typeof quota.max_requests !== 'number' || quota.max_requests <= 0)) {
-        return reply.code(400).send({ message: 'max_requests 必须为正数或 null。' });
+        throw new AdminError('max_requests 必须为正数或 null。');
       }
       if (quota.max_tokens != null && (typeof quota.max_tokens !== 'number' || quota.max_tokens <= 0)) {
-        return reply.code(400).send({ message: 'max_tokens 必须为正数或 null。' });
+        throw new AdminError('max_tokens 必须为正数或 null。');
       }
     }
-    try {
-      await app.runtimeConfigManager.updateKeyQuota(providerId, idx, quota);
-      return { message: '配额配置已更新。', provider_id: providerId, key_index: idx, quota };
-    } catch (err) {
-      return reply.code(400).send({ message: err instanceof Error ? err.message : '更新配额失败。' });
-    }
+    await app.runtimeConfigManager.updateKeyQuota(providerId, idx, quota);
+    return { message: '配额配置已更新。', provider_id: providerId, key_index: idx, quota };
   });
 }
