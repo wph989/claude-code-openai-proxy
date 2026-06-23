@@ -73,5 +73,14 @@ export function previewText(text: string, maxChars = 1000): string {
 }
 
 function omitUndefined(value: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined));
+  let hasUndefined = false;
+  for (const key in value) {
+    if (value[key] === undefined) { hasUndefined = true; break; }
+  }
+  if (!hasUndefined) return value;
+  const result: Record<string, unknown> = {};
+  for (const key in value) {
+    if (value[key] !== undefined) result[key] = value[key];
+  }
+  return result;
 }

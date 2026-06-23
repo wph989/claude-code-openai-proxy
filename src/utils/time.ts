@@ -9,6 +9,18 @@ const formatter = new Intl.DateTimeFormat('zh-CN', {
   second: '2-digit'
 });
 
+// 预缓存 part 索引，避免每次 formatToParts 都创建对象映射
+const PART_INDEX = (() => {
+  const sample = formatter.formatToParts(new Date(0));
+  const idx: Record<string, number> = {};
+  for (let i = 0; i < sample.length; i++) {
+    idx[sample[i].type] = i;
+  }
+  return idx;
+})();
+
+function pad2(n: number): string { return n < 10 ? '0' + n : '' + n; }
+
 /**
  * 时间工具：统一输出北京时间。
  */
@@ -17,15 +29,20 @@ export function nowBeijingIso(): string {
 }
 
 export function formatBeijingDate(date: Date): string {
-  const parts = Object.fromEntries(
-    formatter.formatToParts(date).map((item) => [item.type, item.value])
-  );
-  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}+08:00`;
+  const parts = formatter.formatToParts(date);
+  const y = parts[PART_INDEX.year].value;
+  const m = parts[PART_INDEX.month].value;
+  const d = parts[PART_INDEX.day].value;
+  const h = parts[PART_INDEX.hour].value;
+  const mi = parts[PART_INDEX.minute].value;
+  const s = parts[PART_INDEX.second].value;
+  return `${y}-${m}-${d}T${h}:${mi}:${s}+08:00`;
 }
 
 export function toBeijingDateStr(date: Date): string {
-  const parts = Object.fromEntries(
-    formatter.formatToParts(date).map((item) => [item.type, item.value])
-  );
-  return `${parts.year}-${parts.month}-${parts.day}`;
+  const parts = formatter.formatToParts(date);
+  const y = parts[PART_INDEX.year].value;
+  const m = parts[PART_INDEX.month].value;
+  const d = parts[PART_INDEX.day].value;
+  return `${y}-${m}-${d}`;
 }

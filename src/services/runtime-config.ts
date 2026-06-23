@@ -293,16 +293,11 @@ export class RuntimeConfigManager {
     this.rotators.clear();
     for (const provider of this.config.providers) {
       const apiKeys = resolveApiKeys(provider);
+      if (apiKeys.length === 0) continue;
       const strategy = provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin;
       const autoDisable = provider.auto_disable_on_error !== false;
       const antiBan = resolveAntiBanConfig(provider.anti_ban, this.config.anti_ban);
-      const providerQuota = provider.quota ?? null;
-      if (apiKeys.length > 0) {
-        const rotator = new ApiKeyRotator(apiKeys, strategy, autoDisable, antiBan, providerQuota);
-        rotator.onChange = (key, patch) => this.onKeyStateChange(provider.provider_id, key, patch);
-        this.attachUsageBridge(provider.provider_id, rotator);
-        this.rotators.set(provider.provider_id, rotator);
-      }
+      this.getOrCreateRotator(provider.provider_id, apiKeys, strategy, autoDisable, antiBan);
     }
   }
 
@@ -422,58 +417,42 @@ export class RuntimeConfigManager {
     await this.persistNow();
   }
 
-  async enableKey(providerId: string, keyIndex: number): Promise<void> {
+  private getRotatorAndKey(providerId: string, keyIndex: number): { rotator: ApiKeyRotator; key: string } {
     const rotator = this.rotators.get(providerId);
     if (!rotator) throw new Error(`未找到供应商的 rotator：${providerId}`);
-
     const keys = rotator.getKeys();
     if (keyIndex < 0 || keyIndex >= keys.length) {
       throw new Error(`无效的 key 索引：${keyIndex}`);
     }
+    return { rotator, key: keys[keyIndex].key };
+  }
 
-    rotator.enableKey(keys[keyIndex].key);
+  async enableKey(providerId: string, keyIndex: number): Promise<void> {
+    const { rotator, key } = this.getRotatorAndKey(providerId, keyIndex);
+    rotator.enableKey(key);
     if (this.stateStore) await this.stateStore.forceFlush();
     await this.persistNow();
   }
 
   async disableKey(providerId: string, keyIndex: number): Promise<void> {
-    const rotator = this.rotators.get(providerId);
-    if (!rotator) throw new Error(`未找到供应商的 rotator：${providerId}`);
-
-    const keys = rotator.getKeys();
-    if (keyIndex < 0 || keyIndex >= keys.length) {
-      throw new Error(`无效的 key 索引：${keyIndex}`);
-    }
-
-    rotator.disableKey(keys[keyIndex].key);
+    const { rotator, key } = this.getRotatorAndKey(providerId, keyIndex);
+    rotator.disableKey(key);
     if (this.stateStore) await this.stateStore.forceFlush();
     await this.persistNow();
   }
 
   async resetKey(providerId: string, keyIndex: number): Promise<void> {
-    const rotator = this.rotators.get(providerId);
-    if (!rotator) throw new Error(`未找到供应商的 rotator：${providerId}`);
-
-    const keys = rotator.getKeys();
-    if (keyIndex < 0 || keyIndex >= keys.length) {
-      throw new Error(`无效的 key 索引：${keyIndex}`);
-    }
-
-    rotator.resetErrorCount(keys[keyIndex].key);
-    rotator.resetUsage(keys[keyIndex].key);
+    const { rotator, key } = this.getRotatorAndKey(providerId, keyIndex);
+    rotator.resetErrorCount(key);
+    rotator.resetUsage(key);
     if (this.usageStore) await this.usageStore.forceFlush();
     if (this.stateStore) await this.stateStore.forceFlush();
     await this.persistNow();
   }
 
   async resetKeyQuota(providerId: string, keyIndex: number): Promise<void> {
-    const rotator = this.rotators.get(providerId);
-    if (!rotator) throw new Error(`未找到供应商的 rotator：${providerId}`);
-    const keys = rotator.getKeys();
-    if (keyIndex < 0 || keyIndex >= keys.length) {
-      throw new Error(`无效的 key 索引：${keyIndex}`);
-    }
-    rotator.resetUsage(keys[keyIndex].key);
+    const { rotator, key } = this.getRotatorAndKey(providerId, keyIndex);
+    rotator.resetUsage(key);
     if (this.usageStore) await this.usageStore.forceFlush();
   }
 

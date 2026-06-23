@@ -46,7 +46,7 @@ export async function peekAndRestore(
     // peek 失败时保留已读片段，后续管道会负责释放 lease 和结束响应。
   }
 
-  const peek = Buffer.concat(head.map((chunk) => Buffer.from(chunk)));
+  const peek = Buffer.concat(head);
   if (peek.length === 0) return { peek, restored: response, peekError };
 
   const combined = new ReadableStream<Uint8Array>({

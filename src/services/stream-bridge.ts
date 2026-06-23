@@ -1,5 +1,6 @@
 import { PassThrough } from 'node:stream';
 import { log } from '../utils/logger.js';
+import { isPlainObject, toInt } from '../utils/guards.js';
 import { readStreamChunk } from './stream-read.js';
 import { mapFinishReason } from './transformers.js';
 import { markUpstreamResponseStreamError, releaseUpstreamResponse } from './upstream.js';
@@ -16,7 +17,6 @@ interface ToolBlockState {
   anthropicIndex: number;
   toolId: string;
   toolName: string;
-  partialJson: string;
   started: boolean;
   stopped: boolean;
 }
@@ -150,7 +150,6 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
             anthropicIndex: state.nextContentIndex,
             toolId: '',
             toolName: '',
-            partialJson: '',
             started: false,
             stopped: false
           };
@@ -178,7 +177,6 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
           });
         }
         if (typeof functionInfo.arguments === 'string' && functionInfo.arguments) {
-          toolState.partialJson += functionInfo.arguments;
           writeSse(output, 'content_block_delta', {
             type: 'content_block_delta',
             index: toolState.anthropicIndex,
@@ -276,8 +274,7 @@ function closeAnthropicMessage(output: PassThrough, state: StreamState): void {
 }
 
 function writeSse(output: PassThrough, event: string, data: Record<string, unknown>): void {
-  output.write(`event: ${event}\n`);
-  output.write(`data: ${JSON.stringify(data)}\n\n`);
+  output.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
 async function* iterateSse(response: Response, idleTimeoutMs: number, clientAbortSignal?: AbortSignal): AsyncGenerator<{ event?: string; data: string }> {
@@ -337,11 +334,3 @@ async function* iterateSse(response: Response, idleTimeoutMs: number, clientAbor
   }
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-function toInt(value: unknown): number {
-  const num = Number(value ?? 0);
-  return Number.isFinite(num) ? Math.trunc(num) : 0;
-}

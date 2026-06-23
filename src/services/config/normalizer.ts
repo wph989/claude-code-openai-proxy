@@ -8,6 +8,7 @@
  */
 
 import { nanoid } from '../../utils/nanoid.js';
+import { isPlainObject } from '../../utils/guards.js';
 import {
   KeyRotationStrategy,
   type AntiBanConfig,
@@ -304,10 +305,6 @@ function normalizeRotationStrategy(value: unknown): KeyRotationStrategy {
     return value;
   }
   return KeyRotationStrategy.round_robin;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function findDuplicates(values: string[]): string[] {

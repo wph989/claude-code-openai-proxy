@@ -15,44 +15,51 @@ const LEVEL_WEIGHT: Record<LogLevel, number> = {
   error: 40
 };
 
-let currentLevel: LogLevel = (process.env.LOG_LEVEL?.toLowerCase() as LogLevel) || 'info';
-if (!(currentLevel in LEVEL_WEIGHT)) {
-  currentLevel = 'info';
-}
-
-let logFormat: 'json' | 'text' = (process.env.LOG_FORMAT?.toLowerCase() as 'json' | 'text') || 'json';
-if (logFormat !== 'json' && logFormat !== 'text') {
-  logFormat = 'json';
-}
-
-let detailedLogging = process.env.LOG_DETAILED?.toLowerCase().trim() === 'true';
-
-// 自动设置日志路径（如果未从环境变量指定）
-function getDefaultLogFilePath(): string {
-  return path.join(USER_LOG_DIR, 'app.log');
-}
-
-let logFilePath: string | undefined = process.env.LOG_FILE?.trim() || getDefaultLogFilePath();
+let currentLevel: LogLevel = 'info';
+let logFormat: 'json' | 'text' = 'json';
+let detailedLogging = false;
+let logFilePath: string = path.join(USER_LOG_DIR, 'app.log');
 let logRotation: 'none' | 'daily' | 'size' = 'daily';
 let logMaxFiles = 30;
 let logMaxSize = 50 * 1024 * 1024;
 
-// 解析日志轮转配置
-const rawRotation = process.env.LOG_ROTATION?.toLowerCase();
-if (rawRotation === 'none' || rawRotation === 'daily' || rawRotation === 'size') {
-  logRotation = rawRotation;
+export interface LoggerConfig {
+  logLevel?: string;
+  logFormat?: 'json' | 'text';
+  logDetailed?: boolean;
+  logFile?: string;
+  logRotation?: 'none' | 'daily' | 'size';
+  logMaxFiles?: number;
+  logMaxSize?: number;
 }
 
-// 解析最大文件数
-const maxFiles = parseInt(process.env.LOG_MAX_FILES || '', 10);
-if (!isNaN(maxFiles) && maxFiles > 0) {
-  logMaxFiles = maxFiles;
-}
-
-// 解析单个文件大小
-const maxSize = parseInt(process.env.LOG_MAX_SIZE || '', 10);
-if (!isNaN(maxSize) && maxSize > 0) {
-  logMaxSize = maxSize;
+/**
+ * 一次性配置 logger，由 server.ts 在启动时调用。
+ * 替代之前的 setLogLevel/setLogFormat/setLogDetailed/setLogFile 四个独立 setter。
+ */
+export function configureLogger(config: LoggerConfig): void {
+  if (config.logLevel) {
+    const lower = config.logLevel.toLowerCase() as LogLevel;
+    if (lower in LEVEL_WEIGHT) currentLevel = lower;
+  }
+  if (config.logFormat === 'json' || config.logFormat === 'text') {
+    logFormat = config.logFormat;
+  }
+  if (config.logDetailed !== undefined) {
+    detailedLogging = config.logDetailed;
+  }
+  if (config.logFile) {
+    logFilePath = config.logFile;
+  }
+  if (config.logRotation) {
+    logRotation = config.logRotation;
+  }
+  if (config.logMaxFiles !== undefined && config.logMaxFiles > 0) {
+    logMaxFiles = config.logMaxFiles;
+  }
+  if (config.logMaxSize !== undefined && config.logMaxSize > 0) {
+    logMaxSize = config.logMaxSize;
+  }
 }
 
 let currentLogPath: string | undefined;
@@ -63,32 +70,6 @@ let currentLogSize = 0;
 const pendingWrites: Promise<void>[] = [];
 const PRUNE_INTERVAL = 100;
 let writesSincePrune = 0;
-
-export function setLogLevel(level: string | undefined): void {
-  if (!level) return;
-  const lower = level.toLowerCase() as LogLevel;
-  if (lower in LEVEL_WEIGHT) {
-    currentLevel = lower;
-  }
-}
-
-export function setLogFormat(format: string | undefined): void {
-  if (!format) return;
-  const lower = format.toLowerCase() as 'json' | 'text';
-  if (lower === 'json' || lower === 'text') {
-    logFormat = lower;
-  }
-}
-
-export function setLogDetailed(enabled: boolean): void {
-  detailedLogging = enabled;
-}
-
-export function setLogFile(filePath: string | undefined): void {
-  if (filePath) {
-    logFilePath = filePath;
-  }
-}
 
 function getBeijingDate(): string {
   return toBeijingDateStr(new Date());

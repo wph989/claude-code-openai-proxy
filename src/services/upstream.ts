@@ -3,6 +3,7 @@ import { settings } from '../config.js';
 import type { ResolvedProvider, ResolvedRoute } from '../models.js';
 import type { ApiKeyRotator, KeyLease } from './api-key-rotator.js';
 import { log } from '../utils/logger.js';
+import { isPlainObject } from '../utils/guards.js';
 import { buildForwardRequestHeaders } from './http-headers.js';
 import {
   classifyUpstreamError,
@@ -333,8 +334,9 @@ export class UpstreamService {
       const data = await safeJson(result.response);
       if (!result.response.ok) {
         if (params.rotator && result.lease) {
-          const errorText = summarizeUpstreamError(result.response, JSON.stringify(data));
-          const classification = classifyUpstreamError(result.response.status, result.response.statusText, JSON.stringify(data));
+          const errorBody = JSON.stringify(data);
+          const errorText = summarizeUpstreamError(result.response, errorBody);
+          const classification = classifyUpstreamError(result.response.status, result.response.statusText, errorBody);
           if (classification.category === 'hard_limit') {
             params.rotator.markQuotaError(result.lease.key, errorText);
           } else if (classification.category === 'rate_limit') {
@@ -389,9 +391,6 @@ function isAcquireTimeout(error: unknown): boolean {
   return error instanceof Error && error.message.includes('等待可用 API Key 超时');
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
 
 // 历史兼容：早期 normalizeAnthropicBaseUrl 通过 upstream.ts 暴露给少数模块直接调用，
 // 拆出 url-builder 后保留这个 re-export。

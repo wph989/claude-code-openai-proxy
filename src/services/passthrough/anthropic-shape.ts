@@ -10,6 +10,9 @@
  */
 
 import { createId } from '../../utils/id.js';
+import { isPlainObject, toNonNegInt } from '../../utils/guards.js';
+
+export { isPlainObject, toNonNegInt };
 
 export function ensureAnthropicJsonShape(data: Record<string, unknown>, fallbackModel: string): Record<string, unknown> {
   if (data.type !== 'message') data.type = 'message';
@@ -40,11 +43,3 @@ export function extractAnthropicUsageTokens(value: unknown): number {
   return toNonNegInt(value.input_tokens) + toNonNegInt(value.output_tokens);
 }
 
-export function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-export function toNonNegInt(value: unknown): number {
-  const num = Number(value ?? 0);
-  return Number.isFinite(num) && num >= 0 ? Math.trunc(num) : 0;
-}

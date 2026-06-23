@@ -15,6 +15,7 @@
  */
 
 import { createId } from '../utils/id.js';
+import { isPlainObject, toInt } from '../utils/guards.js';
 import { mapFinishReason } from './transformers.js';
 
 // OpenAI 兼容的 stop_reason → Anthropic 的映射（与 transformers.ts 保持一致，避免重复实现）。
@@ -425,9 +426,6 @@ function normalizeContentBlockDelta(
   return false;
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
 
 /**
  * 【兼容入口】一次性修补整块 SSE（非流式）。新代码推荐用 StreamingAnthropicSSEFixer。
@@ -675,7 +673,3 @@ export function transformOpenAIJsonToAnthropicJson(body: Buffer | Uint8Array): B
   return Buffer.from(JSON.stringify(out), 'utf8');
 }
 
-function toInt(value: unknown): number {
-  const num = Number(value ?? 0);
-  return Number.isFinite(num) ? Math.trunc(num) : 0;
-}

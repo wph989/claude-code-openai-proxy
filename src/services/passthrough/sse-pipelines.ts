@@ -126,7 +126,7 @@ export async function bufferTransformAndPipeSse(params: {
     }
 
     if (isClientClosed?.()) return;
-    const fixed = transform(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))));
+    const fixed = transform(Buffer.concat(chunks));
     output.write(fixed);
     releaseUpstreamResponse(releaseResponse);
     log('info', 'Anthropic 流式透传响应完成', {

@@ -178,7 +178,7 @@ export interface AppSettings {
   logLevel: string;
   logFormat: 'json' | 'text';
   logDetailed: boolean;
-  logFile?: string;
+  logFile: string;
   logRotation: LogRotation;
   logMaxFiles: number;
   logMaxSize?: number;

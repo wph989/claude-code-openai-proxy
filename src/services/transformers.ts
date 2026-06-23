@@ -3,6 +3,7 @@
  */
 
 import { createId } from '../utils/id.js';
+import { toInt } from '../utils/guards.js';
 
 export function anthropicContentToText(content: unknown): string {
   if (typeof content === 'string') {
@@ -221,7 +222,3 @@ export function openAIToAnthropicResponse(originalModel: string, data: Record<st
   };
 }
 
-function toInt(value: unknown): number {
-  const num = Number(value ?? 0);
-  return Number.isFinite(num) ? Math.trunc(num) : 0;
-}

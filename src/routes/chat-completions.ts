@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { verifyProxyAuth } from '../auth.js';
 import { settings } from '../config.js';
 import { sendUpstreamErrorResponse, writeStreamHeaders } from '../services/passthrough.js';
+import { isPlainObject } from '../utils/guards.js';
 import { readStreamChunk } from '../services/stream-read.js';
 import { setForwardResponseHeaders } from '../services/http-headers.js';
 import { markUpstreamResponseStreamError, releaseUpstreamResponse, safeJson } from '../services/upstream.js';
@@ -214,10 +215,6 @@ export async function pipeOpenAISse(params: {
     releaseUpstreamResponse(upstreamResponse);
     output.end();
   }
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function extractOpenAIUsageTokens(value: unknown): number {

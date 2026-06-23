@@ -133,8 +133,9 @@ export async function sendAnthropicPassthroughResponse(params: {
     });
   }
 
-  const responseKind = isOpenAIChatCompletionJson(data) ? 'openai-json-converted' : 'anthropic-json';
-  const output = isOpenAIChatCompletionJson(data)
+  const isOpenAI = isOpenAIChatCompletionJson(data);
+  const responseKind = isOpenAI ? 'openai-json-converted' : 'anthropic-json';
+  const output = isOpenAI
     ? ensureAnthropicJsonShape(
       JSON.parse(transformOpenAIJsonToAnthropicJson(Buffer.from(bodyText, 'utf8')).toString('utf8')) as Record<string, unknown>,
       fallbackModel
