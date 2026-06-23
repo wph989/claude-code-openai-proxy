@@ -9,7 +9,7 @@ import { registerHealthRoutes } from './routes/health.js';
 import { registerChatCompletionsRoutes } from './routes/chat-completions.js';
 import { registerMessageRoutes } from './routes/messages.js';
 import { createId } from './utils/id.js';
-import { log, setLogDetailed, setLogFormat, setLogLevel, flushLogs } from './utils/logger.js';
+import { log, setLogDetailed, setLogFormat, setLogLevel, setLogFile, flushLogs } from './utils/logger.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -26,6 +26,7 @@ export async function createApp(configPath = settings.configFile): Promise<Fasti
   setLogLevel(settings.logLevel);
   setLogFormat(settings.logFormat);
   setLogDetailed(settings.logDetailed);
+  setLogFile(settings.logFile);
   const app = Fastify({
     logger: false,
     bodyLimit: 20 * 1024 * 1024

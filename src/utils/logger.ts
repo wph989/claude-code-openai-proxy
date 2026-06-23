@@ -84,6 +84,12 @@ export function setLogDetailed(enabled: boolean): void {
   detailedLogging = enabled;
 }
 
+export function setLogFile(filePath: string | undefined): void {
+  if (filePath) {
+    logFilePath = filePath;
+  }
+}
+
 function getBeijingDate(): string {
   return toBeijingDateStr(new Date());
 }
