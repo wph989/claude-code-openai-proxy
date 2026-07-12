@@ -8,7 +8,7 @@
 - 对内可转发到两类上游：
   - `openai_compatible`：OpenAI 兼容网关（含 oneapi、自建反向代理等）
   - `anthropic`：Anthropic 原生 Messages API
-- 内置 API Key 轮询、健康度评分、429 冷却、本地配额守护、错误自动禁用等"防封"机制。
+- 内置 API Key 轮询、429 冷却、本地配额守护、错误自动禁用等"防封"机制。
 - 提供管理后台（`/admin`）用于编辑供应商、模型路由、Key 状态。
 
 ## 2. 顶层目录
@@ -36,9 +36,8 @@ src/
     transformers.ts   # Anthropic ↔ OpenAI 协议消息互转
     http-headers.ts   # 请求/响应头白名单与转发策略
     response-headers.ts  # （遗留兼容层，已无外部引用）
-    api-key-rotator.ts   # API Key 轮询 + 健康度 + 配额
+    api-key-rotator.ts   # API Key 轮询 + 配额
     key-selectors.ts     # Sticky / Balanced 两种选择器
-    health-tracker.ts    # 滑动窗口健康度统计
     quota-guard.ts       # 本地请求/Token 配额守护
     anti-ban-config.ts   # 防封参数解析与默认值
     key-state-store.ts   # 运行态持久化（error_count / disabled 等）
@@ -82,25 +81,24 @@ src/
   - 持久化运行态到 `runtime_state.json` / `runtime_usage.json`
   - 为每个 provider 维护一个 `ApiKeyRotator`
   - 暴露 Key 的 CRUD（启用/禁用/重置/添加/删除/配额）
-- **`anti-ban-config.ts`** 把多层默认值（全局/供应商/preset）合并成 `ResolvedAntiBan`，供 rotator 与 health-tracker 使用。
+- **`anti-ban-config.ts`** 把多层默认值（全局/供应商/preset）合并成 `ResolvedAntiBan`，供 rotator 使用。
 
-### 3.4 API Key 轮询与防封 (`api-key-rotator.ts`、`key-selectors.ts`、`health-tracker.ts`、`quota-guard.ts`)
+### 3.4 API Key 轮询与防封 (`api-key-rotator.ts`、`key-selectors.ts`、`quota-guard.ts`)
 
 ```
                 ┌─────────────────┐
                 │  ApiKeyRotator  │
                 └────────┬────────┘
                          │
-            ┌────────────┼────────────┐
-            ▼            ▼            ▼
-     KeySelector   HealthTracker   QuotaGuard
-     (sticky/      (滑动窗口     (本地请求/
-      balanced)     评分)         token 配额)
+            ┌────────────┴────────────┐
+            ▼                         ▼
+     KeySelector                  QuotaGuard
+     (sticky/                     (本地请求/
+      balanced)                    token 配额)
 ```
 
 - **`api-key-rotator.ts`** 负责 acquire / release lease、并发上限、min_interval、429 冷却等运行时控制。
-- **`key-selectors.ts`** 实现两种选择策略：sticky（咬住活跃 Key）/ balanced（按健康分加权随机）。
-- **`health-tracker.ts`** 维护 rate_limit / transient / success 事件的滑动窗口，并算出 0~1 之间的健康分。
+- **`key-selectors.ts`** 实现两种选择策略：sticky（咬住活跃 Key，失败后切换）/ balanced（在可用 Key 中随机）。
 - **`quota-guard.ts`** 比较累计 usage 与 quota（max_requests / max_tokens / soft_stop_threshold），决定是否屏蔽。
 
 ### 3.5 持久化 (`key-state-store.ts`、`usage-store.ts`、`utils/atomic-write.ts`)

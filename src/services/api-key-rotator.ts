@@ -56,13 +56,14 @@ export class ApiKeyRotator {
   private _antiBan: ResolvedAntiBan;
   private _providerQuota: KeyQuotaConfig | null;
   private _keyMaxErrors: number;
+  private _autoRecoverMs: number;
   private selector: KeySelector;
   private runtime = new Map<string, RuntimeState>();
   private _onChange?: (key: string, patch: KeyStateChange) => void;
   private quotaGuard = new QuotaGuard();
   private usageListener: ((key: string, usage: KeyUsage, ratio: number) => void) | null = null;
 
-  constructor(keys: ApiKeyEntry[], strategy: KeyRotationStrategy, autoDisable: boolean = true, antiBan: ResolvedAntiBan, providerQuota: KeyQuotaConfig | null = null, keyMaxErrors: number = 5) {
+  constructor(keys: ApiKeyEntry[], strategy: KeyRotationStrategy, autoDisable: boolean = true, antiBan: ResolvedAntiBan, providerQuota: KeyQuotaConfig | null = null, keyMaxErrors: number = 5, autoRecoverMinutes: number = 0) {
     this._keys = keys;
     this._keyIndex = new Map(keys.map((k, i) => [k.key, i]));
     this._strategy = strategy;
@@ -70,6 +71,7 @@ export class ApiKeyRotator {
     this._antiBan = antiBan;
     this._providerQuota = providerQuota;
     this._keyMaxErrors = keyMaxErrors;
+    this._autoRecoverMs = autoRecoverMinutes > 0 ? autoRecoverMinutes * 60_000 : 0;
     const selectionMode = this.resolveSelectionMode();
     this.selector = selectionMode === 'balanced' ? new BalancedSelector() : new StickySelector();
     for (const k of this._keys) {
@@ -146,6 +148,7 @@ export class ApiKeyRotator {
   async acquire(options: AcquireOptions = {}): Promise<KeyLease> {
     while (true) {
       const now = Date.now();
+      this.recoverExpiredDisables(now);
       if (this.allUnavailable()) {
         throw new Error('没有可用的 API Key');
       }
@@ -203,6 +206,28 @@ export class ApiKeyRotator {
     }
   }
 
+  // error_count 累计到阈值时把禁用状态写进 patch。markError / markRateLimited 共用，
+  // 保证「累计够阈值就自动禁用」这条规则在所有错误类别上一致。
+  private applyAutoDisable(entry: ApiKeyEntry, patch: KeyStateChange, now: number): void {
+    if (this._autoDisable && entry.error_count + 1 >= this._keyMaxErrors && entry.enabled) {
+      patch.enabled = false;
+      patch.auto_disabled_at = now;
+    }
+  }
+
+  // 惰性自动恢复：把「自动禁用（auto_disabled_at 非空）且已过恢复时长」的 key 重新启用。
+  // 不用常驻定时器——没流量时恢复没有意义，acquire 每轮开头扫一遍即可，一旦有请求进来立即生效。
+  // 只碰自动禁用的 key；手动禁用（仅 disabled_at）不动。恢复后若立刻再失败会重新累计禁用，可自我修正。
+  private recoverExpiredDisables(now: number): void {
+    if (this._autoRecoverMs <= 0) return;
+    for (const entry of this._keys) {
+      if (entry.enabled) continue;
+      if (entry.auto_disabled_at == null) continue;
+      if (now - entry.auto_disabled_at < this._autoRecoverMs) continue;
+      this.enableKey(entry.key);
+    }
+  }
+
   markError(key: string, errorMessage: string, category: KeyErrorCategory = 'transient'): void {
     const entry = this.entryFor(key);
     if (!entry) return;
@@ -213,10 +238,7 @@ export class ApiKeyRotator {
       last_error_message: errorMessage
     };
 
-    if (this._autoDisable && entry.error_count + 1 >= this._keyMaxErrors && entry.enabled) {
-      patch.enabled = false;
-      patch.auto_disabled_at = Date.now();
-    }
+    this.applyAutoDisable(entry, patch, Date.now());
     this.getRuntimeState(key).lastErrorCategory = category;
 
     Object.assign(entry, patch);
@@ -261,6 +283,8 @@ export class ApiKeyRotator {
       last_error_at: now,
       last_error_message: errorMessage
     };
+    // 429 累计到阈值同样自动禁用：反复限流的 key 长期占着冷却位，不如禁用交给人工/恢复流程处理。
+    this.applyAutoDisable(entry, patch, now);
     Object.assign(entry, patch);
     this._onChange?.(key, patch);
     if (this._antiBan.sticky_on_cooldown === 'fallthrough') {
@@ -326,14 +350,11 @@ export class ApiKeyRotator {
 
   allUnavailable(): boolean {
     if (this._keys.length === 0) return true;
-    const now = Date.now();
-    // 检查所有 Key 是否都不可用（禁用、配额阻塞、或冷却中）
+    // 只统计「永久不可用」（禁用 / 配额阻塞）：冷却中属于临时状态，acquire 会等到期后重试，
+    // 不能算作彻底没 key，否则 acquire 会在冷却窗口内直接抛错而非等待。
     return this._keys.every((entry) => {
       if (!entry.enabled) return true;
       if (this.quotaGuard.isBlocked(entry.key)) return true;
-      const state = this.getRuntimeState(entry.key);
-      // 冷却中也算不可用
-      if (state.nextAvailableAt != null && state.nextAvailableAt > now) return true;
       return false;
     });
   }

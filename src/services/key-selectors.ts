@@ -6,20 +6,25 @@ export interface KeySelector {
 
 export class StickySelector implements KeySelector {
   private activeKey: string | undefined = undefined;
+  private avoidKey: string | undefined = undefined;
 
   pick(candidates: string[]): string | undefined {
     if (candidates.length === 0) return undefined;
     if (this.activeKey && candidates.includes(this.activeKey)) {
       return this.activeKey;
     }
-    // 简单选择第一个可用 Key（已经过 eligibleKeys 过滤）
-    this.activeKey = candidates[0];
+    // 上一个 key 刚失败（网络/瞬时错误）：优先切到别的候选，避免继续咬住刚出错的链路。
+    // 只有当没有其他候选时才退回到被规避的 key。规避标记是一次性的。
+    const preferred = this.avoidKey ? candidates.find((k) => k !== this.avoidKey) : undefined;
+    this.activeKey = preferred ?? candidates[0];
+    this.avoidKey = undefined;
     return this.activeKey;
   }
 
   notifyKeyUnavailable(key: string): void {
     if (this.activeKey === key) {
       this.activeKey = undefined;
+      this.avoidKey = key;
     }
   }
 

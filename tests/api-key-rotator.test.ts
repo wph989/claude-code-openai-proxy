@@ -7,6 +7,10 @@ import { ApiKeyRotator } from '../src/services/api-key-rotator.js';
 import { UpstreamService, classifyUpstreamError, isQuotaLimitError, releaseUpstreamResponse } from '../src/services/upstream.js';
 import { resolveAntiBanConfig } from '../src/services/anti-ban-config.js';
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function keyEntry(key: string): ApiKeyEntry {
   return {
     id: `id-${key}`,
@@ -269,6 +273,74 @@ test('plain 429 delays the next use of the key without disabling it', async () =
   assert.ok(elapsed >= 20, `expected at least 20ms delay, got ${elapsed}ms`);
   assert.equal(second.key, 'key-a');
   rotator.release(second);
+});
+
+test('repeated 429s reaching keyMaxErrors auto-disable the key', () => {
+  const rotator = new ApiKeyRotator(
+    [keyEntry('key-a'), keyEntry('key-b')],
+    KeyRotationStrategy.round_robin,
+    true,
+    ab({ rate_limit_delay_min_ms: 0, rate_limit_delay_max_ms: 0 }),
+    null,
+    3
+  );
+
+  rotator.markRateLimited('key-a', 'first 429');
+  rotator.markRateLimited('key-a', 'second 429');
+  assert.equal(rotator.getKeyStatuses()[0].enabled, true, 'below threshold should stay enabled');
+
+  rotator.markRateLimited('key-a', 'third 429 hits threshold');
+  const [first] = rotator.getKeyStatuses();
+  assert.equal(first.enabled, false, 'reaching keyMaxErrors should disable');
+  assert.equal(first.status, 'disabled');
+  assert.ok(first.auto_disabled_at, 'auto_disabled_at should be set');
+});
+
+test('auto_recover_minutes re-enables a key once the recovery window has elapsed', async () => {
+  // 0.001 分钟 = 60ms 恢复窗口，便于快速验证。
+  const rotator = new ApiKeyRotator(
+    [keyEntry('key-a')],
+    KeyRotationStrategy.round_robin,
+    true,
+    ab(),
+    null,
+    3,
+    0.001
+  );
+  for (let i = 0; i < 3; i++) rotator.markError('key-a', 'boom', 'transient');
+  assert.equal(rotator.getKeyStatuses()[0].enabled, false, 'key-a should be auto-disabled after hitting threshold');
+
+  // 恢复窗口未到：acquire 应仍视为无可用 key。
+  await assert.rejects(() => rotator.acquire({ deadline: Date.now() + 5 }), /没有可用的 API Key|超时/);
+
+  await sleep(70);
+  const lease = await rotator.acquire({ deadline: Date.now() + 100 });
+  assert.equal(lease.key, 'key-a', 'key-a should be recovered and acquirable');
+  const [state] = rotator.getKeyStatuses();
+  assert.equal(state.enabled, true);
+  assert.equal(state.error_count, 0, 'recovery clears the error count');
+  assert.equal(state.auto_disabled_at, null, 'recovery clears auto_disabled_at');
+  rotator.release(lease);
+});
+
+test('auto_recover_minutes does not re-enable a manually disabled key', async () => {
+  const rotator = new ApiKeyRotator(
+    [keyEntry('key-a'), keyEntry('key-b')],
+    KeyRotationStrategy.round_robin,
+    true,
+    ab(),
+    null,
+    5,
+    0.001
+  );
+  rotator.disableKey('key-a', 'manual off');
+  // 手动禁用不写 auto_disabled_at，recoverExpiredDisables 不应恢复它。
+  await sleep(70);
+  // acquire 会触发一轮恢复扫描；key-a 只应保持禁用，只能拿到 key-b。
+  const lease = await rotator.acquire({ deadline: Date.now() + 50 });
+  assert.equal(lease.key, 'key-b', 'only key-b should be available; key-a stays manually disabled');
+  assert.equal(rotator.getKeyStatuses().find((s) => s.key === 'key-a')!.enabled, false);
+  rotator.release(lease);
 });
 
 test('acquire rejects when only temporarily delayed keys exceed the deadline', async () => {
@@ -543,13 +615,22 @@ test('setKeyQuota updates the live rotator without resetting health state', () =
     ...keyEntry('hk'),
     quota: { max_requests: 100, max_tokens: null, soft_stop_threshold: 0.9 }
   };
-  const rotator = new ApiKeyRotator([entry], KeyRotationStrategy.round_robin, true, ab());
+  const rotator = new ApiKeyRotator([entry], KeyRotationStrategy.round_robin, true, ab({
+    rate_limit_delay_min_ms: 5000,
+    rate_limit_delay_max_ms: 5000
+  }));
   rotator.markRateLimited('hk', '429 rate limit');
-  const scoreBefore = rotator.getHealthScore('hk');
-  assert.ok(scoreBefore < 1.0);
+  const before = rotator.getKeyStatuses()[0];
+  assert.equal(before.error_count, 1);
+  assert.equal(before.last_error_category, 'rate_limit');
+  assert.ok(before.next_available_at, 'cooldown should be active before setKeyQuota');
 
   rotator.setKeyQuota('hk', { max_requests: 500, max_tokens: null, soft_stop_threshold: 0.95 });
 
   assert.equal(rotator.getQuotaSnapshot('hk').quota?.max_requests, 500);
-  assert.equal(rotator.getHealthScore('hk'), scoreBefore);
+  // setKeyQuota 只应替换配额，不能顺带清空错误计数 / 冷却态。
+  const after = rotator.getKeyStatuses()[0];
+  assert.equal(after.error_count, 1);
+  assert.equal(after.last_error_category, 'rate_limit');
+  assert.equal(after.next_available_at, before.next_available_at);
 });

@@ -15,12 +15,11 @@
 7. [API Key 自动禁用策略](#7-api-key-自动禁用策略)
 8. [上游错误分类](#8-上游错误分类)
 9. [本地配额守护](#9-本地配额守护)
-10. [健康度评分](#10-健康度评分)
-11. [重试策略](#11-重试策略)
-12. [运行态持久化](#12-运行态持久化)
-13. [集群模式](#13-集群模式)
-14. [日志与诊断](#14-日志与诊断)
-15. [鉴权](#15-鉴权)
+10. [重试策略](#10-重试策略)
+11. [运行态持久化](#11-运行态持久化)
+12. [集群模式](#12-集群模式)
+13. [日志与诊断](#13-日志与诊断)
+14. [鉴权](#14-鉴权)
 
 ---
 
@@ -228,13 +227,12 @@ droppedBlockIndices  ─ 整段丢弃的 block（thinking / 未知类型）
 **Sticky（粘性）**
 - 一旦选中一个 Key，后续请求都用它
 - Key 被标记不可用（`notifyKeyUnavailable`）才切换
-- 选择新 Key 时按健康分最高优先
+- 网络/瞬时错误后一次性规避刚出错的 Key，优先切到其他候选
 - **适合错误概率低的场景**：减少 cold start、保持上下文亲和性
 
-**Balanced（加权随机）**
-- 每次请求按健康分加权随机选择
-- 健康分有下限 `min_weight`（默认 0.05），避免完全冷藏的 Key 永远轮不到
-- **适合错误概率高的场景**：分散风险，自动绕开有问题的 Key
+**Balanced（随机）**
+- 每次请求在可用候选中随机选择一个
+- **适合错误概率高的场景**：分散风险，避免所有流量集中到单个 Key
 
 ### 5.2 选择器选择规则
 
@@ -343,16 +341,33 @@ if settings.keyAutoDisable               // 全局 env: KEY_AUTO_DISABLE
 - 成功一次就把 `error_count` 清零、`last_error_*` 清空
 - 但**不自动启用**已被禁用的 Key（用户操作或 `resetErrorCount` 才会）
 
-### 7.3 重置渠道
+### 7.3 自动恢复（`auto_recover_minutes`）
+
+provider 级配置，单位分钟，`0` / 留空 = 关闭（保持旧行为，只能手动恢复）。
+
+```
+if provider.auto_recover_minutes > 0
+   and not entry.enabled
+   and entry.auto_disabled_at != null           // 只恢复「自动禁用」，手动禁用（仅 disabled_at）不碰
+   and now() - entry.auto_disabled_at >= auto_recover_minutes * 60_000:
+   enableKey(entry)                              // 重新启用 + 清零 error_count + 清 auto_disabled_at + 清冷却
+```
+
+- **惰性触发**：不用常驻定时器，`acquire()` 每轮开头扫一遍。没流量时不恢复没有意义——恢复的目的就是让下一个请求能用它；一旦有请求进来立即生效。
+- 覆盖所有自动禁用来源：累计错误禁用、429 累计禁用、`markQuotaError`（硬限制/额度耗尽）。
+- 恢复后若立刻再次失败会重新累计并禁用，可自我修正。
+
+### 7.4 重置渠道
 
 | 操作 | 入口 | 行为 |
 |---|---|---|
 | 手动启用 | Admin → `PUT /api/keys/:p/:i/enable` | enabled=true、清错误计数与冷却 |
 | 手动禁用 | Admin → `PUT /api/keys/:p/:i/disable` | enabled=false |
-| 重置单 Key | Admin → `PUT /api/keys/:p/:i/reset` | 清错误计数 + 清配额计数 + 重置健康分（运行态）+ 启用 |
+| 重置单 Key | Admin → `PUT /api/keys/:p/:i/reset` | 清错误计数 + 清配额计数 + 清冷却态 + 启用 |
 | 重置所有 | Admin → `PUT /api/keys/:p/reset-all` | 对 provider 下所有 Key 重置 |
+| 自动恢复 | provider `auto_recover_minutes` | 自动禁用满 N 分钟后惰性重新启用 |
 
-### 7.4 多 provider 错误隔离
+### 7.5 多 provider 错误隔离
 
 错误计数按 `(provider_id, key_id)` 隔离，不同 provider 用相同 key 字面量互不影响。
 
@@ -455,58 +470,11 @@ if settings.keyAutoDisable               // 全局 env: KEY_AUTO_DISABLE
 
 ---
 
-## 10. 健康度评分
-
-`services/health-tracker.ts::HealthTracker` 给每个 Key 算 `[0.1, 1.05]` 范围的健康分。
-
-### 10.1 滑动窗口
-
-每个 Key 维护三个事件列表（rate_limit / transient / success），窗口长度 `window_ms` 默认 300000ms（5 分钟）。
-
-窗口外的事件懒清理：每次查询时弹出过期项。
-
-### 10.2 评分公式
-
-```
-rl_score   = max(rate_limit_penalty_floor,
-                  1 - rate_limit_penalty_per_event × rl_count)
-tr_score   = max(transient_penalty_floor,
-                  1 - transient_penalty_per_event × tr_count)
-cn_score   = max(consecutive_penalty_floor,
-                  1 - consecutive_penalty_per_event × max(0, consecutive_errors - 1))
-fresh      = fresh_success_boost if (now - lastSuccessAt) <= fresh_success_window_ms else 1.0
-
-raw_score  = rl_score × tr_score × cn_score × fresh
-final      = clamp(raw_score, score_floor, score_ceiling)
-```
-
-### 10.3 关键参数（默认）
-
-| 参数 | 默认值 | 作用 |
-|---|---|---|
-| `window_ms` | 300000 | 滑动窗口（5min）|
-| `rate_limit_penalty_per_event` | 0.15 | 每次 429 扣 15% |
-| `rate_limit_penalty_floor` | 0.2 | 429 惩罚下限 |
-| `transient_penalty_per_event` | 0.10 | 每次瞬时错误扣 10% |
-| `transient_penalty_floor` | 0.3 | 瞬时惩罚下限 |
-| `consecutive_penalty_per_event` | 0.20 | 连续错误每次扣 20% |
-| `consecutive_penalty_floor` | 0.1 | 连续错误惩罚下限 |
-| `fresh_success_boost` | 1.05 | 近期成功加成 |
-| `fresh_success_window_ms` | 60000 | "近期"定义为 1 分钟内 |
-| `score_floor` / `ceiling` | 0.1 / 1.05 | 健康分硬截断 |
-
-### 10.4 使用方
-- Sticky 选择器：分数最高者
-- Balanced 选择器：分数作为权重，加权随机
-- Admin 显示：每个 Key 的实时健康分 + 近期事件计数
-
----
-
-## 11. 重试策略
+## 10. 重试策略
 
 `services/upstream.ts::postToUpstream` 在 4 类错误下决定是否重试。
 
-### 11.1 重试参数
+### 10.1 重试参数
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
@@ -515,7 +483,7 @@ final      = clamp(raw_score, score_floor, score_ceiling)
 | `retry.retry_on_rate_limit` | true | 429 是否重试 |
 | `retry.retry_on_transient` | true | 5xx / 网络错误是否重试 |
 
-### 11.2 重试矩阵
+### 10.2 重试矩阵
 
 | 错误类型 | 行为 |
 |---|---|
@@ -546,9 +514,9 @@ final      = clamp(raw_score, score_floor, score_ceiling)
 
 ---
 
-## 12. 运行态持久化
+## 11. 运行态持久化
 
-### 12.1 三个文件分工
+### 11.1 三个文件分工
 
 | 文件 | 内容 | 写入方 |
 |---|---|---|
@@ -556,7 +524,7 @@ final      = clamp(raw_score, score_floor, score_ceiling)
 | `runtime_state.json` | Key 运行态（error_count / disabled_at / last_error_* / auto_disabled_at / 自动禁用后的 enabled） | `KeyStateStore` |
 | `runtime_usage.json` | Key 累计计数（requests_used / tokens_used） | `UsageStore` |
 
-### 12.2 主键策略
+### 11.2 主键策略
 
 主键格式 `${providerId}:${keyId}`：
 
@@ -564,14 +532,14 @@ final      = clamp(raw_score, score_floor, score_ceiling)
 - 一旦生成不变；用户改 key 字面量也保留历史
 - v1 → v2 升级时（v2 改用 id 主键），旧格式直接当空对象处理，相当于一次"用户选择全部重置"
 
-### 12.3 atomic 写入
+### 11.3 atomic 写入
 
 `utils/atomic-write.ts::writeJsonAtomic`：
 - 写 `.tmp` → `rename` 到目标
 - rename 在 POSIX 是原子操作；Windows 也基本原子
 - 避免崩溃时半写
 
-### 12.4 写盘节流
+### 11.4 写盘节流
 
 **KeyStateStore**：
 - debounce 500ms（写多读少场景的轻量化）
@@ -581,14 +549,14 @@ final      = clamp(raw_score, score_floor, score_ceiling)
 - 双触发：批次阈值 + 临界值
 - 串行化：所有写操作通过 promise 链排队，避免多 writer 抢同一个 `.tmp`
 
-### 12.5 reconcile（一致性对齐）
+### 11.5 reconcile（一致性对齐）
 
 启动 / `saveConfig` / `addKey` 时调用：
 - 当前 config 中没有的 key → 从 store 删除
 - 当前 config 中新增的 key → store 补默认零值
 - 保证 state/usage 文件总是反映当前 config 的全量 key 集合
 
-### 12.6 计划：ConfigRepository 抽象层
+### 11.6 计划：ConfigRepository 抽象层
 
 未来若引入 SQLite：
 
@@ -607,22 +575,22 @@ interface ConfigRepository {
 
 ---
 
-## 13. 集群模式
+## 12. 集群模式
 
 `src/cluster.ts`：
 
-### 13.1 启动
+### 12.1 启动
 
 `ccop start -c [workers]`：
 - workers 不指定时取 `CLUSTER_WORKERS` 或 `os.cpus().length`
 - 主进程 fork N 个 worker，每个跑完整的 `startServer`
 
-### 13.2 worker 回收
+### 12.2 worker 回收
 
 - worker 异常退出 → master 立刻 `cluster.fork()` 补一个
 - 收到 SIGINT/SIGTERM → `disconnect` 所有 worker，10 秒后强制 kill
 
-### 13.3 已知限制
+### 12.3 已知限制
 
 当前 worker 之间**不共享 Key 状态**：
 - 每个 worker 内存里有独立的 `ApiKeyRotator`
@@ -633,20 +601,20 @@ interface ConfigRepository {
 
 ---
 
-## 14. 日志与诊断
+## 13. 日志与诊断
 
 `utils/logger.ts`：
 
-### 14.1 双格式
+### 13.1 双格式
 
 - `LOG_FORMAT=json`（默认）：每行一条 JSON，便于日志聚合
 - `LOG_FORMAT=text`：人类可读
 
-### 14.2 详细模式
+### 13.2 详细模式
 
 `LOG_DETAILED=true` 时记录 `request_body` / `response_body` / `request` / `response` 字段；默认关闭。
 
-### 14.3 轮转
+### 13.3 轮转
 
 `LOG_ROTATION`：
 - `none`：不轮转
@@ -655,11 +623,11 @@ interface ConfigRepository {
 
 `LOG_MAX_FILES`（默认 30）：保留最旧文件被自动 unlink。
 
-### 14.4 时区
+### 13.4 时区
 
 所有日志时间戳用 `Asia/Shanghai`（`utils/time.ts`），便于 PRC 用户排障。
 
-### 14.5 异步写不阻塞
+### 13.5 异步写不阻塞
 
 每条日志的 file write 是异步 promise，不 await；定期清理已完成的 promise 避免数组无限增长。
 
@@ -667,17 +635,17 @@ interface ConfigRepository {
 
 ---
 
-## 15. 鉴权
+## 14. 鉴权
 
 `src/auth.ts`：
 
-### 15.1 代理鉴权（外部调用）
+### 14.1 代理鉴权（外部调用）
 
 - 读取 `Authorization: Bearer <token>` 或 `x-api-key`
 - 与 `runtime_models.json::proxy_auth_token` 对比
 - 配置为空时**允许匿名访问**（私网部署常用）
 
-### 15.2 管理后台鉴权
+### 14.2 管理后台鉴权
 
 - cookie 名 `ccgp_admin_session`，maxAge 12 小时
 - 与 `ADMIN_AUTH_TOKEN`（env）对比
@@ -687,7 +655,7 @@ interface ConfigRepository {
   - 开发模式无 `.env` 时降级为 `admin123`
 - 生产模式必须设置；缺失则拒绝启动
 
-### 15.3 限流
+### 14.3 限流
 
 `@fastify/rate-limit`：
 - `RATE_LIMIT_MAX`（默认 100）
@@ -702,6 +670,7 @@ interface ConfigRepository {
 |---|---|
 | 调整 Key 自动禁用阈值 | env `KEY_MAX_ERRORS` 或 config `key_max_errors` |
 | 关闭 Key 自动禁用 | env `KEY_AUTO_DISABLE=false` 或 provider `auto_disable_on_error=false` |
+| 自动禁用后自动恢复 | provider `auto_recover_minutes`（分钟，0=关闭） |
 | 调整 429 冷却时长 | `anti_ban.rate_limit_delay_min_ms` / `max_ms` |
 | 调整最小请求间隔 | `anti_ban.min_interval_ms` |
 | 切换为高吞吐模式 | `anti_ban.mode = "throughput"` |

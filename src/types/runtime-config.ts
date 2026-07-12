@@ -119,6 +119,8 @@ export interface ProviderConfig {
   api_key_env?: string | null;
   key_rotation_strategy?: KeyRotationStrategy | null;
   auto_disable_on_error?: boolean;
+  // 自动禁用后经过多少分钟自动恢复（重新启用并清零错误计数）。0 / 未设 = 不自动恢复。
+  auto_recover_minutes?: number;
   timeout_seconds?: number;
   stream_idle_timeout_seconds?: number;
   enabled?: boolean;
@@ -165,6 +167,7 @@ export interface ResolvedProvider {
   api_keys: ApiKeyEntry[];
   key_rotation_strategy: KeyRotationStrategy;
   auto_disable_on_error: boolean;
+  auto_recover_minutes: number;
   timeout_seconds: number;
   stream_idle_timeout_seconds: number;
   enabled: boolean;

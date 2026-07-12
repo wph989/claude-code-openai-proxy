@@ -7,7 +7,6 @@ describe('resolveAntiBanConfig', () => {
     const cfg = resolveAntiBanConfig();
     expect(cfg.key_selection).toBe(ANTI_BAN_DEFAULTS.key_selection);
     expect(cfg.retry.max_attempts).toBe(ANTI_BAN_DEFAULTS.retry.max_attempts);
-    expect(cfg.health.window_ms).toBe(ANTI_BAN_DEFAULTS.health.window_ms);
     expect(cfg.quota.persist_every_n_requests).toBe(ANTI_BAN_DEFAULTS.quota.persist_every_n_requests);
   });
 
@@ -60,8 +59,6 @@ describe('resolveAntiBanConfig', () => {
       anti_ban: {
         mode: 'throughput',
         sticky_on_cooldown: 'wait',
-        selector: { min_weight: 0.2 },
-        health: { window_ms: 120000, score_floor: 0.2 },
         quota: { persist_every_n_requests: 10, usage_file: 'custom_usage.json' }
       }
     });
@@ -69,8 +66,6 @@ describe('resolveAntiBanConfig', () => {
     expect(cfg.anti_ban).toEqual({
       mode: 'throughput',
       sticky_on_cooldown: 'wait',
-      selector: { min_weight: 0.2 },
-      health: { window_ms: 120000, score_floor: 0.2 },
       quota: { persist_every_n_requests: 10, usage_file: 'custom_usage.json' }
     });
     expect(cfg.providers[0].anti_ban).toEqual({

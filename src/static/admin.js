@@ -1302,7 +1302,12 @@ function providerFormHtml(item) {
           <input id="mf-auto_disable_on_error" type="checkbox" ${p.auto_disable_on_error!==false?'checked':''} />
           <span class="checkbox-label">错误累计自动禁用 Key <span class="field-key">auto_disable_on_error</span></span>
         </label>
-        <p class="form-hint">部分不稳定供应商可关闭此功能；调用成功后错误计数自动清零。</p>
+        <p class="form-hint">累计错误达到阈值（顶部全局配置「Key 自动禁用阈值 key_max_errors」，默认 5）后禁用该 Key；429 限流同样计入。调用成功后错误计数自动清零。部分不稳定供应商可关闭此功能。</p>
+      </div>
+      <div class="form-group">
+        <div class="form-label-row"><span class="form-label">自动禁用后自动恢复</span><span class="field-key">auto_recover_minutes</span><span class="form-label-unit">分钟</span></div>
+        <input id="mf-auto_recover_minutes" type="number" min="0" value="${p.auto_recover_minutes||0}" placeholder="0 = 不自动恢复" />
+        <p class="form-hint">自动禁用的 Key 经过指定分钟数后自动重新启用并清零错误计数（仅在有请求进来时惰性触发）。0 或留空表示只能手动恢复。手动禁用的 Key 不受影响。</p>
       </div>
       <div class="form-group">
         <div class="form-label-row"><span class="form-label">请求超时</span><span class="field-key">timeout_seconds</span><span class="form-label-unit">秒</span></div>
@@ -1407,6 +1412,7 @@ function collectProviderForm() {
     stream_idle_timeout_seconds: Number($('#mf-stream_idle_timeout_seconds').value || 120),
     enabled: $('#mf-enabled').checked,
     auto_disable_on_error: $('#mf-auto_disable_on_error').checked,
+    auto_recover_minutes: Number($('#mf-auto_recover_minutes').value || 0),
     quota,
     headers: parseJsonSafe($('#mf-headers').value, {}),
     description: $('#mf-description').value.trim(),

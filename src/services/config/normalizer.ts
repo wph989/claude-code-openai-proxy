@@ -41,6 +41,7 @@ export function normalizeRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
     api_key_env: normalizeOptional(item.api_key_env),
     key_rotation_strategy: normalizeRotationStrategy(item.key_rotation_strategy),
     auto_disable_on_error: item.auto_disable_on_error !== false,
+    auto_recover_minutes: normalizeAutoRecoverMinutes(item.auto_recover_minutes),
     timeout_seconds: Number(item.timeout_seconds || 300),
     stream_idle_timeout_seconds: Number(item.stream_idle_timeout_seconds || 120),
     enabled: item.enabled !== false,
@@ -318,6 +319,12 @@ function findDuplicates(values: string[]): string[] {
 function normalizeProviderType(value: unknown): 'openai_compatible' | 'anthropic' {
   if (value === 'anthropic') return 'anthropic';
   return 'openai_compatible';
+}
+
+// 自动恢复时长（分钟）：非有限值 / 负数 → 0（不自动恢复）。允许小数便于配秒级以下测试。
+function normalizeAutoRecoverMinutes(value: unknown): number {
+  const num = Number(value);
+  return Number.isFinite(num) && num > 0 ? num : 0;
 }
 
 function normalizeOptionalNumber(value: unknown): number | null {

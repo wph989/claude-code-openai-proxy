@@ -25,6 +25,7 @@
       ],
       "key_rotation_strategy": "round_robin",
       "auto_disable_on_error": true,
+      "auto_recover_minutes": 0,
       "timeout_seconds": 300,
       "stream_idle_timeout_seconds": 120,
       "enabled": true,

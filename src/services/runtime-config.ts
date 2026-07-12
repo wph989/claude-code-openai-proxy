@@ -253,6 +253,7 @@ export class RuntimeConfigManager {
       api_keys: apiKeys,
       key_rotation_strategy: provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin,
       auto_disable_on_error: autoDisable,
+      auto_recover_minutes: provider.auto_recover_minutes ?? 0,
       timeout_seconds: provider.timeout_seconds || 300,
       stream_idle_timeout_seconds: provider.stream_idle_timeout_seconds || 120,
       enabled: !!provider.enabled,
@@ -280,7 +281,7 @@ export class RuntimeConfigManager {
     if (existing && keysEqual(existing.keys, keys) && existing.strategy === strategy && antiBanEqual(existing.antiBan, antiBan)) {
       return existing;
     }
-    const rotator = new ApiKeyRotator(keys, strategy, autoDisable, antiBan, providerQuota, settings.keyMaxErrors);
+    const rotator = new ApiKeyRotator(keys, strategy, autoDisable, antiBan, providerQuota, settings.keyMaxErrors, provider?.auto_recover_minutes ?? 0);
     rotator.onChange = (key, patch) => this.onKeyStateChange(providerId, key, patch);
     this.attachUsageBridge(providerId, rotator);
     this.rotators.set(providerId, rotator);
