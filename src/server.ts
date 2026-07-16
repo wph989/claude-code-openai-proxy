@@ -101,12 +101,13 @@ export async function startServer(options: { host: string; port: number; configP
     shuttingDown = true;
     log('info', '收到退出信号，准备关闭服务', { signal });
     try {
-      await app.runtimeConfigManager.shutdown();
+      // 先停止接收请求并等待在途处理完成，再冻结 Rotator 与持久化状态，避免关闭过程中遗漏最后一次状态变更。
+      await app.close();
     } catch {
       // ignore
     }
     try {
-      await app.close();
+      await app.runtimeConfigManager.shutdown();
     } catch {
       // ignore
     }

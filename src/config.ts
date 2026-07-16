@@ -134,8 +134,8 @@ KEEP_ALIVE_TIMEOUT=60000
 RATE_LIMIT_MAX=100
 RATE_LIMIT_TIME_WINDOW=60000
 
-# 集群配置（多进程模式，0=自动检测 CPU 核心数）
-CLUSTER_WORKERS=0
+# 本地 JSON 状态只支持单 Worker；多 Worker 需先接入集中式状态存储
+CLUSTER_WORKERS=1
 `;
     writeFileSync(USER_ENV_FILE, defaultEnv, 'utf-8');
     logGeneratedAdminAuthToken(USER_ENV_FILE, adminAuthToken);
@@ -258,7 +258,7 @@ export const settings: AppSettings = {
   forceIdentityAcceptEncoding: toBoolean(process.env.FORCE_IDENTITY_ACCEPT_ENCODING, false),
   rateLimitMax: toNumber(process.env.RATE_LIMIT_MAX, 100),
   rateLimitTimeWindow: toNumber(process.env.RATE_LIMIT_TIME_WINDOW, 60000),
-  clusterWorkers: (() => { const v = Number(process.env.CLUSTER_WORKERS); return Number.isFinite(v) && v >= 0 ? v : 0; })(),
+  clusterWorkers: (() => { const v = Number(process.env.CLUSTER_WORKERS); return Number.isFinite(v) && v > 0 ? v : 1; })(),
   keyMaxErrors: toNumber(process.env.KEY_MAX_ERRORS, 5),
   keyAutoDisable: toBoolean(process.env.KEY_AUTO_DISABLE, true)
 };

@@ -28,7 +28,7 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
     const payload = (request.body || {}) as CountTokensRequest;
     const requestId = request.requestId;
     const sessionId = request.sessionId;
-    const modelName = String(payload.model || app.runtimeConfigManager.getConfig().default_client_model || '').trim();
+    const modelName = String(payload.model || app.runtimeConfigManager.getDefaultClientModel() || '').trim();
     if (!modelName) {
       return reply.code(400).send(buildAnthropicError(requestId, 'invalid_request_error', 'count_tokens 需要 model，且当前未配置 default_client_model。'));
     }

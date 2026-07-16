@@ -13,11 +13,14 @@ export default defineConfig({
       include: [
         'src/services/api-key-rotator.ts',
         'src/services/anti-ban-config.ts',
-        'src/services/health-tracker.ts',
+        'src/services/config/normalizer.ts',
+        'src/services/key-state-store.ts',
         'src/services/key-selectors.ts',
         'src/services/quota-guard.ts',
+        'src/services/runtime-config.ts',
         'src/services/usage-store.ts',
-        'src/services/upstream.ts'
+        'src/services/upstream.ts',
+        'src/services/upstream/response-meta.ts'
       ],
       thresholds: {
         lines: 85,

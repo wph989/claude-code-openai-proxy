@@ -1,7 +1,6 @@
 import { PassThrough } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { proxyAuthHook } from '../auth.js';
-import { settings } from '../config.js';
 import { createSseSession, sendUpstreamErrorResponse, writeStreamHeaders } from '../services/passthrough.js';
 import { isPlainObject } from '../utils/guards.js';
 import { readStreamChunk } from '../services/stream-read.js';
@@ -15,7 +14,7 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
     const requestId = request.requestId;
     const sessionId = request.sessionId;
 
-    const modelName = String(payload.model || app.runtimeConfigManager.getConfig().default_client_model || '').trim();
+    const modelName = String(payload.model || app.runtimeConfigManager.getDefaultClientModel() || '').trim();
     if (!modelName) {
       return reply.code(400).send({
         error: { type: 'invalid_request_error', message: 'model 不能为空，且未配置 default_client_model。' }

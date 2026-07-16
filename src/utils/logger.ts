@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { nowBeijingIso, toBeijingDateStr } from './time.js';
-import { isProduction, USER_CONFIG_DIR } from '../config.js';
+import { USER_CONFIG_DIR } from '../config.js';
 
 // 用户日志目录
 const USER_LOG_DIR = path.join(USER_CONFIG_DIR, 'logs');

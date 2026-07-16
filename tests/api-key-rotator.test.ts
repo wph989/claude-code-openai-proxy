@@ -275,7 +275,7 @@ test('plain 429 delays the next use of the key without disabling it', async () =
   rotator.release(second);
 });
 
-test('busy key waits on a single timer and release wakes acquire immediately', async () => {
+test('retired rotator keeps queued acquire alive and release wakes it immediately', async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-07-16T00:00:00Z'));
   try {
@@ -292,12 +292,13 @@ test('busy key waits on a single timer and release wakes acquire immediately', a
     await vi.advanceTimersByTimeAsync(100);
     assert.equal(vi.getTimerCount(), 1);
 
+    // 配置热更新会退役旧实例，但已经引用它的在途请求不能因此失败。
+    rotator.dispose();
     rotator.release(first);
     const second = await waiting;
     assert.equal(second.key, 'key-a');
     assert.equal(vi.getTimerCount(), 0);
     rotator.release(second);
-    rotator.dispose();
   } finally {
     vi.useRealTimers();
   }

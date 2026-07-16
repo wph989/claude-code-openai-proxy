@@ -7,6 +7,8 @@ export interface UsageStoreConfig {
   critical_threshold: number;
 }
 
+type JsonWriter = typeof writeJsonAtomic;
+
 const PERSIST_VERSION = 2; // v2: 主键改为 providerId:id（不再用 key 字面量）
 
 interface PersistShape {
@@ -21,10 +23,16 @@ interface PersistShape {
 export class UsageStore {
   private data: Record<string, KeyUsage> = {};
   private dirtyCount = 0;
+  private mutationVersion = 0;
+  private persistedVersion = 0;
   private writing: Promise<void> | null = null;
   private pending = false;
 
-  constructor(private filePath: string, private cfg: UsageStoreConfig) {}
+  constructor(
+    private filePath: string,
+    private cfg: UsageStoreConfig,
+    private readonly writer: JsonWriter = writeJsonAtomic
+  ) {}
 
   async load(): Promise<Record<string, KeyUsage>> {
     let legacy = false;
@@ -50,6 +58,7 @@ export class UsageStore {
   update(compositeKey: string, usage: KeyUsage, ratio: number): void {
     this.data[compositeKey] = { ...usage };
     this.dirtyCount += 1;
+    this.mutationVersion += 1;
     const aggregateHit = this.dirtyCount >= this.cfg.every_n;
     const criticalHit = ratio >= this.cfg.critical_threshold;
     if (aggregateHit || criticalHit) this.schedule();
@@ -72,11 +81,16 @@ export class UsageStore {
         changed = true;
       }
     }
+    if (changed) {
+      this.dirtyCount += 1;
+      this.mutationVersion += 1;
+    }
     return changed;
   }
 
   async flushPending(): Promise<void> {
-    if (this.writing) await this.writing;
+    // 写入完成回调可能因为期间出现新用量而追加一轮，因此需要一直等到队列真正清空。
+    while (this.writing) await this.writing;
   }
 
   async forceFlush(): Promise<void> {
@@ -86,16 +100,27 @@ export class UsageStore {
   private schedule(): void {
     if (this.pending) return;
     this.pending = true;
-    void this.queueWrite();
+    void this.queueWrite().catch((err) => {
+      // 后台批量写入没有直接调用方；记录错误并保留 dirty 状态，后续更新或 shutdown 会再次尝试。
+      console.error('[usage] 持久化配额用量失败:', err);
+    });
   }
 
   private queueWrite(): Promise<void> {
     const previous = this.writing;
-    const queued = (previous ? previous.catch(() => {}) : Promise.resolve()).then(() => this.write());
+    let succeeded = false;
+    const queued = (previous ? previous.catch(() => {}) : Promise.resolve()).then(async () => {
+      await this.write();
+      succeeded = true;
+    });
     const tracked = queued.finally(() => {
       if (this.writing === tracked) {
         this.pending = false;
         this.writing = null;
+        if (succeeded && this.persistedVersion !== this.mutationVersion) {
+          // 快照写入期间又收到新用量时立即补写，避免临界配额只停留在内存中。
+          this.schedule();
+        }
       }
     });
     // 所有强制刷新和批量刷新必须串行，否则多个 writer 会抢同一个 .tmp 文件。
@@ -104,12 +129,16 @@ export class UsageStore {
   }
 
   private async write(): Promise<void> {
+    const versionAtStart = this.mutationVersion;
+    const dirtyAtStart = this.dirtyCount;
     const payload: PersistShape = {
       version: PERSIST_VERSION,
       updated_at: Math.floor(Date.now() / 1000),
-      usage: this.data,
+      // 写入固定快照，才能准确判断 await 期间发生的更新是否需要追加一轮。
+      usage: Object.fromEntries(Object.entries(this.data).map(([key, usage]) => [key, { ...usage }])),
     };
-    await writeJsonAtomic(this.filePath, payload);
-    this.dirtyCount = 0;
+    await this.writer(this.filePath, payload);
+    this.persistedVersion = versionAtStart;
+    this.dirtyCount = Math.max(0, this.dirtyCount - dirtyAtStart);
   }
 }

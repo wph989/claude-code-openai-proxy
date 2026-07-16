@@ -1,3 +1,5 @@
+import { Dialog, Toast, Theme, closeInfoTips, enhanceInfoTips, escapeHtml as esc, replaceSelectOptions } from './admin-ui.js';
+
 // ── State ──
 let currentConfig = { providers: [], models: [], default_client_model: null, proxy_auth_token: null, anti_ban: null };
 let currentTab = 'providers';
@@ -7,6 +9,7 @@ let modelPage = 1;
 const PAGE_SIZE = 10;
 let expandedKeyProvider = localStorage.getItem('ccop-expanded-key-provider') || null; // provider_id of expanded key panel
 let keyStates = {}; // { providerId: [ApiKeyEntry, ...] }
+let runtimeSettings = { key_auto_disable: true, key_max_errors: 5 };
 
 // sort state per tab
 const sortState = {
@@ -51,233 +54,7 @@ const modalTitle = $('#modal-title');
 const modalBody = $('#modal-body');
 const modalCancel = $('#modal-cancel');
 const modalConfirm = $('#modal-confirm');
-
-// ── Dialog 组件 ──
-const Dialog = {
-  overlay: null,
-  container: null,
-  escHandler: null,
-  keydownHandler: null,
-  previousFocus: null,
-
-  init() {
-    if (this.overlay) return;
-    this.overlay = document.createElement('div');
-    this.overlay.className = 'dialog-overlay';
-    this.overlay.innerHTML = `
-      <div class="dialog-container" role="dialog" aria-modal="true">
-        <div class="dialog-header">
-          <span class="dialog-title"></span>
-          <button class="dialog-close" aria-label="关闭">×</button>
-        </div>
-        <div class="dialog-content"></div>
-        <div class="dialog-footer"></div>
-      </div>
-    `;
-    document.body.appendChild(this.overlay);
-    this.container = this.overlay.querySelector('.dialog-container');
-
-    this.overlay.addEventListener('click', (e) => {
-      if (e.target === this.overlay) this.hide();
-    });
-    this.overlay.querySelector('.dialog-close').addEventListener('click', () => this.hide());
-  },
-
-  show(title, content, buttons = []) {
-    this.init();
-    this.previousFocus = document.activeElement;
-    this.overlay.querySelector('.dialog-title').textContent = title;
-    this.overlay.querySelector('.dialog-content').innerHTML = content;
-
-    const footer = this.overlay.querySelector('.dialog-footer');
-    footer.innerHTML = '';
-
-    let primaryButton = null;
-    buttons.forEach(btn => {
-      const button = document.createElement('button');
-      button.className = `btn ${btn.class || ''}`;
-      button.textContent = btn.text;
-      button.addEventListener('click', () => {
-        if (btn.action) btn.action();
-        if (btn.close !== false) this.hide();
-      });
-      footer.appendChild(button);
-      if (btn.class && btn.class.includes('btn-primary')) primaryButton = button;
-    });
-
-    this.overlay.classList.add('show');
-
-    // 键盘交互：Esc 关闭、Enter 触发首个 primary 按钮（除非焦点已在按钮上）
-    this.keydownHandler = (e) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        this.hide();
-        return;
-      }
-      if (e.key === 'Enter' && primaryButton) {
-        const tag = (e.target.tagName || '').toLowerCase();
-        // textarea 内回车不拦截；其余区域回车触发 primary 按钮
-        if (tag === 'textarea') return;
-        if (tag === 'button') return;
-        e.preventDefault();
-        primaryButton.click();
-      }
-    };
-    document.addEventListener('keydown', this.keydownHandler);
-
-    // 把焦点移到第一个可交互元素，方便键盘用户立即输入
-    setTimeout(() => {
-      const focusTarget = this.overlay.querySelector('input, textarea, select, button.btn-primary') || primaryButton;
-      if (focusTarget) focusTarget.focus();
-    }, 0);
-  },
-
-  hide() {
-    if (this.overlay) this.overlay.classList.remove('show');
-    if (this.keydownHandler) {
-      document.removeEventListener('keydown', this.keydownHandler);
-      this.keydownHandler = null;
-    }
-    if (this.previousFocus && typeof this.previousFocus.focus === 'function') {
-      try { this.previousFocus.focus(); } catch { /* ignore */ }
-      this.previousFocus = null;
-    }
-  },
-
-  confirm(title, message, onConfirm, confirmText = '确认', cancelText = '取消', confirmClass = 'btn-primary') {
-    this.show(title, `<p>${esc(message)}</p>`, [
-      { text: cancelText, class: 'btn-secondary' },
-      { text: confirmText, class: confirmClass, action: onConfirm }
-    ]);
-  },
-
-  alert(title, message, onClose) {
-    this.show(title, `<p>${esc(message)}</p>`, [
-      { text: '确定', class: 'btn-primary', action: onClose }
-    ]);
-  }
-};
-
-// ── Toast 通知 ──
-// 叠加式右下角通知，3 秒自动消失。
-// 替代 alert + 顶部 status-bar 在"操作完成"场景下的反馈，避免操作连发时旧消息被覆盖。
-const Toast = {
-  stack: null,
-  ensureStack() {
-    if (this.stack) return this.stack;
-    this.stack = document.createElement('div');
-    this.stack.className = 'toast-stack';
-    document.body.appendChild(this.stack);
-    return this.stack;
-  },
-  show(message, type = 'info', durationMs = 3000) {
-    const stack = this.ensureStack();
-    const el = document.createElement('div');
-    el.className = `toast toast-${type}`;
-    const icon = type === 'success' ? '✓' : type === 'error' ? '!' : 'i';
-    el.innerHTML = `
-      <span class="toast-icon" aria-hidden="true">${icon}</span>
-      <div class="toast-body"></div>
-      <button class="toast-close" aria-label="关闭">×</button>
-    `;
-    el.querySelector('.toast-body').textContent = message;
-    stack.appendChild(el);
-    // 触发 transition：next frame 加 show
-    requestAnimationFrame(() => el.classList.add('show'));
-
-    let dismissed = false;
-    const dismiss = () => {
-      if (dismissed) return;
-      dismissed = true;
-      el.classList.remove('show');
-      setTimeout(() => el.remove(), 250);
-    };
-    el.querySelector('.toast-close').addEventListener('click', dismiss);
-    if (durationMs > 0) {
-      setTimeout(dismiss, durationMs);
-    }
-  },
-  success(message) { this.show(message, 'success'); },
-  error(message) { this.show(message, 'error', 5000); },
-  info(message) { this.show(message, 'info'); }
-};
-
-// ── 主题切换 ──
-// 在 :root 上预定义的 CSS 变量基础上，通过 body.theme-light 覆盖颜色。
-// 选择持久化在 localStorage，初始化在 DOMContentLoaded 之前完成以避免闪烁。
-const Theme = {
-  STORAGE_KEY: 'ccop-theme',
-  current: 'dark',
-  apply(name) {
-    this.current = name === 'light' ? 'light' : 'dark';
-    // 同时在 html 和 body 上挂 class：html 上的由内联脚本先设置避免闪烁，
-    // body 上的是为了 CSS 选择器兼容（其余组件样式都基于 body）。
-    document.documentElement.classList.toggle('theme-light', this.current === 'light');
-    document.body.classList.toggle('theme-light', this.current === 'light');
-    try { localStorage.setItem(this.STORAGE_KEY, this.current); } catch { /* localStorage 不可用时降级为仅本会话生效 */ }
-    this.updateToggleButton();
-  },
-  toggle() {
-    this.apply(this.current === 'dark' ? 'light' : 'dark');
-  },
-  updateToggleButton() {
-    const btn = document.getElementById('themeToggleBtn');
-    if (!btn) return;
-    btn.setAttribute('aria-label', this.current === 'dark' ? '切换到亮色主题' : '切换到暗色主题');
-    btn.innerHTML = this.current === 'dark'
-      ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>`
-      : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>`;
-  },
-  init() {
-    let saved = 'dark';
-    try { saved = localStorage.getItem(this.STORAGE_KEY) || 'dark'; } catch { /* ignore */ }
-    // documentElement 上可能已被 inline 脚本设置过 theme-light（防闪烁）；
-    // 在此再调一次 apply 以同步 body 和按钮图标。
-    this.apply(saved);
-  }
-};
-
-// ── Helpers ──
-function setInfoTipOpen(tip, open) {
-  tip.classList.toggle('is-open', open);
-  tip.setAttribute('aria-expanded', open ? 'true' : 'false');
-}
-
-function closeInfoTips(except = null) {
-  document.querySelectorAll('.info-tip.is-open').forEach((tip) => {
-    if (tip !== except) setInfoTipOpen(tip, false);
-  });
-}
-
-function enhanceInfoTips(root = document) {
-  root.querySelectorAll('.info-tip').forEach((tip) => {
-    if (tip.dataset.enhanced === 'true') return;
-    const description = tip.dataset.tip || '查看配置说明';
-    // 旧标记仍使用 i 元素；补齐 button 语义和键盘行为，避免一次性改动大量静态及动态模板。
-    tip.dataset.enhanced = 'true';
-    tip.setAttribute('role', 'button');
-    tip.setAttribute('tabindex', '0');
-    tip.setAttribute('aria-label', `配置说明：${description}`);
-    tip.setAttribute('aria-expanded', 'false');
-    tip.addEventListener('click', (event) => {
-      event.stopPropagation();
-      const nextOpen = !tip.classList.contains('is-open');
-      closeInfoTips(tip);
-      setInfoTipOpen(tip, nextOpen);
-    });
-    tip.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        tip.click();
-      } else if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
-        setInfoTipOpen(tip, false);
-      }
-    });
-    tip.addEventListener('blur', () => setInfoTipOpen(tip, false));
-  });
-}
+let modalPreviousFocus = null;
 
 function setStatus(text, isError) {
   statusBox.textContent = text;
@@ -550,25 +327,28 @@ function fillAntiBanConfig(config) {
 
 // ── API ──
 async function loadConfig() {
-  setStatus('正在加载配置...');
-  const res = await fetch('/api/config', { credentials: 'include' });
-  if (res.status === 401) { window.location.href = '/login'; return; }
-  const data = await res.json();
-  currentConfig = data.config;
-  renderSummary(data.summary);
-  proxyAuthTokenInput.value = currentConfig.proxy_auth_token || '';
-  keyMaxErrorsInput.value = currentConfig.key_max_errors || '';
-  fillAntiBanConfig(currentConfig.anti_ban);
-  refreshDefaultModelSelect();
-
-  // 从 /api/config 响应中加载所有运行时状态（一次性，不需要单独调用）
-  if (data.key_states) {
-    keyStates = data.key_states;
+  try {
+    setStatus('正在加载配置...');
+    const res = await fetch('/api/config', { credentials: 'include' });
+    if (res.status === 401) { window.location.href = '/login'; return; }
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.message || '加载配置失败');
+    currentConfig = data.config;
+    runtimeSettings = { ...runtimeSettings, ...(data.runtime_settings || {}) };
+    renderSummary(data.summary);
+    proxyAuthTokenInput.value = currentConfig.proxy_auth_token || '';
+    keyMaxErrorsInput.value = currentConfig.key_max_errors || '';
+    fillAntiBanConfig(currentConfig.anti_ban);
+    refreshDefaultModelSelect();
+    keyStates = data.key_states || {};
+    renderTable();
+    updatePreviewNow();
+    setStatus('配置已加载');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    setStatus(`加载失败：${message}`, true);
+    Toast.error(`加载失败：${message}`);
   }
-
-  renderTable();
-  updatePreviewNow();
-  setStatus('配置已加载');
 }
 
 function buildPayload() {
@@ -594,6 +374,8 @@ async function saveConfig() {
     const data = await res.json();
     if (!res.ok) throw new Error(data?.error?.message || data?.message || '保存失败');
     currentConfig = data.config;
+    runtimeSettings = { ...runtimeSettings, ...(data.runtime_settings || {}) };
+    keyStates = data.key_states || {};
     renderSummary(data.summary);
     refreshDefaultModelSelect();
     renderTable();
@@ -652,8 +434,13 @@ function renderSummary(summary) {
 function refreshDefaultModelSelect() {
   const ids = currentConfig.models.filter(m => m.enabled !== false).map(m => m.client_model).filter(Boolean);
   const old = defaultClientModel.value;
-  defaultClientModel.innerHTML = '<option value="">未设置</option>' + ids.map(id => `<option value="${id}">${id}</option>`).join('');
-  defaultClientModel.value = ids.includes(old) ? old : (currentConfig.default_client_model || '');
+  const selected = ids.includes(old) ? old : (currentConfig.default_client_model || '');
+  replaceSelectOptions(
+    defaultClientModel,
+    ids.map((id) => ({ value: id, label: id })),
+    selected,
+    '未设置'
+  );
 }
 
 let updatePreviewTimer = null;
@@ -702,10 +489,12 @@ function setSort(tab, field) {
 function syncModelFilterProviderOptions() {
   const ids = currentConfig.providers.map(p => p.provider_id).filter(Boolean);
   const current = modelFilter.provider;
-  modelFilterProvider.innerHTML = '<option value="">全部供应商</option>'
-    + ids.map(id => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
-  // 若原选中的供应商已不存在，重置为「全部」。
-  modelFilterProvider.value = ids.includes(current) ? current : '';
+  replaceSelectOptions(
+    modelFilterProvider,
+    ids.map((id) => ({ value: id, label: id })),
+    ids.includes(current) ? current : '',
+    '全部供应商'
+  );
   modelFilter.provider = modelFilterProvider.value;
 }
 
@@ -761,7 +550,7 @@ function renderTable() {
   if (sorted.length === 0) {
     html += '<div class="empty-state"><p>暂无数据</p></div>';
   } else {
-    html += '<table class="data-table">';
+    html += '<div class="table-scroll"><table class="data-table">';
     if (isProvider) {
       html += renderTableHead(['provider_id','provider_type','base_url','key_rotation_strategy','enabled'], st, ['ID','类型','URL','切换策略','状态']);
     } else {
@@ -780,7 +569,7 @@ function renderTable() {
         html += renderModelRow(item, realIdx, providerIds);
       }
     }
-    html += '</tbody></table>';
+    html += '</tbody></table></div>';
   }
 
   html += renderPagination(clampedPage, totalPages, sorted.length);
@@ -840,6 +629,9 @@ function quotaSummary(quota) {
 
 // 供应商行的防封摘要 badge：一眼看到自动禁用是否开启 + 自动恢复时长，无需进编辑弹窗。
 function antiBanSummary(p) {
+  if (runtimeSettings.key_auto_disable === false) {
+    return '<span class="badge badge-off">全局自动禁用 关</span>';
+  }
   const autoDisable = p.auto_disable_on_error !== false;
   if (!autoDisable) return '<span class="badge badge-off">自动禁用 关</span>';
   const recover = Number(p.auto_recover_minutes) || 0;
@@ -909,7 +701,7 @@ function renderKeyPanelHtml(providerId) {
 
     rows += `<tr class="key-detail-row">
       <td class="key-col-index">${i + 1}</td>
-      <td class="key-col-key" title="${esc(k.key)}">${maskKey(k.key)} ${noteStr}</td>
+      <td class="key-col-key">${maskKey(k.key)} ${noteStr}</td>
       <td class="key-col-note">
         <input class="key-note-input" data-provider="${esc(providerId)}" data-idx="${i}" value="${esc(k.note || '')}" placeholder="备注..." />
       </td>
@@ -934,7 +726,7 @@ function renderKeyPanelHtml(providerId) {
         <button class="btn btn-small key-add-btn" data-provider="${esc(providerId)}">添加 Key</button>
       </div>
       ${keys.length === 0 ? '<div class="key-panel-empty">暂无 API Key，请在上方输入框添加。</div>' : `
-      <table class="key-detail-table">
+      <div class="key-table-scroll"><table class="key-detail-table">
         <thead><tr>
           <th class="key-th-index">#</th>
           <th class="key-th-key">Key</th>
@@ -946,7 +738,7 @@ function renderKeyPanelHtml(providerId) {
           <th class="key-th-actions col-actions">操作</th>
         </tr></thead>
         <tbody>${rows}</tbody>
-      </table>`}
+      </table></div>`}
     </div>
   </td></tr>`;
 }
@@ -1017,11 +809,6 @@ async function toggleKeyPanel(providerId) {
 async function renderKeyPanel(providerId) {
   await loadKeyStates(providerId);
   renderTable();
-}
-
-function esc(s) {
-  if (!s) return '';
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 tableContainer.addEventListener('change', (e) => {
@@ -1109,7 +896,8 @@ tableContainer.addEventListener('click', (e) => {
 
   if (target.classList.contains('key-add-btn')) {
     const providerId = target.dataset.provider;
-    const input = tableContainer.querySelector(`.key-add-input[data-provider="${providerId}"]`);
+    // provider_id 允许普通配置字符，不能直接插入 CSS 选择器；从当前面板局部查找更安全。
+    const input = target.closest('.key-panel')?.querySelector('.key-add-input');
     const raw = input?.value || '';
     const keys = raw.split(/[,，\n]+/).map(k => k.trim()).filter(Boolean);
     if (keys.length === 0) {
@@ -1271,6 +1059,7 @@ tableContainer.addEventListener('click', (e) => {
 
 // ── Modal ──
 function openModal(tab, idx) {
+  modalPreviousFocus = document.activeElement;
   editingIndex = idx;
   const isProvider = tab === 'providers';
   const isEdit = idx >= 0;
@@ -1285,11 +1074,19 @@ function openModal(tab, idx) {
   }
   enhanceInfoTips(modalBody);
   modalOverlay.classList.add('open');
+  modalOverlay.setAttribute('aria-hidden', 'false');
+  setTimeout(() => modalBody.querySelector('input, select, textarea')?.focus(), 0);
 }
 
 function closeModal() {
+  if (!modalOverlay.classList.contains('open')) return;
   modalOverlay.classList.remove('open');
+  modalOverlay.setAttribute('aria-hidden', 'true');
   editingIndex = -1;
+  if (modalPreviousFocus && typeof modalPreviousFocus.focus === 'function') {
+    try { modalPreviousFocus.focus(); } catch { /* 触发按钮已被重新渲染时无需恢复。 */ }
+  }
+  modalPreviousFocus = null;
 }
 
 function submitModal() {
@@ -1428,7 +1225,7 @@ function providerFormHtml(item) {
     </div>
     <div class="form-group">
       <div class="form-label-row"><span class="form-label">自定义请求头（JSON 对象，可选）</span><span class="field-key">headers</span></div>
-      <textarea id="mf-headers" placeholder='{"api-version":"2024-xx"}'>${JSON.stringify(p.headers||{},null,2)}</textarea>
+      <textarea id="mf-headers" placeholder='{"api-version":"2024-xx"}'>${esc(JSON.stringify(p.headers||{},null,2))}</textarea>
     </div>`;
 }
 
@@ -1467,7 +1264,7 @@ function modelFormHtml(item) {
     </div>
     <div class="form-group">
       <div class="form-label-row"><span class="form-label">额外请求体（JSON 对象，可选）</span><span class="field-key">extra_body</span></div>
-      <textarea id="mf-extra_body" placeholder='{"top_k":20}'>${JSON.stringify(m.extra_body||{},null,2)}</textarea>
+      <textarea id="mf-extra_body" placeholder='{"top_k":20}'>${esc(JSON.stringify(m.extra_body||{},null,2))}</textarea>
     </div>`;
 }
 

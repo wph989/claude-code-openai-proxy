@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'no
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { RuntimeConfigManager } from '../src/services/runtime-config.js';
+import { JsonFileConfigRepository } from '../src/services/config/json-file-repository.js';
+import type { ConfigRepository } from '../src/services/config/repository.js';
 import { createApp } from '../src/server.js';
 import { settings } from '../src/config.js';
 
@@ -15,6 +17,53 @@ function writeConfig(p: string, body: unknown) {
 }
 
 describe('RuntimeConfigManager — id 化 + state 文件', () => {
+  it('配置文件损坏时保留原文并拒绝启动', async () => {
+    const cfgPath = path.join(tmp, 'runtime_models.json');
+    const broken = '{ invalid-json';
+    writeFileSync(cfgPath, broken, 'utf-8');
+
+    const mgr = new RuntimeConfigManager(cfgPath);
+    await expect(mgr.init()).rejects.toThrow();
+    expect(readFileSync(cfgPath, 'utf-8')).toBe(broken);
+  });
+
+  it('配置文件不存在时才创建默认配置', async () => {
+    const cfgPath = path.join(tmp, 'runtime_models.json');
+    const mgr = new RuntimeConfigManager(cfgPath);
+
+    await mgr.init();
+    expect(existsSync(cfgPath)).toBe(true);
+    expect(mgr.getConfig().providers.length).toBeGreaterThan(0);
+    await mgr.shutdown();
+  });
+
+  it('同步保存失败时向管理调用方返回错误', async () => {
+    const cfgPath = path.join(tmp, 'runtime_models.json');
+    writeConfig(cfgPath, {
+      providers: [],
+      models: [],
+      default_client_model: null
+    });
+    const base = new JsonFileConfigRepository(cfgPath);
+    let failSave = true;
+    const repository: ConfigRepository = {
+      loadConfig: () => base.loadConfig(),
+      saveConfig: async (config) => {
+        if (failSave) throw new Error('disk full');
+        await base.saveConfig(config);
+      },
+      ensureDefaultConfig: (builder) => base.ensureDefaultConfig(builder),
+      createKeyStateStore: () => base.createKeyStateStore(),
+      createUsageStore: (options) => base.createUsageStore(options)
+    };
+    const mgr = new RuntimeConfigManager(repository);
+    await mgr.init();
+
+    await expect(mgr.saveConfig(mgr.getConfig())).rejects.toThrow('disk full');
+    failSave = false;
+    await mgr.shutdown();
+  });
+
   it('为缺失 id 的旧配置补 id 并重写 runtime_models.json', async () => {
     const cfgPath = path.join(tmp, 'runtime_models.json');
     writeConfig(cfgPath, {
@@ -324,7 +373,8 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
     await mgr.init();
     const { rotator } = mgr.resolveModel('m');
     rotator.recordUsage('sk-1', 3, 12);
-    await mgr.shutdown();
+    // 此处只需要验证重置前已落盘，管理器后续仍要继续工作，不能用终止生命周期的 shutdown。
+    await mgr.flushRuntimeStores();
 
     await mgr.resetKey('p1', 0);
     await mgr.shutdown();
@@ -596,7 +646,8 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
         provider_id: 'p1',
         provider_type: 'openai_compatible',
         base_url: 'https://example.com',
-        api_key: [{ id: 'RECOVER001', key: 'sk-1' }],
+        // 模拟自动禁用已写入 config，但恢复标记仍保存在 state 的真实重启场景。
+        api_key: [{ id: 'RECOVER001', key: 'sk-1', enabled: false }],
         auto_recover_minutes: 60,
         timeout_seconds: 300,
         enabled: true,
@@ -631,6 +682,14 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
     expect(mgr.getKeyStates('p1')[0].enabled).toBe(true);
 
     await mgr.shutdown();
+
+    const persistedConfig = JSON.parse(readFileSync(cfgPath, 'utf-8'));
+    expect(persistedConfig.providers[0].api_key[0].enabled).not.toBe(false);
+
+    const restarted = new RuntimeConfigManager(cfgPath);
+    await restarted.init();
+    expect(restarted.getKeyStates('p1')[0].enabled).toBe(true);
+    await restarted.shutdown();
   });
 
   it('运行时 key_max_errors 优先于环境变量阈值', async () => {
@@ -688,6 +747,10 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
     const mgr = new RuntimeConfigManager(cfgPath);
     try {
       await mgr.init();
+      expect(mgr.adminView().runtime_settings).toEqual({
+        key_auto_disable: false,
+        key_max_errors: 1
+      });
       const { rotator } = mgr.resolveModel('m');
       rotator.markError('sk-1', 'transient failure');
       const [state] = rotator.getKeyStatuses();

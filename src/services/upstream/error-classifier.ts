@@ -52,7 +52,7 @@ const HARD_LIMIT_KEYWORDS = [
   '账号异常'
 ];
 
-// 上下文 / 输入过长不是 key 的问题，换 key 只会额外消耗配额并污染健康分。
+// 上下文 / 输入过长不是 key 的问题，换 key 只会额外消耗配额并错误累计失败次数。
 const TOKEN_LIMIT_KEYWORDS = [
   'token-limit',
   'token limit',

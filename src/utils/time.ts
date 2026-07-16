@@ -19,8 +19,6 @@ const PART_INDEX = (() => {
   return idx;
 })();
 
-function pad2(n: number): string { return n < 10 ? '0' + n : '' + n; }
-
 /**
  * 时间工具：统一输出北京时间。
  */

@@ -63,7 +63,6 @@ export class ApiKeyRotator {
   private _onChange?: (key: string, patch: KeyStateChange) => void;
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private availabilityWaiters = new Set<() => void>();
-  private disposed = false;
   private quotaGuard = new QuotaGuard();
   private usageListener: ((key: string, usage: KeyUsage, ratio: number) => void) | null = null;
 
@@ -152,7 +151,6 @@ export class ApiKeyRotator {
 
   async acquire(options: AcquireOptions = {}): Promise<KeyLease> {
     while (true) {
-      if (this.disposed) throw new Error('API Key Rotator 已释放');
       const now = Date.now();
       this.recoverExpiredDisables(now);
       if (this.allUnavailable()) {
@@ -519,9 +517,7 @@ export class ApiKeyRotator {
       clearTimeout(this.recoveryTimer);
       this.recoveryTimer = null;
     }
-    // 热更新后旧 Rotator 不得继续分配 Key；先标记再唤醒，确保排队请求立即退出。
-    this.disposed = true;
-    this.signalAvailabilityChange();
+    // 热更新只停止旧实例的后台写入；已持有该实例的在途请求仍需完成等待、重试和 lease 释放。
     this._onChange = undefined;
     this.usageListener = null;
   }

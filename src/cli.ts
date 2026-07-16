@@ -33,7 +33,7 @@ program
   .option('--config <path>', '运行时模型配置文件路径', settings.configFile)
   .option('--dev', '强制开发模式（使用本地目录配置）', false)
   .option('-d, --daemon', '后台运行（守护进程模式）', false)
-  .option('-c, --cluster [workers]', '启用集群模式（可指定工作进程数，默认为 CPU 核心数）', false)
+  .option('-c, --cluster [workers]', '启用单 Worker 集群兼容模式；本地状态暂不支持多 Worker', false)
   .action(async (options) => {
     const port = Number(options.port || settings.port);
     const host = options.host || settings.host;
@@ -61,12 +61,17 @@ program
     } else if (options.cluster !== false) {
       // Cluster mode
       const workers = options.cluster === true ? 0 : Number(options.cluster);
+      const { startCluster, resolveClusterWorkerCount, assertClusterWorkerCount } = await import('./cluster.js');
+      const workerCount = resolveClusterWorkerCount(
+        Number.isFinite(workers) && workers > 0 ? workers : settings.clusterWorkers
+      );
+      // 在写 PID 文件和 fork 前失败，避免不安全配置留下看似仍在运行的进程记录。
+      assertClusterWorkerCount(workerCount);
       await writeProcessInfo({ pid: process.pid, port, host });
       process.on('exit', () => { void removeProcessInfo(); });
 
-      const { startCluster } = await import('./cluster.js');
       await startCluster({
-        workers: Number.isFinite(workers) && workers > 0 ? workers : settings.clusterWorkers,
+        workers: workerCount,
         startWorker: async () => {
           await startServer({
             host,

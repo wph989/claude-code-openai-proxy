@@ -45,6 +45,10 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     await serveStatic(reply, 'admin.js', 'application/javascript; charset=utf-8');
   });
 
+  app.get('/admin-ui.js', async (_request, reply) => {
+    await serveStatic(reply, 'admin-ui.js', 'application/javascript; charset=utf-8');
+  });
+
   app.get('/', async (request, reply) => {
     const token = request.cookies?.[settings.adminCookieName];
     void reply.redirect(token && isValidAdminToken(token) ? '/admin' : '/login');
@@ -96,15 +100,10 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
 
   app.put('/api/config', api, async (request) => {
     const payload = (request.body || {}) as RuntimeConfig;
-    const config = await app.runtimeConfigManager.saveConfig(payload);
+    await app.runtimeConfigManager.saveConfig(payload);
     return {
       message: '配置已保存，并已立即生效。',
-      config,
-      summary: app.runtimeConfigManager.summary(),
-      provider_options: config.providers.map((item) => ({
-        provider_id: item.provider_id,
-        label: `${item.provider_id} (${item.enabled !== false ? '启用' : '停用'})`
-      }))
+      ...app.runtimeConfigManager.adminView()
     };
   });
 

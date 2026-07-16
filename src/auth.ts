@@ -50,40 +50,10 @@ export function readProxyToken(request: FastifyRequest): string | undefined {
   return undefined;
 }
 
-export async function verifyProxyAuth(request: FastifyRequest, reply: FastifyReply): Promise<boolean> {
-  const expectedToken = getExpectedProxyToken();
-
-  // 如果未配置任何代理 Token，则允许匿名访问
-  if (!expectedToken) {
-    return true;
-  }
-
-  const token = readProxyToken(request);
-  if (token === expectedToken) {
-    return true;
-  }
-
-  void reply.code(401).send({
-    type: 'error',
-    error: { type: 'authentication_error', message: '代理鉴权失败。' },
-    request_id: request.requestId || createId('req')
-  });
-  return false;
-}
-
-export async function verifyAdminAuth(request: FastifyRequest, reply: FastifyReply): Promise<boolean> {
-  const token = request.cookies?.[settings.adminCookieName];
-  if (isValidAdminToken(token)) {
-    return true;
-  }
-  void reply.code(401).send({ message: '未登录或会话已失效。' });
-  return false;
-}
-
 /**
  * Fastify preHandler hook：代理鉴权。失败时抛出 AuthError，由 errorHandler 返回 401。
  */
-export async function proxyAuthHook(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+export async function proxyAuthHook(request: FastifyRequest, _reply: FastifyReply): Promise<void> {
   const expectedToken = getExpectedProxyToken();
   if (!expectedToken) return;
   const token = readProxyToken(request);

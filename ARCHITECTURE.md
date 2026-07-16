@@ -55,10 +55,10 @@ src/
 
 ### 3.1 入口与启动 (`cli.ts`、`server.ts`、`cluster.ts`、`config.ts`)
 
-- **`cli.ts`** 基于 commander 提供命令行子命令。`start` 支持守护进程（`-d`）与集群模式（`-c`）。
+- **`cli.ts`** 基于 commander 提供命令行子命令。`start` 支持守护进程（`-d`）与单 Worker 集群兼容模式（`-c`）；本地状态存储会拒绝多 Worker。
 - **`config.ts`** 决定运行模式（dev/prod）、配置根目录（生产为 `~/.ccop`），生成默认 `.env` 与 `runtime_models.json`，并把所有环境变量统一在 `settings` 对象。
 - **`server.ts`** 注册 cookie、rate-limit、错误处理、请求 ID 钩子，并把 `RuntimeConfigManager` / `UpstreamService` 装饰到 `FastifyInstance` 上供路由层使用。
-- **`cluster.ts`** 在主进程 fork worker，处理子进程退出与优雅关闭。
+- **`cluster.ts`** 在主进程 fork 单个 worker，处理子进程退出与优雅关闭；多 Worker 需先接入集中式状态存储。
 
 ### 3.2 路由层 (`routes/`)
 
@@ -145,7 +145,7 @@ src/
 
 ```
 Client → /v1/messages
-  → auth.verifyProxyAuth
+  → auth.proxyAuthHook
   → runtimeConfigManager.resolveModel(model)
        ↳ 路由查询 → provider + rotator
   → upstreamService.postMessages
@@ -193,7 +193,7 @@ markError / markRateLimited / markQuotaError
 
 ## 6. 已知后续改进方向
 
-- 集群模式下多 worker 共享 Key 状态（候选方案：SQLite + WAL）。
+- 接入 SQLite + WAL 或其他集中式状态存储后，再开放多 Worker 集群。
 - `logger.ts` 全局可变状态较多，未来可抽成实例化的 `Logger`，让测试更容易隔离。
 - `runtime-config.ts` 中 Key CRUD 接口较多，可考虑独立成 `KeyAdminService`。
 - `response-fix.ts` 修复状态机较复杂，建议补充单元测试覆盖各分支。

@@ -1,5 +1,4 @@
 import cluster from 'node:cluster';
-import os from 'node:os';
 import { log } from './utils/logger.js';
 
 export interface ClusterOptions {
@@ -7,8 +6,19 @@ export interface ClusterOptions {
   startWorker: () => Promise<void>;
 }
 
+export function resolveClusterWorkerCount(workers: number): number {
+  return workers > 0 ? workers : 1;
+}
+
+export function assertClusterWorkerCount(workers: number): void {
+  if (workers <= 1) return;
+  // Rotator、错误计数和本地配额当前都保存在进程内，多 Worker 会突破全局并发限制并互相覆盖 JSON 状态。
+  throw new Error('当前本地状态存储不支持多 Worker 集群；请使用 --cluster 1，或等待接入集中式状态存储。');
+}
+
 export async function startCluster(options: ClusterOptions): Promise<void> {
-  const numWorkers = options.workers > 0 ? options.workers : os.cpus().length;
+  const numWorkers = resolveClusterWorkerCount(options.workers);
+  assertClusterWorkerCount(numWorkers);
 
   if (cluster.isPrimary) {
     log('info', '集群主进程启动', {
@@ -21,6 +31,9 @@ export async function startCluster(options: ClusterOptions): Promise<void> {
       cluster.fork();
     }
 
+    let shuttingDown = false;
+    let forceShutdownTimer: ReturnType<typeof setTimeout> | null = null;
+
     // Handle worker events
     cluster.on('exit', (worker, code, signal) => {
       log('warn', '工作进程退出', {
@@ -28,7 +41,15 @@ export async function startCluster(options: ClusterOptions): Promise<void> {
         code,
         signal
       });
-      // Replace dead worker
+      if (shuttingDown) {
+        const hasLiveWorkers = Object.values(cluster.workers ?? {}).some(Boolean);
+        if (!hasLiveWorkers) {
+          if (forceShutdownTimer) clearTimeout(forceShutdownTimer);
+          process.exit(0);
+        }
+        return;
+      }
+      // 只在正常运行期间补充异常退出的 Worker，关闭期间重新 fork 会让服务无法优雅停止。
       cluster.fork();
     });
 
@@ -39,7 +60,6 @@ export async function startCluster(options: ClusterOptions): Promise<void> {
     });
 
     // Handle graceful shutdown
-    let shuttingDown = false;
     const handleShutdown = async (signal: string) => {
       if (shuttingDown) return;
       shuttingDown = true;
@@ -51,7 +71,7 @@ export async function startCluster(options: ClusterOptions): Promise<void> {
       }
 
       // Wait for workers to exit
-      setTimeout(() => {
+      forceShutdownTimer = setTimeout(() => {
         log('warn', '强制关闭未退出的工作进程');
         for (const id in cluster.workers) {
           cluster.workers[id]?.kill();

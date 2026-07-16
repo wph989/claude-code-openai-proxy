@@ -40,6 +40,7 @@ export class RuntimeConfigManager {
   private rotators: Map<string, ApiKeyRotator> = new Map();
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   private persisting: Promise<void> | null = null;
+  private persistAgain = false;
   private usageStore: UsageStore | null = null;
   private preloadedUsage: Record<string, KeyUsage> = {};
   private stateStore: KeyStateStore | null = null;
@@ -54,7 +55,9 @@ export class RuntimeConfigManager {
   async init(): Promise<void> {
     try {
       await this.reload();
-    } catch {
+    } catch (error) {
+      // 只有文件不存在才创建默认配置；JSON 损坏、权限不足或校验失败都必须保留原文件并暴露错误。
+      if (!isMissingFileError(error)) throw error;
       await this.ensureDefaultConfig();
       await this.reload();
     }
@@ -62,6 +65,11 @@ export class RuntimeConfigManager {
 
   getConfig(): RuntimeConfig {
     return structuredClone(this.config);
+  }
+
+  getDefaultClientModel(): string | null {
+    // 请求热路径只需要默认模型名，避免为一个字符串深拷贝包含全部 Key 的配置。
+    return this.config.default_client_model ?? null;
   }
 
   async flushRuntimeStores(): Promise<void> {
@@ -158,6 +166,14 @@ export class RuntimeConfigManager {
   }
 
   async shutdown(): Promise<void> {
+    // 先停止自动恢复等后台回调，防止关闭期间又产生新的延迟写入；在途请求应由上层先关闭服务并等待完成。
+    for (const rotator of this.rotators.values()) rotator.dispose();
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    // 自动恢复和错误状态使用 500ms 合并写入；正常关闭必须主动落盘，避免已恢复的 Key 重启后再次禁用。
+    await this.persistNow();
     if (this.usageStore) await this.usageStore.forceFlush();
     if (this.stateStore) await this.stateStore.forceFlush();
   }
@@ -206,6 +222,10 @@ export class RuntimeConfigManager {
     return {
       config: this.getConfig(),
       summary: this.summary(),
+      runtime_settings: {
+        key_auto_disable: settings.keyAutoDisable,
+        key_max_errors: this.config.key_max_errors ?? settings.keyMaxErrors
+      },
       provider_options: this.config.providers.map((item) => ({
         provider_id: item.provider_id,
         label: `${item.provider_id} (${item.enabled !== false ? '启用' : '停用'})`
@@ -373,18 +393,26 @@ export class RuntimeConfigManager {
     if (this.persistTimer) return;
     this.persistTimer = setTimeout(() => {
       this.persistTimer = null;
-      void this.persistNow();
+      void this.persistNow().catch((err) => {
+        // 合并写入没有直接调用方可接收错误，只能在这里明确记录；管理 API 的同步写入仍会向上抛出。
+        console.error('[config] 延迟持久化配置失败:', err);
+      });
     }, 500);
   }
 
   private async persistNow(): Promise<void> {
-    if (this.persisting) return this.persisting;
+    if (this.persisting) {
+      // 当前 writer 使用的是调用时快照；写入期间发生的新状态必须在其完成后再落一版，不能只等待旧快照。
+      this.persistAgain = true;
+      return this.persisting;
+    }
     this.persisting = (async () => {
       try {
-        const { config: cleaned } = stripRuntimeFromConfig(this.config);
-        await this.repository.saveConfig(cleaned);
-      } catch (err) {
-        console.error('[config] 持久化配置失败:', err);
+        do {
+          this.persistAgain = false;
+          const { config: cleaned } = stripRuntimeFromConfig(this.config);
+          await this.repository.saveConfig(cleaned);
+        } while (this.persistAgain);
       } finally {
         this.persisting = null;
       }
@@ -752,6 +780,12 @@ function detectMissingIds(raw: RuntimeConfig): boolean {
     }
   }
   return false;
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return error instanceof Error
+    && 'code' in error
+    && (error as NodeJS.ErrnoException).code === 'ENOENT';
 }
 
 export function buildDefaultRuntimeConfig(): RuntimeConfig {

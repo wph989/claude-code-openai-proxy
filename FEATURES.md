@@ -582,22 +582,19 @@ interface ConfigRepository {
 ### 12.1 启动
 
 `ccop start -c [workers]`：
-- workers 不指定时取 `CLUSTER_WORKERS` 或 `os.cpus().length`
-- 主进程 fork N 个 worker，每个跑完整的 `startServer`
+- workers 不指定时取 `CLUSTER_WORKERS`，默认 1
+- 当前本地 JSON 状态只允许 1 个 worker；请求大于 1 时启动会明确失败
+- 单 worker 兼容模式由主进程 fork 一个 worker 运行完整的 `startServer`
 
 ### 12.2 worker 回收
 
-- worker 异常退出 → master 立刻 `cluster.fork()` 补一个
+- 正常运行期间 worker 异常退出 → master 立刻 `cluster.fork()` 补一个
 - 收到 SIGINT/SIGTERM → `disconnect` 所有 worker，10 秒后强制 kill
+- 关闭期间 worker 退出不会重新 fork
 
 ### 12.3 已知限制
 
-当前 worker 之间**不共享 Key 状态**：
-- 每个 worker 内存里有独立的 `ApiKeyRotator`
-- worker A 标记 Key 冷却 5 秒，worker B 不感知
-- 状态持久化文件存在多 writer 竞争风险
-
-未来方案：迁移到 SQLite（详见 ConfigRepository 抽象）。
+多 worker 需要共享 Rotator、错误计数、配额和写入锁；在迁移到 SQLite/集中式状态存储前，程序会拒绝这种不安全配置，而不是带风险运行。
 
 ---
 

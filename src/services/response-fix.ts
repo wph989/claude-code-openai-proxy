@@ -33,8 +33,6 @@ export interface FixInfo {
   inserted: { contentBlockStop: number[]; messageDelta: boolean; messageStop: boolean };
 }
 
-const CHATCMPL_ID_RE = /("id"\s*:\s*")chatcmpl-[A-Za-z0-9_\-]+(")/g;
-
 function toBuffer(body: Buffer | Uint8Array | string): Buffer {
   if (Buffer.isBuffer(body)) return body;
   if (typeof body === 'string') return Buffer.from(body, 'utf8');
@@ -89,37 +87,6 @@ export function looksLikeAnthropicSSE(body: Buffer | Uint8Array | string): boole
     head.includes('"type":"content_block_start"') ||
     head.includes('"type": "content_block_start"')
   );
-}
-
-/**
- * 把 SSE 文本切成 [{event, data}, ...] 列表。容错地处理 \r\n / 缺尾行 / 注释行。
- */
-function parseSseEvents(text: string): SseEvent[] {
-  const events: SseEvent[] = [];
-  let current: SseEvent = { data: '' };
-  const flush = () => {
-    if (current.data || current.event) {
-      events.push({ event: current.event, data: current.data });
-      current = { data: '' };
-    }
-  };
-  for (const raw of text.split('\n')) {
-    const line = raw.replace(/\r$/, '');
-    if (line === '') {
-      flush();
-      continue;
-    }
-    if (line.startsWith(':')) continue; // 注释
-    if (line.startsWith('event:')) {
-      current.event = line.slice(6).trim();
-    } else if (line.startsWith('data:')) {
-      const piece = line.slice(5).trimStart();
-      current.data = current.data ? `${current.data}\n${piece}` : piece;
-    }
-    // 其它行（id: / retry:）忽略
-  }
-  flush();
-  return events;
 }
 
 /**

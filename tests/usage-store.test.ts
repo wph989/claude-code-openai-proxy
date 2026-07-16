@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { UsageStore } from '../src/services/usage-store.js';
+import { writeJsonAtomic } from '../src/utils/atomic-write.js';
 
 let tmp: string;
 beforeEach(() => { tmp = mkdtempSync(path.join(tmpdir(), 'usage-')); });
@@ -57,6 +58,39 @@ describe('UsageStore', () => {
 
     const json = JSON.parse(readFileSync(file, 'utf-8'));
     expect(json.usage['p:k1']).toEqual({ requests_used: 1, tokens_used: 10 });
+  });
+
+  it('writes a second snapshot when usage changes during an in-flight write', async () => {
+    const file = path.join(tmp, 'usage.json');
+    let releaseFirstWrite!: () => void;
+    const firstWriteStarted = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    let notifyStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    let writes = 0;
+    const delayedWriter: typeof writeJsonAtomic = async (target, data) => {
+      writes += 1;
+      if (writes === 1) {
+        notifyStarted();
+        await firstWriteStarted;
+      }
+      await writeJsonAtomic(target, data);
+    };
+    const s = new UsageStore(file, { every_n: 1, critical_threshold: 0.85 }, delayedWriter);
+    await s.load();
+
+    s.update('p:k1', { requests_used: 1, tokens_used: 10 }, 0);
+    await started;
+    s.update('p:k1', { requests_used: 2, tokens_used: 20 }, 0);
+    releaseFirstWrite();
+    await s.flushPending();
+
+    const json = JSON.parse(readFileSync(file, 'utf-8'));
+    expect(writes).toBe(2);
+    expect(json.usage['p:k1']).toEqual({ requests_used: 2, tokens_used: 20 });
   });
 
   it('load reads previously persisted data', async () => {

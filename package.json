@@ -24,6 +24,7 @@
   "scripts": {
     "dev": "tsx src/cli.ts start --dev",
     "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
+    "check": "pnpm run build && node --check src/static/admin.js && node --check src/static/admin-ui.js",
     "start": "node dist/cli.js start",
     "init-config": "node dist/cli.js init-config",
     "prepublishOnly": "pnpm run build",
