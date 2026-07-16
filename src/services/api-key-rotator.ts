@@ -62,6 +62,8 @@ export class ApiKeyRotator {
   private runtime = new Map<string, RuntimeState>();
   private _onChange?: (key: string, patch: KeyStateChange) => void;
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  private availabilityWaiters = new Set<() => void>();
+  private disposed = false;
   private quotaGuard = new QuotaGuard();
   private usageListener: ((key: string, usage: KeyUsage, ratio: number) => void) | null = null;
 
@@ -150,6 +152,7 @@ export class ApiKeyRotator {
 
   async acquire(options: AcquireOptions = {}): Promise<KeyLease> {
     while (true) {
+      if (this.disposed) throw new Error('API Key Rotator 已释放');
       const now = Date.now();
       this.recoverExpiredDisables(now);
       if (this.allUnavailable()) {
@@ -160,7 +163,7 @@ export class ApiKeyRotator {
       }
       const key = this.pick();
       if (!key) {
-        await sleep(this.nextAcquireSleepMs(now, options.deadline));
+        await this.waitForAvailability(now, options.deadline);
         continue;
       }
       const state = this.getRuntimeState(key);
@@ -174,12 +177,24 @@ export class ApiKeyRotator {
     }
   }
 
-  private nextAcquireSleepMs(now: number, deadline?: number): number {
+  private async waitForAvailability(now: number, deadline?: number): Promise<void> {
     const nextAt = this.nextTemporaryAvailableAt(now);
-    const fallback = now + 5;
-    const wakeAt = Math.max(now + 1, Math.min(nextAt ?? fallback, fallback));
-    if (deadline == null) return wakeAt - now;
-    return Math.max(1, Math.min(wakeAt, deadline) - now);
+    // 正常情况下由 release / enable 等状态变化主动唤醒；兜底定时器用于冷却到期、lease 泄漏回收和 deadline。
+    const fallbackAt = now + 1000;
+    const deadlineAt = deadline ?? Number.POSITIVE_INFINITY;
+    const wakeAt = Math.max(now + 1, Math.min(nextAt ?? fallbackAt, deadlineAt));
+    const waitMs = Math.max(1, wakeAt - now);
+
+    await new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const finish = () => {
+        clearTimeout(timer);
+        this.availabilityWaiters.delete(finish);
+        resolve();
+      };
+      this.availabilityWaiters.add(finish);
+      timer = setTimeout(finish, waitMs);
+    });
   }
 
   private nextTemporaryAvailableAt(now: number): number | null {
@@ -195,8 +210,18 @@ export class ApiKeyRotator {
       if (state.lastSentAt != null && (state.lastSentAt + this._antiBan.min_interval_ms) > now) {
         nextAt = minNullable(nextAt, state.lastSentAt + this._antiBan.min_interval_ms);
       }
+      if (state.activeRequests >= this._antiBan.max_concurrent && state.activeLeaseStarts.length > 0) {
+        // 即使调用方遗漏 release，也要在最老 lease 到期时醒来执行 sweepLeakedLeases。
+        nextAt = minNullable(nextAt, state.activeLeaseStarts[0] + LEASE_MAX_AGE_MS);
+      }
     }
     return nextAt;
+  }
+
+  private signalAvailabilityChange(): void {
+    if (this.availabilityWaiters.size === 0) return;
+    // 状态变化可能让多个并发名额或不同 Key 同时可用，统一唤醒后由 pick 重新竞争最可靠。
+    for (const wake of Array.from(this.availabilityWaiters)) wake();
   }
 
   release(lease: KeyLease | string | undefined): void {
@@ -207,6 +232,7 @@ export class ApiKeyRotator {
     if (state.activeLeaseStarts.length > 0) {
       state.activeLeaseStarts.shift();
     }
+    this.signalAvailabilityChange();
   }
 
   // error_count 累计到阈值时把禁用状态写进 patch。markError / markRateLimited 共用，
@@ -274,6 +300,7 @@ export class ApiKeyRotator {
     if (patch.auto_disabled_at != null) this.scheduleAutoRecovery();
     // transient/network 说明当前 key 或链路刚失败过，sticky 模式继续咬住它会放大中断概率。
     this.selector.notifyKeyUnavailable(key);
+    this.signalAvailabilityChange();
   }
 
   markQuotaError(key: string, errorMessage: string): void {
@@ -293,6 +320,7 @@ export class ApiKeyRotator {
     this._onChange?.(key, patch);
     this.scheduleAutoRecovery();
     this.selector.notifyKeyUnavailable(key);
+    this.signalAvailabilityChange();
   }
 
   markRateLimited(key: string, errorMessage: string): void {
@@ -321,6 +349,7 @@ export class ApiKeyRotator {
     if (this._antiBan.sticky_on_cooldown === 'fallthrough') {
       this.selector.notifyKeyUnavailable(key);
     }
+    this.signalAvailabilityChange();
   }
 
   markSuccess(key: string): void {
@@ -340,6 +369,7 @@ export class ApiKeyRotator {
   recordUsage(key: string, requests: number, tokens: number): void {
     this.quotaGuard.recordUsage(key, requests, tokens);
     this.notifyUsage(key);
+    this.signalAvailabilityChange();
   }
 
   setUsageListener(fn: ((key: string, usage: KeyUsage, ratio: number) => void) | null): void {
@@ -353,6 +383,7 @@ export class ApiKeyRotator {
   resetUsage(key: string): void {
     this.quotaGuard.reset(key);
     this.notifyUsage(key);
+    this.signalAvailabilityChange();
   }
 
   setKeyQuota(key: string, quota: KeyQuotaConfig | null | undefined): void {
@@ -363,6 +394,7 @@ export class ApiKeyRotator {
     const effectiveQuota = quota !== undefined ? quota : this._providerQuota;
     this.quotaGuard.setQuota(key, effectiveQuota);
     this.notifyUsage(key);
+    this.signalAvailabilityChange();
   }
 
   private notifyUsage(key: string): void {
@@ -410,6 +442,7 @@ export class ApiKeyRotator {
     Object.assign(entry, patch);
     this._onChange?.(key, patch);
     this.scheduleAutoRecovery();
+    this.signalAvailabilityChange();
   }
 
   disableKey(key: string, reason?: string): void {
@@ -429,6 +462,7 @@ export class ApiKeyRotator {
     Object.assign(entry, patch);
     this._onChange?.(key, patch);
     this.scheduleAutoRecovery();
+    this.signalAvailabilityChange();
   }
 
   resetErrorCount(key: string): void {
@@ -450,6 +484,7 @@ export class ApiKeyRotator {
     Object.assign(entry, patch);
     this._onChange?.(key, patch);
     this.scheduleAutoRecovery();
+    this.signalAvailabilityChange();
   }
 
   getKeys(): ApiKeyEntry[] {
@@ -484,6 +519,9 @@ export class ApiKeyRotator {
       clearTimeout(this.recoveryTimer);
       this.recoveryTimer = null;
     }
+    // 热更新后旧 Rotator 不得继续分配 Key；先标记再唤醒，确保排队请求立即退出。
+    this.disposed = true;
+    this.signalAvailabilityChange();
     this._onChange = undefined;
     this.usageListener = null;
   }
@@ -532,8 +570,4 @@ function randomBetween(min: number, max: number): number {
 
 function minNullable(a: number | null, b: number): number {
   return a == null ? b : Math.min(a, b);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -1,4 +1,4 @@
-import { test } from 'vitest';
+import { test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import type { ApiKeyEntry, AntiBanConfig } from '../src/models.js';
 import { KeyRotationStrategy, normalizeRuntimeConfig } from '../src/models.js';
@@ -273,6 +273,34 @@ test('plain 429 delays the next use of the key without disabling it', async () =
   assert.ok(elapsed >= 20, `expected at least 20ms delay, got ${elapsed}ms`);
   assert.equal(second.key, 'key-a');
   rotator.release(second);
+});
+
+test('busy key waits on a single timer and release wakes acquire immediately', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-07-16T00:00:00Z'));
+  try {
+    const rotator = new ApiKeyRotator(
+      [keyEntry('key-a')],
+      KeyRotationStrategy.round_robin,
+      true,
+      ab({ max_concurrent: 1, min_interval_ms: 0 })
+    );
+    const first = await rotator.acquire();
+    const waiting = rotator.acquire({ deadline: Date.now() + 5000 });
+
+    // 旧实现每 5ms 重建定时器；新实现应只保留 deadline / lease 到期中的最近一个定时器。
+    await vi.advanceTimersByTimeAsync(100);
+    assert.equal(vi.getTimerCount(), 1);
+
+    rotator.release(first);
+    const second = await waiting;
+    assert.equal(second.key, 'key-a');
+    assert.equal(vi.getTimerCount(), 0);
+    rotator.release(second);
+    rotator.dispose();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test('repeated 429s reaching keyMaxErrors auto-disable the key', () => {

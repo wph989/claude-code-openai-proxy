@@ -221,4 +221,3 @@ export function openAIToAnthropicResponse(originalModel: string, data: Record<st
     }
   };
 }
-

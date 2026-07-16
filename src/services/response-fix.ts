@@ -672,4 +672,3 @@ export function transformOpenAIJsonToAnthropicJson(body: Buffer | Uint8Array): B
   };
   return Buffer.from(JSON.stringify(out), 'utf8');
 }
-

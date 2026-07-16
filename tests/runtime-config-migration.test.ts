@@ -633,6 +633,141 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
     await mgr.shutdown();
   });
 
+  it('运行时 key_max_errors 优先于环境变量阈值', async () => {
+    const cfgPath = path.join(tmp, 'runtime_models.json');
+    writeConfig(cfgPath, {
+      providers: [{
+        provider_id: 'p1',
+        provider_type: 'openai_compatible',
+        base_url: 'https://example.com',
+        api_key: [{ id: 'THRESHOLD1', key: 'sk-1' }],
+        timeout_seconds: 300,
+        enabled: true,
+        headers: {}
+      }],
+      models: [{ client_model: 'm', provider_id: 'p1', upstream_model: 'u', enabled: true }],
+      default_client_model: 'm',
+      key_max_errors: 2
+    });
+
+    const originalThreshold = settings.keyMaxErrors;
+    settings.keyMaxErrors = 9;
+    const mgr = new RuntimeConfigManager(cfgPath);
+    try {
+      await mgr.init();
+      const { rotator } = mgr.resolveModel('m');
+      rotator.markError('sk-1', 'first');
+      expect(rotator.getKeyStatuses()[0].enabled).toBe(true);
+      rotator.markError('sk-1', 'second');
+      expect(rotator.getKeyStatuses()[0].enabled).toBe(false);
+    } finally {
+      settings.keyMaxErrors = originalThreshold;
+      await mgr.shutdown();
+    }
+  });
+
+  it('KEY_AUTO_DISABLE=false 会关闭累计错误自动禁用', async () => {
+    const cfgPath = path.join(tmp, 'runtime_models.json');
+    writeConfig(cfgPath, {
+      providers: [{
+        provider_id: 'p1',
+        provider_type: 'openai_compatible',
+        base_url: 'https://example.com',
+        api_key: [{ id: 'GLOBALOFF1', key: 'sk-1' }],
+        timeout_seconds: 300,
+        enabled: true,
+        headers: {}
+      }],
+      models: [{ client_model: 'm', provider_id: 'p1', upstream_model: 'u', enabled: true }],
+      default_client_model: 'm',
+      key_max_errors: 1
+    });
+
+    const originalAutoDisable = settings.keyAutoDisable;
+    settings.keyAutoDisable = false;
+    const mgr = new RuntimeConfigManager(cfgPath);
+    try {
+      await mgr.init();
+      const { rotator } = mgr.resolveModel('m');
+      rotator.markError('sk-1', 'transient failure');
+      const [state] = rotator.getKeyStatuses();
+      expect(state.enabled).toBe(true);
+      expect(state.error_count).toBe(1);
+      expect(state.auto_disabled_at).toBeNull();
+    } finally {
+      settings.keyAutoDisable = originalAutoDisable;
+      await mgr.shutdown();
+    }
+  });
+
+  it('Admin Key 操作将供应商和索引错误返回为 400', async () => {
+    const cfgPath = path.join(tmp, 'runtime_models.json');
+    writeConfig(cfgPath, {
+      providers: [{
+        provider_id: 'p1',
+        provider_type: 'openai_compatible',
+        base_url: 'https://example.com',
+        api_key: [{ id: 'ADMINERR01', key: 'sk-1' }],
+        timeout_seconds: 300,
+        enabled: true,
+        headers: {}
+      }],
+      models: [],
+      default_client_model: null
+    });
+
+    const app = await createApp(cfgPath);
+    try {
+      const cookies = { [settings.adminCookieName]: settings.adminAuthToken };
+      const missingProvider = await app.inject({
+        method: 'PUT',
+        url: '/api/keys/missing/0/enable',
+        cookies
+      });
+      expect(missingProvider.statusCode).toBe(400);
+      expect(missingProvider.json().message).toContain('未找到供应商');
+
+      const invalidIndex = await app.inject({
+        method: 'DELETE',
+        url: '/api/keys/p1/99',
+        cookies
+      });
+      expect(invalidIndex.statusCode).toBe(400);
+      expect(invalidIndex.json().message).toContain('无效的 key 索引');
+    } finally {
+      await app.runtimeConfigManager.shutdown();
+      await app.close();
+    }
+  });
+
+  it('Admin 保存非法配置时返回 400，并保留可读错误信息', async () => {
+    const cfgPath = path.join(tmp, 'runtime_models.json');
+    writeConfig(cfgPath, {
+      providers: [],
+      models: [],
+      default_client_model: null
+    });
+
+    const app = await createApp(cfgPath);
+    try {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/api/config',
+        cookies: { [settings.adminCookieName]: settings.adminAuthToken },
+        payload: {
+          providers: [],
+          models: [{ client_model: 'm', provider_id: 'missing', upstream_model: 'u' }],
+          default_client_model: 'm'
+        }
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json().message).toContain('不存在的 provider_id');
+    } finally {
+      await app.runtimeConfigManager.shutdown();
+      await app.close();
+    }
+  });
+
   it('自动禁用 Key 时会把未达阈值的内存配额写入 usage 文件', async () => {
     const cfgPath = path.join(tmp, 'runtime_models.json');
     writeConfig(cfgPath, {

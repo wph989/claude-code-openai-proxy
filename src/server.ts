@@ -11,7 +11,7 @@ import { registerMessageRoutes } from './routes/messages.js';
 import { createId } from './utils/id.js';
 import { log, configureLogger, flushLogs } from './utils/logger.js';
 import { AuthError } from './auth.js';
-import { AdminError } from './routes/admin.js';
+import { ClientInputError } from './errors.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -61,8 +61,8 @@ export async function createApp(configPath = settings.configFile): Promise<Fasti
       void reply.code(error.statusCode).send(error.body);
       return;
     }
-    if (error instanceof AdminError) {
-      void reply.code(400).send({ message: error.message });
+    if (error instanceof ClientInputError) {
+      void reply.code(error.statusCode).send({ message: error.message });
       return;
     }
     const err = error instanceof Error ? error : new Error(String(error));

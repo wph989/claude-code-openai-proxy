@@ -4,16 +4,8 @@ import { fileURLToPath } from 'node:url';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { adminAuthHook, getExpectedAdminToken, isValidAdminToken } from '../auth.js';
 import { settings } from '../config.js';
+import { AdminError } from '../errors.js';
 import type { RuntimeConfig, KeyQuotaConfig } from '../models.js';
-
-/**
- * Admin 路由业务错误，由 Fastify errorHandler 统一返回 400。
- */
-export class AdminError extends Error {
-  constructor(message: string) {
-    super(message);
-  }
-}
 
 function parseKeyIndex(params: Record<string, string>): number {
   const idx = parseInt(params.keyIndex, 10);
@@ -160,10 +152,10 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/keys/:providerId', api, async (request) => {
     const { providerId } = request.params as { providerId: string };
-    const body = (request.body || {}) as { keys?: string[]; key?: string };
+    const body = (request.body || {}) as { keys?: unknown; key?: unknown };
     const keyValues = body.keys || (body.key ? [body.key] : []);
-    if (!Array.isArray(keyValues) || keyValues.length === 0) {
-      throw new AdminError('至少需要一个 Key 值。');
+    if (!Array.isArray(keyValues) || keyValues.length === 0 || keyValues.some((value) => typeof value !== 'string')) {
+      throw new AdminError('至少需要一个有效的 Key 字符串。');
     }
     const result = await app.runtimeConfigManager.addKeys(providerId, keyValues);
     const addedCount = result.added.length;

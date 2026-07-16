@@ -285,7 +285,7 @@ body {
   text-transform: none;
 }
 
-/* Info tooltip (ⓘ hover) */
+/* 配置说明提示：同时支持鼠标、键盘焦点和触屏点击。 */
 .info-tip {
   position: relative;
   display: inline-flex; align-items: center; justify-content: center;
@@ -293,14 +293,17 @@ body {
   border: 1px solid var(--border-light); border-radius: 50%;
   color: var(--text-dim); font-size: 10px; font-style: normal;
   font-family: "Source Sans 3", sans-serif; line-height: 1;
-  cursor: help; vertical-align: middle; user-select: none;
+  cursor: help; vertical-align: middle; user-select: none; outline: none;
 }
-.info-tip:hover { color: var(--text); border-color: var(--border-focus); }
+.info-tip:hover, .info-tip:focus-visible, .info-tip.is-open {
+  color: var(--text); border-color: var(--border-focus);
+}
+.info-tip:focus-visible { box-shadow: 0 0 0 3px rgba(255,255,255,0.08); }
 .info-tip::after {
   content: attr(data-tip);
   position: absolute; bottom: calc(100% + 8px); left: 50%;
   transform: translateX(-50%);
-  width: max-content; max-width: 300px;
+  width: max-content; max-width: min(300px, calc(100vw - 32px));
   padding: 10px 12px;
   background: var(--bg-elevated); color: var(--text-muted);
   border: 1px solid var(--border-light); border-radius: 6px;
@@ -310,7 +313,7 @@ body {
   opacity: 0; pointer-events: none; transition: opacity 0.15s;
   z-index: 100;
 }
-.info-tip:hover::after { opacity: 1; }
+.info-tip:hover::after, .info-tip:focus-visible::after, .info-tip.is-open::after { opacity: 1; }
 
 /* ── Unified field layout (防封策略) ── */
 .field-grid {
@@ -393,7 +396,7 @@ body {
   font-size: 12px; font-weight: 600; color: var(--text-muted);
   letter-spacing: 0.04em; margin-bottom: 14px;
 }
-.model-filter-bar input { flex: 1; max-width: 340px; }
+.model-filter-bar input { flex: 1; min-width: 0; max-width: 340px; }
 .model-filter-bar select { width: 200px; }
 
 /* ── Table ── */
@@ -600,6 +603,8 @@ input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--accent);
   .config-row { grid-template-columns: 1fr; gap: 16px; }
   .header-content { flex-wrap: wrap; padding: 12px 16px; }
   .main-content { padding-left: 16px; padding-right: 16px; }
+  .model-filter-bar { flex-direction: column; align-items: stretch; }
+  .model-filter-bar input, .model-filter-bar select { width: 100%; max-width: none; }
   .data-table { font-size: 12px; }
   .data-table th, .data-table td { padding: 10px 12px; }
 }

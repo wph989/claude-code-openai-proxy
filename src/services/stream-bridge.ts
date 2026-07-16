@@ -333,4 +333,3 @@ async function* iterateSse(response: Response, idleTimeoutMs: number, clientAbor
     reader.cancel().catch(() => { });
   }
 }
-

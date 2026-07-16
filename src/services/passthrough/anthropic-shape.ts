@@ -42,4 +42,3 @@ export function extractAnthropicUsageTokens(value: unknown): number {
   if (!isPlainObject(value)) return 0;
   return toNonNegInt(value.input_tokens) + toNonNegInt(value.output_tokens);
 }
-

@@ -238,6 +238,47 @@ const Theme = {
 };
 
 // ── Helpers ──
+function setInfoTipOpen(tip, open) {
+  tip.classList.toggle('is-open', open);
+  tip.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function closeInfoTips(except = null) {
+  document.querySelectorAll('.info-tip.is-open').forEach((tip) => {
+    if (tip !== except) setInfoTipOpen(tip, false);
+  });
+}
+
+function enhanceInfoTips(root = document) {
+  root.querySelectorAll('.info-tip').forEach((tip) => {
+    if (tip.dataset.enhanced === 'true') return;
+    const description = tip.dataset.tip || '查看配置说明';
+    // 旧标记仍使用 i 元素；补齐 button 语义和键盘行为，避免一次性改动大量静态及动态模板。
+    tip.dataset.enhanced = 'true';
+    tip.setAttribute('role', 'button');
+    tip.setAttribute('tabindex', '0');
+    tip.setAttribute('aria-label', `配置说明：${description}`);
+    tip.setAttribute('aria-expanded', 'false');
+    tip.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const nextOpen = !tip.classList.contains('is-open');
+      closeInfoTips(tip);
+      setInfoTipOpen(tip, nextOpen);
+    });
+    tip.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        tip.click();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        setInfoTipOpen(tip, false);
+      }
+    });
+    tip.addEventListener('blur', () => setInfoTipOpen(tip, false));
+  });
+}
+
 function setStatus(text, isError) {
   statusBox.textContent = text;
   statusBox.className = 'status-bar ' + (isError ? 'error' : (text.includes('...') ? 'loading' : 'success'));
@@ -1242,6 +1283,7 @@ function openModal(tab, idx) {
   } else {
     modalBody.innerHTML = modelFormHtml(item);
   }
+  enhanceInfoTips(modalBody);
   modalOverlay.classList.add('open');
 }
 
@@ -1536,6 +1578,8 @@ antiBanQuotaUsageFileInput.addEventListener('input', updatePreview);
 
 // ── Init ──
 Theme.init();
+enhanceInfoTips();
+document.addEventListener('click', () => closeInfoTips());
 const themeToggleBtn = document.getElementById('themeToggleBtn');
 if (themeToggleBtn) {
   themeToggleBtn.addEventListener('click', () => Theme.toggle());

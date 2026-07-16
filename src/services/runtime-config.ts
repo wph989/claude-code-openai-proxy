@@ -1,5 +1,6 @@
 import { settings } from '../config.js';
 import { setRuntimeProxyToken } from '../auth.js';
+import { RuntimeConfigError } from '../errors.js';
 import { ApiKeyRotator, type KeyStateChange } from './api-key-rotator.js';
 import { resolveAntiBanConfig, type ResolvedAntiBan } from './anti-ban-config.js';
 import type { UsageStore } from './usage-store.js';
@@ -167,7 +168,13 @@ export class RuntimeConfigManager {
 
   async saveConfig(raw: RuntimeConfig): Promise<RuntimeConfig> {
     await this.flushRuntimeStores();
-    const validated = validateRuntimeConfig(raw);
+    let validated: RuntimeConfig;
+    try {
+      validated = validateRuntimeConfig(raw);
+    } catch (error) {
+      // Admin 提交的配置校验失败属于客户端输入问题；只在保存边界转换，启动加载失败仍走原有恢复流程。
+      throw new RuntimeConfigError(error instanceof Error ? error.message : '运行时配置无效。');
+    }
 
     if (!this.stateStore) await this.initStateStore();
     // 来自 admin 的 payload 通常不含运行态字段，但保险起见仍走一次合并；同时把 admin 改的 enabled / quota 等带回内存。
@@ -281,7 +288,10 @@ export class RuntimeConfigManager {
     if (existing && keysEqual(existing.keys, keys) && existing.strategy === strategy && antiBanEqual(existing.antiBan, antiBan)) {
       return existing;
     }
-    const rotator = new ApiKeyRotator(keys, strategy, autoDisable, antiBan, providerQuota, settings.keyMaxErrors, provider?.auto_recover_minutes ?? 0);
+    // 运行时配置优先于环境变量；全局开关是总闸，供应商只能在总闸开启时进一步关闭自身自动禁用。
+    const keyMaxErrors = this.config.key_max_errors ?? settings.keyMaxErrors;
+    const effectiveAutoDisable = settings.keyAutoDisable && autoDisable;
+    const rotator = new ApiKeyRotator(keys, strategy, effectiveAutoDisable, antiBan, providerQuota, keyMaxErrors, provider?.auto_recover_minutes ?? 0);
     rotator.onChange = (key, patch) => this.onKeyStateChange(providerId, key, patch);
     this.attachUsageBridge(providerId, rotator);
     this.rotators.set(providerId, rotator);
@@ -403,12 +413,12 @@ export class RuntimeConfigManager {
 
   async updateKeyState(providerId: string, keyIndex: number, patch: Partial<ApiKeyEntry>): Promise<void> {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
-    if (!provider) throw new Error(`未找到供应商：${providerId}`);
+    if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
 
     // 确保 api_key 已归一化为数组
     const keys = resolveApiKeys(provider);
     if (keyIndex < 0 || keyIndex >= keys.length) {
-      throw new Error(`无效的 key 索引：${keyIndex}`);
+      throw new RuntimeConfigError(`无效的 key 索引：${keyIndex}`);
     }
 
     // 直接修改 entry（rotator._keys 指向同一数组，自动同步）
@@ -420,10 +430,10 @@ export class RuntimeConfigManager {
 
   private getRotatorAndKey(providerId: string, keyIndex: number): { rotator: ApiKeyRotator; key: string } {
     const rotator = this.rotators.get(providerId);
-    if (!rotator) throw new Error(`未找到供应商的 rotator：${providerId}`);
+    if (!rotator) throw new RuntimeConfigError(`未找到供应商的 rotator：${providerId}`);
     const keys = rotator.getKeys();
     if (keyIndex < 0 || keyIndex >= keys.length) {
-      throw new Error(`无效的 key 索引：${keyIndex}`);
+      throw new RuntimeConfigError(`无效的 key 索引：${keyIndex}`);
     }
     return { rotator, key: keys[keyIndex].key };
   }
@@ -459,15 +469,15 @@ export class RuntimeConfigManager {
 
   async updateKeyQuota(providerId: string, keyIndex: number, quota: KeyQuotaConfig | null | undefined): Promise<void> {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
-    if (!provider) throw new Error(`未找到供应商：${providerId}`);
+    if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
 
     // 直接从配置中获取 Key 数组（不要创建新数组）
     if (!Array.isArray(provider.api_key)) {
-      throw new Error(`供应商 ${providerId} 的 api_key 不是数组`);
+      throw new RuntimeConfigError(`供应商 ${providerId} 的 api_key 不是数组`);
     }
 
     if (keyIndex < 0 || keyIndex >= provider.api_key.length) {
-      throw new Error(`无效的 key 索引：${keyIndex}`);
+      throw new RuntimeConfigError(`无效的 key 索引：${keyIndex}`);
     }
 
     // 直接修改配置中的 quota（保持 undefined / null / {...} 语义）
@@ -485,15 +495,15 @@ export class RuntimeConfigManager {
 
   async addKey(providerId: string, keyValue: string): Promise<ApiKeyEntry> {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
-    if (!provider) throw new Error(`未找到供应商：${providerId}`);
+    if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
 
     const trimmed = keyValue.trim();
-    if (!trimmed) throw new Error('Key 值不能为空');
+    if (!trimmed) throw new RuntimeConfigError('Key 值不能为空');
 
     // 确保 api_key 已归一化为数组
     const keys = resolveApiKeys(provider);
     if (keys.some((k) => k.key === trimmed)) {
-      throw new Error('该 Key 已存在');
+      throw new RuntimeConfigError('该 Key 已存在');
     }
 
     const newKey: ApiKeyEntry = {
@@ -519,7 +529,7 @@ export class RuntimeConfigManager {
 
   async resetAllKeys(providerId: string): Promise<number> {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
-    if (!provider) throw new Error(`未找到供应商：${providerId}`);
+    if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
 
     const rotator = this.rotators.get(providerId);
     const keys = rotator ? rotator.getKeys() : resolveApiKeys(provider);
@@ -549,7 +559,7 @@ export class RuntimeConfigManager {
 
   async addKeys(providerId: string, keyValues: string[]): Promise<{ added: string[]; skipped: string[] }> {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
-    if (!provider) throw new Error(`未找到供应商：${providerId}`);
+    if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
 
     // 确保 api_key 已归一化为数组
     const keys = resolveApiKeys(provider);
@@ -591,12 +601,12 @@ export class RuntimeConfigManager {
 
   async deleteKey(providerId: string, keyIndex: number): Promise<void> {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
-    if (!provider) throw new Error(`未找到供应商：${providerId}`);
+    if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
 
     // 确保 api_key 已归一化为数组
     const keys = resolveApiKeys(provider);
     if (keyIndex < 0 || keyIndex >= keys.length) {
-      throw new Error(`无效的 key 索引：${keyIndex}`);
+      throw new RuntimeConfigError(`无效的 key 索引：${keyIndex}`);
     }
 
     const removed = keys[keyIndex];
