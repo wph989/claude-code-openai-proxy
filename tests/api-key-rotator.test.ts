@@ -323,6 +323,30 @@ test('auto_recover_minutes re-enables a key once the recovery window has elapsed
   rotator.release(lease);
 });
 
+test('auto_recover_minutes restores a key on time without waiting for a new acquire', async () => {
+  const rotator = new ApiKeyRotator(
+    [keyEntry('key-a')],
+    KeyRotationStrategy.round_robin,
+    true,
+    ab(),
+    null,
+    3,
+    0.001
+  );
+  let recoveredByTimer = false;
+  rotator.onChange = (_key, patch) => {
+    if (patch.enabled === true && patch.auto_disabled_at === null) recoveredByTimer = true;
+  };
+
+  for (let i = 0; i < 3; i++) rotator.markError('key-a', 'boom', 'transient');
+  await sleep(80);
+
+  // 先检查回调，避免 getKeyStatuses 的兜底扫描掩盖定时器没有执行的问题。
+  assert.equal(recoveredByTimer, true, 'recovery timer should enable the key without incoming traffic');
+  assert.equal(rotator.getKeyStatuses()[0].enabled, true);
+  rotator.dispose();
+});
+
 test('auto_recover_minutes does not re-enable a manually disabled key', async () => {
   const rotator = new ApiKeyRotator(
     [keyEntry('key-a'), keyEntry('key-b')],
@@ -341,6 +365,28 @@ test('auto_recover_minutes does not re-enable a manually disabled key', async ()
   assert.equal(lease.key, 'key-b', 'only key-b should be available; key-a stays manually disabled');
   assert.equal(rotator.getKeyStatuses().find((s) => s.key === 'key-a')!.enabled, false);
   rotator.release(lease);
+});
+
+test('manual disable clears a previous auto-disable marker and cancels timed recovery', async () => {
+  const rotator = new ApiKeyRotator(
+    [keyEntry('key-a')],
+    KeyRotationStrategy.round_robin,
+    true,
+    ab(),
+    null,
+    1,
+    0.001
+  );
+  rotator.markError('key-a', 'boom', 'transient');
+  assert.equal(rotator.getKeyStatuses()[0].auto_disabled_at == null, false);
+
+  rotator.disableKey('key-a', 'manual off');
+  await sleep(80);
+
+  const [state] = rotator.getKeyStatuses();
+  assert.equal(state.enabled, false);
+  assert.equal(state.auto_disabled_at, null);
+  rotator.dispose();
 });
 
 test('acquire rejects when only temporarily delayed keys exceed the deadline', async () => {

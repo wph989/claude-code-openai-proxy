@@ -285,6 +285,59 @@ body {
   text-transform: none;
 }
 
+/* Info tooltip (ⓘ hover) */
+.info-tip {
+  position: relative;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px;
+  border: 1px solid var(--border-light); border-radius: 50%;
+  color: var(--text-dim); font-size: 10px; font-style: normal;
+  font-family: "Source Sans 3", sans-serif; line-height: 1;
+  cursor: help; vertical-align: middle; user-select: none;
+}
+.info-tip:hover { color: var(--text); border-color: var(--border-focus); }
+.info-tip::after {
+  content: attr(data-tip);
+  position: absolute; bottom: calc(100% + 8px); left: 50%;
+  transform: translateX(-50%);
+  width: max-content; max-width: 300px;
+  padding: 10px 12px;
+  background: var(--bg-elevated); color: var(--text-muted);
+  border: 1px solid var(--border-light); border-radius: 6px;
+  font-size: 12px; font-weight: 400; line-height: 1.5;
+  letter-spacing: normal; text-align: left; white-space: normal;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+  opacity: 0; pointer-events: none; transition: opacity 0.15s;
+  z-index: 100;
+}
+.info-tip:hover::after { opacity: 1; }
+
+/* ── Unified field layout (防封策略) ── */
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 18px 20px;
+}
+.field { display: flex; flex-direction: column; min-width: 0; }
+.field.field-wide { grid-column: 1 / -1; }
+.field-head {
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 7px; margin-bottom: 9px; min-height: 18px;
+}
+.field-name {
+  font-size: 12px; font-weight: 600; color: var(--text-muted);
+  letter-spacing: 0.02em; text-transform: none;
+}
+.field-unit {
+  font-size: 10px; color: var(--text-dim);
+  letter-spacing: 0.05em; text-transform: none;
+}
+.field > input, .field > select {
+  width: 100%; padding: 10px 12px; font-size: 13px;
+}
+.field .field-key { font-size: 9px; padding: 1px 5px; }
+.field .checkbox-inline-group { padding: 2px 0 0; }
+
 /* Sub-section inside cards (used by 防封策略) */
 .config-section { padding: 24px 0; border-top: 1px solid var(--border); }
 .config-section:first-child { padding-top: 4px; border-top: none; }
@@ -302,24 +355,6 @@ body {
 .config-section-title > .ssec-meta {
   font-size: 12px; color: var(--text-dim); font-weight: 300; letter-spacing: 0.03em;
 }
-
-/* Form grid variants */
-.form-grid.cols-3 { grid-template-columns: repeat(3, 1fr); gap: 16px; }
-.form-grid.cols-4 { grid-template-columns: repeat(4, 1fr); gap: 16px; }
-.form-grid.cols-3 .form-group,
-.form-grid.cols-4 .form-group { margin-bottom: 0; }
-.form-grid.cols-3 .form-group input,
-.form-grid.cols-4 .form-group input,
-.form-grid.cols-3 .form-group select,
-.form-grid.cols-4 .form-group select {
-  padding: 10px 12px; font-size: 13px;
-}
-.form-grid.cols-3 .form-label,
-.form-grid.cols-4 .form-label { font-size: 11px; }
-.form-grid.cols-3 .form-label-row,
-.form-grid.cols-4 .form-label-row { margin-bottom: 6px; gap: 6px; }
-.form-grid.cols-3 .field-key,
-.form-grid.cols-4 .field-key { font-size: 9px; padding: 1px 4px; }
 
 /* Inline checkbox group */
 .checkbox-inline-group {
@@ -339,6 +374,27 @@ body {
 .tab-btn:hover { color: var(--text); }
 .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
 .tab-count { font-size: 12px; color: var(--text-dim); margin-left: 6px; }
+
+/* ── Model filter ── */
+.model-filter-bar {
+  display: flex; gap: 12px; align-items: center;
+  padding: 16px 20px; margin-top: 16px;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+}
+.model-filter-bar .filter-label { font-size: 12px; color: var(--text-muted); letter-spacing: 0.03em; white-space: nowrap; }
+
+/* ── Grouped fields (modal fieldset) ── */
+.field-fieldset {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 16px 18px; margin-bottom: 18px;
+  background: rgba(255,255,255,0.015);
+}
+.field-fieldset-title {
+  font-size: 12px; font-weight: 600; color: var(--text-muted);
+  letter-spacing: 0.04em; margin-bottom: 14px;
+}
+.model-filter-bar input { flex: 1; max-width: 340px; }
+.model-filter-bar select { width: 200px; }
 
 /* ── Table ── */
 .table-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 20px 28px; border-bottom: 1px solid var(--border); }
@@ -361,6 +417,9 @@ body {
 .data-table .col-id { font-weight: 500; min-width: 140px; }
 .data-table .col-url { font-family: "JetBrains Mono", "SF Mono", Consolas, monospace; font-size: 13px; color: var(--text-muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .data-table .col-strategy { font-size: 13px; }
+.strategy-cell { display: flex; flex-direction: column; gap: 5px; align-items: flex-start; }
+.strategy-cell .strategy-name { font-size: 13px; color: var(--text); }
+.strategy-cell .badge { font-size: 10px; }
 .data-table .col-model { font-weight: 500; }
 .data-table .col-actions { white-space: nowrap; text-align: right; }
 .badge {
@@ -455,7 +514,7 @@ body {
 .modal-overlay.open { opacity: 1; pointer-events: auto; }
 .modal {
   background: var(--bg-card); border: 1px solid var(--border);
-  width: 640px; max-width: 95vw; max-height: 85vh;
+  width: 820px; max-width: calc(100vw - 32px); max-height: 85vh;
   overflow-y: auto; border-radius: 6px;
   box-shadow: 0 20px 60px rgba(0,0,0,0.5);
 }

@@ -589,6 +589,50 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
     await mgr.shutdown();
   });
 
+  it('启动时会按时间恢复昨天自动禁用的 Key 并清理持久化状态', async () => {
+    const cfgPath = path.join(tmp, 'runtime_models.json');
+    writeConfig(cfgPath, {
+      providers: [{
+        provider_id: 'p1',
+        provider_type: 'openai_compatible',
+        base_url: 'https://example.com',
+        api_key: [{ id: 'RECOVER001', key: 'sk-1' }],
+        auto_recover_minutes: 60,
+        timeout_seconds: 300,
+        enabled: true,
+        headers: {}
+      }],
+      models: [],
+      default_client_model: null
+    });
+
+    const statePath = path.join(tmp, 'runtime_state.json');
+    writeFileSync(statePath, JSON.stringify({
+      version: 2,
+      updated_at: Math.floor(Date.now() / 1000) - 86_400,
+      states: {
+        'p1:RECOVER001': {
+          error_count: 5,
+          auto_disabled_at: Date.now() - 86_400_000,
+          last_error_at: Date.now() - 86_400_000,
+          last_error_message: 'yesterday failure'
+        }
+      }
+    }), 'utf-8');
+
+    const mgr = new RuntimeConfigManager(cfgPath);
+    await mgr.init();
+
+    await vi.waitFor(() => {
+      const persisted = JSON.parse(readFileSync(statePath, 'utf-8'));
+      expect(persisted.states['p1:RECOVER001'].auto_disabled_at).toBeNull();
+      expect(persisted.states['p1:RECOVER001'].error_count).toBe(0);
+    });
+    expect(mgr.getKeyStates('p1')[0].enabled).toBe(true);
+
+    await mgr.shutdown();
+  });
+
   it('自动禁用 Key 时会把未达阈值的内存配额写入 usage 文件', async () => {
     const cfgPath = path.join(tmp, 'runtime_models.json');
     writeConfig(cfgPath, {

@@ -47,6 +47,7 @@ interface RuntimeState {
 // 单个 lease 最长存活时间：超过此值认为是 release 调用泄漏，强制释放。
 // 默认 10 分钟，覆盖最长正常流式请求；设过短会误杀慢请求，设过长会让泄漏 lease 卡住更久。
 const LEASE_MAX_AGE_MS = 10 * 60 * 1000;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 export class ApiKeyRotator {
   private _keys: ApiKeyEntry[];
@@ -60,6 +61,7 @@ export class ApiKeyRotator {
   private selector: KeySelector;
   private runtime = new Map<string, RuntimeState>();
   private _onChange?: (key: string, patch: KeyStateChange) => void;
+  private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private quotaGuard = new QuotaGuard();
   private usageListener: ((key: string, usage: KeyUsage, ratio: number) => void) | null = null;
 
@@ -79,6 +81,7 @@ export class ApiKeyRotator {
       const effectiveQuota = k.quota !== undefined ? k.quota : this._providerQuota;
       this.quotaGuard.setQuota(k.key, effectiveQuota);
     }
+    this.scheduleAutoRecovery();
   }
 
   private resolveSelectionMode(): 'sticky' | 'balanced' {
@@ -215,9 +218,8 @@ export class ApiKeyRotator {
     }
   }
 
-  // 惰性自动恢复：把「自动禁用（auto_disabled_at 非空）且已过恢复时长」的 key 重新启用。
-  // 不用常驻定时器——没流量时恢复没有意义，acquire 每轮开头扫一遍即可，一旦有请求进来立即生效。
-  // 只碰自动禁用的 key；手动禁用（仅 disabled_at）不动。恢复后若立刻再失败会重新累计禁用，可自我修正。
+  // 自动恢复只碰带 auto_disabled_at 的 Key；手动禁用会清掉该标记，因此不会被定时任务误恢复。
+  // acquire 和状态查询仍会补做一次到期检查，避免事件循环繁忙导致定时器延迟时返回过期状态。
   private recoverExpiredDisables(now: number): void {
     if (this._autoRecoverMs <= 0) return;
     for (const entry of this._keys) {
@@ -226,6 +228,32 @@ export class ApiKeyRotator {
       if (now - entry.auto_disabled_at < this._autoRecoverMs) continue;
       this.enableKey(entry.key);
     }
+  }
+
+  private scheduleAutoRecovery(): void {
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = null;
+    }
+    if (this._autoRecoverMs <= 0) return;
+
+    let nextRecoveryAt: number | null = null;
+    for (const entry of this._keys) {
+      if (entry.enabled || entry.auto_disabled_at == null) continue;
+      const recoveryAt = entry.auto_disabled_at + this._autoRecoverMs;
+      nextRecoveryAt = nextRecoveryAt == null ? recoveryAt : Math.min(nextRecoveryAt, recoveryAt);
+    }
+    if (nextRecoveryAt == null) return;
+
+    // Node 的 setTimeout 最长约 24.8 天；更长的恢复窗口分段唤醒，避免溢出后立即执行。
+    const delay = Math.min(Math.max(0, nextRecoveryAt - Date.now()), MAX_TIMER_DELAY_MS);
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = null;
+      this.recoverExpiredDisables(Date.now());
+      this.scheduleAutoRecovery();
+    }, delay);
+    // 自动恢复定时器不应单独阻止服务正常退出。
+    this.recoveryTimer.unref?.();
   }
 
   markError(key: string, errorMessage: string, category: KeyErrorCategory = 'transient'): void {
@@ -243,6 +271,7 @@ export class ApiKeyRotator {
 
     Object.assign(entry, patch);
     this._onChange?.(key, patch);
+    if (patch.auto_disabled_at != null) this.scheduleAutoRecovery();
     // transient/network 说明当前 key 或链路刚失败过，sticky 模式继续咬住它会放大中断概率。
     this.selector.notifyKeyUnavailable(key);
   }
@@ -262,6 +291,7 @@ export class ApiKeyRotator {
     this.getRuntimeState(key).lastErrorCategory = 'hard_limit';
     Object.assign(entry, patch);
     this._onChange?.(key, patch);
+    this.scheduleAutoRecovery();
     this.selector.notifyKeyUnavailable(key);
   }
 
@@ -287,6 +317,7 @@ export class ApiKeyRotator {
     this.applyAutoDisable(entry, patch, now);
     Object.assign(entry, patch);
     this._onChange?.(key, patch);
+    if (patch.auto_disabled_at != null) this.scheduleAutoRecovery();
     if (this._antiBan.sticky_on_cooldown === 'fallthrough') {
       this.selector.notifyKeyUnavailable(key);
     }
@@ -349,6 +380,7 @@ export class ApiKeyRotator {
   }
 
   allUnavailable(): boolean {
+    this.recoverExpiredDisables(Date.now());
     if (this._keys.length === 0) return true;
     // 只统计「永久不可用」（禁用 / 配额阻塞）：冷却中属于临时状态，acquire 会等到期后重试，
     // 不能算作彻底没 key，否则 acquire 会在冷却窗口内直接抛错而非等待。
@@ -377,6 +409,7 @@ export class ApiKeyRotator {
     state.lastErrorCategory = null;
     Object.assign(entry, patch);
     this._onChange?.(key, patch);
+    this.scheduleAutoRecovery();
   }
 
   disableKey(key: string, reason?: string): void {
@@ -384,7 +417,9 @@ export class ApiKeyRotator {
     if (!entry) return;
     const patch: KeyStateChange = {
       enabled: false,
-      disabled_at: Date.now()
+      disabled_at: Date.now(),
+      // 用户主动禁用后必须取消自动恢复资格，否则旧的自动禁用时间会把它再次启用。
+      auto_disabled_at: null
     };
     if (reason) {
       patch.last_error_at = Date.now();
@@ -393,6 +428,7 @@ export class ApiKeyRotator {
     }
     Object.assign(entry, patch);
     this._onChange?.(key, patch);
+    this.scheduleAutoRecovery();
   }
 
   resetErrorCount(key: string): void {
@@ -413,6 +449,7 @@ export class ApiKeyRotator {
     state.activeLeaseStarts = [];
     Object.assign(entry, patch);
     this._onChange?.(key, patch);
+    this.scheduleAutoRecovery();
   }
 
   getKeys(): ApiKeyEntry[] {
@@ -421,6 +458,7 @@ export class ApiKeyRotator {
 
   getKeyStatuses(): KeyRuntimeStatus[] {
     const now = Date.now();
+    this.recoverExpiredDisables(now);
     return this._keys.map((entry) => {
       const state = this.getRuntimeState(entry.key);
       const delayed = entry.enabled && state.nextAvailableAt != null && state.nextAvailableAt > now;
@@ -439,6 +477,15 @@ export class ApiKeyRotator {
         quota_reason: snap.reason
       };
     });
+  }
+
+  dispose(): void {
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = null;
+    }
+    this._onChange = undefined;
+    this.usageListener = null;
   }
 
   private entryFor(key: string): ApiKeyEntry | undefined {

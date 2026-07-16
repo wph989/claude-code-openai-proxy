@@ -289,6 +289,8 @@ export class RuntimeConfigManager {
   }
 
   private rebuildRotators(): void {
+    // 配置重载后旧 rotator 不再可达，先释放其自动恢复定时器，避免修改已经淘汰的 Key 引用。
+    for (const rotator of this.rotators.values()) rotator.dispose();
     this.rotators.clear();
     for (const provider of this.config.providers) {
       const apiKeys = resolveApiKeys(provider);

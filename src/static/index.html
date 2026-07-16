@@ -96,15 +96,6 @@
             <select id="defaultClientModel"><option value="">未设置</option></select>
           </div>
         </div>
-        <div class="config-row">
-          <div>
-            <span class="form-label">Key 自动禁用阈值 <span class="field-key">key_max_errors</span></span>
-            <p class="form-hint">API Key 累计错误达到此次数后自动禁用（需开启自动禁用功能）。0 或不填则使用环境变量 KEY_MAX_ERRORS 的值（默认 5）。</p>
-          </div>
-          <div>
-            <input id="keyMaxErrors" type="number" min="1" placeholder="默认 5" />
-          </div>
-        </div>
       </div>
     </div>
 
@@ -122,40 +113,29 @@
             <span class="ssec-title">基础节流</span>
             <span class="ssec-meta">每个 Key 的并发、间隔与 429 后退避</span>
           </div>
-          <div class="config-row">
-            <div>
-              <span class="form-label">防封模式 <span class="field-key">mode</span></span>
-              <p class="form-hint">全局默认预设。供应商可在 JSON 中用 anti_ban 覆盖。</p>
-            </div>
-            <div>
+          <div class="field-grid">
+            <div class="field">
+              <div class="field-head"><span class="field-name">防封模式</span><span class="field-key">mode</span><i class="info-tip" data-tip="全局默认预设。保守模式并发低、间隔大，适合易封号的供应商；吞吐模式更激进。单个供应商可在 JSON 里用 anti_ban 覆盖。">i</i></div>
               <select id="antiBanMode">
                 <option value="conservative">保守模式（默认）</option>
                 <option value="throughput">吞吐模式</option>
               </select>
             </div>
-          </div>
-          <div class="config-row">
-            <div>
-              <span class="form-label">Key 限流参数</span>
-              <p class="form-hint">控制每个 Key 的并发、最小请求间隔，以及 429 后的随机延迟范围。</p>
+            <div class="field">
+              <div class="field-head"><span class="field-name">最大并发</span><span class="field-key">max_concurrent</span><i class="info-tip" data-tip="单个 Key 允许的最大并发请求数。设为 1 表示同一 Key 串行发请求，最不容易触发风控。">i</i></div>
+              <input id="antiBanMaxConcurrent" type="number" min="1" placeholder="1" />
             </div>
-            <div class="form-grid cols-4">
-              <div class="form-group">
-                <div class="form-label-row"><span class="form-label">最大并发</span><span class="field-key">max_concurrent</span></div>
-                <input id="antiBanMaxConcurrent" type="number" min="1" placeholder="1" />
-              </div>
-              <div class="form-group">
-                <div class="form-label-row"><span class="form-label">最小间隔</span><span class="field-key">min_interval_ms</span><span class="form-label-unit">ms</span></div>
-                <input id="antiBanMinInterval" type="number" min="0" placeholder="1000" />
-              </div>
-              <div class="form-group">
-                <div class="form-label-row"><span class="form-label">429 退避下限</span><span class="field-key">delay_min</span><span class="form-label-unit">ms</span></div>
-                <input id="antiBanDelayMin" type="number" min="0" placeholder="5000" />
-              </div>
-              <div class="form-group">
-                <div class="form-label-row"><span class="form-label">429 退避上限</span><span class="field-key">delay_max</span><span class="form-label-unit">ms</span></div>
-                <input id="antiBanDelayMax" type="number" min="0" placeholder="10000" />
-              </div>
+            <div class="field">
+              <div class="field-head"><span class="field-name">最小间隔</span><span class="field-key">min_interval_ms</span><span class="field-unit">ms</span><i class="info-tip" data-tip="同一个 Key 两次请求之间的最小时间间隔（毫秒）。间隔越大越安全，但吞吐越低。">i</i></div>
+              <input id="antiBanMinInterval" type="number" min="0" placeholder="1000" />
+            </div>
+            <div class="field">
+              <div class="field-head"><span class="field-name">429 退避下限</span><span class="field-key">delay_min</span><span class="field-unit">ms</span><i class="info-tip" data-tip="收到 429 限流后，该 Key 进入冷却的最短时长（毫秒）。实际冷却在下限与上限之间随机取值。">i</i></div>
+              <input id="antiBanDelayMin" type="number" min="0" placeholder="5000" />
+            </div>
+            <div class="field">
+              <div class="field-head"><span class="field-name">429 退避上限</span><span class="field-key">delay_max</span><span class="field-unit">ms</span><i class="info-tip" data-tip="收到 429 限流后，该 Key 进入冷却的最长时长（毫秒）。随机退避可避免多个 Key 同时恢复再次被限流。">i</i></div>
+              <input id="antiBanDelayMax" type="number" min="0" placeholder="10000" />
             </div>
           </div>
         </div>
@@ -166,34 +146,32 @@
             <span class="ssec-title">Key 选择与重试</span>
             <span class="ssec-meta">按健康分挑选 Key，并在 429 / 5xx 后自动换 Key 重试</span>
           </div>
-          <div class="config-row">
-            <div>
-              <span class="form-label">Key 选择策略</span>
-              <p class="form-hint">健康分加权挑 Key 的方式；命中冷却时是否落到下一个候选。</p>
+          <div class="field-grid">
+            <div class="field">
+              <div class="field-head"><span class="field-name">选择模式</span><span class="field-key">key_selection</span><i class="info-tip" data-tip="多个 Key 时如何挑选：粘住 = 一直用健康分最高的那个，直到它出问题；加权随机 = 按健康分加权随机分摊，更均衡。">i</i></div>
+              <select id="antiBanKeySelection">
+                <option value="sticky">粘住（最高健康分）</option>
+                <option value="balanced">加权随机</option>
+              </select>
             </div>
-            <div class="form-grid cols-4">
-              <div class="form-group">
-                <div class="form-label-row"><span class="form-label">选择模式</span><span class="field-key">key_selection</span></div>
-                <select id="antiBanKeySelection">
-                  <option value="sticky">粘住（最高健康分）</option>
-                  <option value="balanced">加权随机</option>
-                </select>
-              </div>
-              <div class="form-group">
-                <div class="form-label-row"><span class="form-label">命中冷却时</span><span class="field-key">sticky_on_cooldown</span></div>
-                <select id="antiBanStickyOnCooldown">
-                  <option value="fallthrough">落到下一个</option>
-                  <option value="wait">等待恢复</option>
-                </select>
-              </div>
-              <div class="form-group">
-                <div class="form-label-row"><span class="form-label">最大重试次数</span><span class="field-key">retry.max_attempts</span></div>
-                <input id="antiBanRetryMaxAttempts" type="number" min="1" placeholder="3" />
-              </div>
-              <div class="form-group">
-                <div class="form-label-row"><span class="form-label">重试总时长上限</span><span class="field-key">retry.max_total_ms</span><span class="form-label-unit">ms</span></div>
-                <input id="antiBanRetryMaxTotalMs" type="number" min="0" placeholder="30000" />
-              </div>
+            <div class="field">
+              <div class="field-head"><span class="field-name">命中冷却时</span><span class="field-key">sticky_on_cooldown</span><i class="info-tip" data-tip="仅粘住模式生效：当选中的 Key 正在冷却时，落到下一个 = 立即换用下一个可用 Key；等待恢复 = 等它冷却结束再用。">i</i></div>
+              <select id="antiBanStickyOnCooldown">
+                <option value="fallthrough">落到下一个</option>
+                <option value="wait">等待恢复</option>
+              </select>
+            </div>
+            <div class="field">
+              <div class="field-head"><span class="field-name">最大重试次数</span><span class="field-key">retry.max_attempts</span><i class="info-tip" data-tip="单次客户端请求内，代理最多换几个 Key 重试（默认 3）。这是「请求内」重试，与「Key 自动禁用阈值 key_max_errors」（跨请求累计后禁用 Key）是两回事。">i</i></div>
+              <input id="antiBanRetryMaxAttempts" type="number" min="1" placeholder="3" />
+            </div>
+            <div class="field">
+              <div class="field-head"><span class="field-name">重试总时长上限</span><span class="field-key">retry.max_total_ms</span><span class="field-unit">ms</span><i class="info-tip" data-tip="单次请求内所有重试累计的时间上限（毫秒）。即使还没到最大重试次数，超过这个时长也会停止重试并返回错误。">i</i></div>
+              <input id="antiBanRetryMaxTotalMs" type="number" min="0" placeholder="30000" />
+            </div>
+            <div class="field">
+              <div class="field-head"><span class="field-name">Key 自动禁用阈值</span><span class="field-key">key_max_errors</span><i class="info-tip" data-tip="跨请求累计：单个 API Key 累计错误达到此次数后自动禁用（需在供应商上开启「错误累计自动禁用 Key」）。429 同样计入，调用成功后计数清零。0 或留空用环境变量 KEY_MAX_ERRORS，默认 5。">i</i></div>
+              <input id="keyMaxErrors" type="number" min="1" placeholder="默认 5" />
             </div>
           </div>
         </div>
@@ -207,12 +185,9 @@
               <span class="ssec-title">重试触发与选择器下限</span>
               <span class="ssec-meta">retry.* / selector.min_weight</span>
             </div>
-            <div class="config-row">
-              <div>
-                <span class="form-label">允许重试的错误类别</span>
-                <p class="form-hint">默认都开启。关闭后对应类别错误不会触发代理内自动重试。</p>
-              </div>
-              <div>
+            <div class="field-grid">
+              <div class="field field-wide">
+                <div class="field-head"><span class="field-name">允许重试的错误类别</span><i class="info-tip" data-tip="控制哪些错误会触发代理内的自动换 Key 重试。默认都开启；关闭后对应类别错误直接返回给客户端，不再重试。">i</i></div>
                 <div class="checkbox-inline-group">
                   <label class="checkbox-wrapper">
                     <input id="antiBanRetryOnRateLimit" type="checkbox" />
@@ -232,17 +207,17 @@
               <span class="ssec-title">配额持久化</span>
               <span class="ssec-meta">quota.* — runtime_usage.json 的写入策略</span>
             </div>
-            <div class="form-grid cols-3">
-              <div class="form-group">
-                <div class="form-label-row"><span class="form-label">每 N 次请求落盘</span><span class="field-key">persist_every_n_requests</span></div>
+            <div class="field-grid">
+              <div class="field">
+                <div class="field-head"><span class="field-name">每 N 次请求落盘</span><span class="field-key">persist_every_n_requests</span><i class="info-tip" data-tip="用量计数每累计 N 次请求写一次 runtime_usage.json。值越大磁盘写入越少，但进程崩溃时丢失的计数越多。">i</i></div>
                 <input id="antiBanQuotaPersistEvery" type="number" min="0" placeholder="50" />
               </div>
-              <div class="form-group">
-                <div class="form-label-row"><span class="form-label">临界阈值强制落盘</span><span class="field-key">persist_critical_threshold</span></div>
+              <div class="field">
+                <div class="field-head"><span class="field-name">临界阈值强制落盘</span><span class="field-key">persist_critical_threshold</span><i class="info-tip" data-tip="当某个 Key 的用量占配额比例超过此阈值（0~1）时，无视上面的 N 次间隔立即落盘，避免临界时刻丢计数导致超配额。">i</i></div>
                 <input id="antiBanQuotaCritical" type="number" min="0" max="1" step="0.01" placeholder="0.85" />
               </div>
-              <div class="form-group">
-                <div class="form-label-row"><span class="form-label">用量文件名</span><span class="field-key">usage_file</span></div>
+              <div class="field">
+                <div class="field-head"><span class="field-name">用量文件名</span><span class="field-key">usage_file</span><i class="info-tip" data-tip="配额用量的持久化文件名（相对数据目录）。记录各 Key 已用的请求数 / Token 数，重启后不清零。">i</i></div>
                 <input id="antiBanQuotaUsageFile" type="text" placeholder="runtime_usage.json" />
               </div>
             </div>
@@ -255,6 +230,13 @@
     <div class="tabs">
       <button class="tab-btn active" id="tab-providers">供应商<span class="tab-count"></span></button>
       <button class="tab-btn" id="tab-models">模型映射<span class="tab-count"></span></button>
+    </div>
+
+    <!-- Model filter (models tab only) -->
+    <div id="model-filter-bar" class="model-filter-bar" style="display:none">
+      <span class="filter-label">筛选</span>
+      <input id="modelFilterName" type="text" placeholder="按模型名筛选（客户端 / 上游）" />
+      <select id="modelFilterProvider"><option value="">全部供应商</option></select>
     </div>
 
     <!-- Table -->

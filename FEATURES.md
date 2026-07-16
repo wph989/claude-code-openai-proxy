@@ -353,7 +353,7 @@ if provider.auto_recover_minutes > 0
    enableKey(entry)                              // 重新启用 + 清零 error_count + 清 auto_disabled_at + 清冷却
 ```
 
-- **惰性触发**：不用常驻定时器，`acquire()` 每轮开头扫一遍。没流量时不恢复没有意义——恢复的目的就是让下一个请求能用它；一旦有请求进来立即生效。
+- **按时触发**：rotator 为最早到期的自动禁用 Key 安排定时器，即使没有新请求也会恢复；`acquire()` 和状态查询仍补做一次到期检查，防止事件循环繁忙造成短暂延迟。
 - 覆盖所有自动禁用来源：累计错误禁用、429 累计禁用、`markQuotaError`（硬限制/额度耗尽）。
 - 恢复后若立刻再次失败会重新累计并禁用，可自我修正。
 
@@ -365,7 +365,7 @@ if provider.auto_recover_minutes > 0
 | 手动禁用 | Admin → `PUT /api/keys/:p/:i/disable` | enabled=false |
 | 重置单 Key | Admin → `PUT /api/keys/:p/:i/reset` | 清错误计数 + 清配额计数 + 清冷却态 + 启用 |
 | 重置所有 | Admin → `PUT /api/keys/:p/reset-all` | 对 provider 下所有 Key 重置 |
-| 自动恢复 | provider `auto_recover_minutes` | 自动禁用满 N 分钟后惰性重新启用 |
+| 自动恢复 | provider `auto_recover_minutes` | 自动禁用满 N 分钟后按时重新启用，无需等待新请求 |
 
 ### 7.5 多 provider 错误隔离
 

@@ -14,6 +14,9 @@ const sortState = {
   models: { field: null, asc: true },
 };
 
+// 模型映射筛选：按模型名（客户端/上游）和供应商过滤
+let modelFilter = { name: '', provider: '' };
+
 // ── DOM refs ──
 const $ = (sel) => document.querySelector(sel);
 
@@ -39,6 +42,9 @@ const antiBanQuotaCriticalInput = $('#antiBanQuotaCritical');
 const antiBanQuotaUsageFileInput = $('#antiBanQuotaUsageFile');
 const tabProviders = $('#tab-providers');
 const tabModels = $('#tab-models');
+const modelFilterBar = $('#model-filter-bar');
+const modelFilterName = $('#modelFilterName');
+const modelFilterProvider = $('#modelFilterProvider');
 const tableContainer = $('#table-container');
 const modalOverlay = $('#modal-overlay');
 const modalTitle = $('#modal-title');
@@ -651,12 +657,42 @@ function setSort(tab, field) {
   renderTable();
 }
 
+// 用当前供应商列表同步筛选下拉框选项，保留已选中的值。
+function syncModelFilterProviderOptions() {
+  const ids = currentConfig.providers.map(p => p.provider_id).filter(Boolean);
+  const current = modelFilter.provider;
+  modelFilterProvider.innerHTML = '<option value="">全部供应商</option>'
+    + ids.map(id => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
+  // 若原选中的供应商已不存在，重置为「全部」。
+  modelFilterProvider.value = ids.includes(current) ? current : '';
+  modelFilter.provider = modelFilterProvider.value;
+}
+
+// 按模型名（客户端 / 上游，大小写不敏感）和供应商筛选模型映射。
+function filterModels(models) {
+  const name = modelFilter.name.trim().toLowerCase();
+  const provider = modelFilter.provider;
+  if (!name && !provider) return models;
+  return models.filter(m => {
+    if (provider && m.provider_id !== provider) return false;
+    if (name) {
+      const hay = `${m.client_model || ''} ${m.upstream_model || ''}`.toLowerCase();
+      if (!hay.includes(name)) return false;
+    }
+    return true;
+  });
+}
+
 // ── Table ──
 function renderTable() {
   const isProvider = currentTab === 'providers';
   const items = isProvider ? currentConfig.providers : currentConfig.models;
+  // 模型 tab 支持按名称 / 供应商筛选；供应商 tab 不筛选。
+  const displayItems = isProvider ? items : filterModels(items);
+  modelFilterBar.style.display = isProvider ? 'none' : '';
+  if (!isProvider) syncModelFilterProviderOptions();
   const st = sortState[currentTab];
-  const sorted = sortItems(items, st.field, st.asc);
+  const sorted = sortItems(displayItems, st.field, st.asc);
   const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
   const page = isProvider ? providerPage : modelPage;
   const clampedPage = Math.max(1, Math.min(page, totalPages));
@@ -740,7 +776,7 @@ function renderProviderRow(p, idx) {
     <td class="col-id">${esc(p.provider_id)}</td>
     <td>${typeLabel}</td>
     <td class="col-url" title="${esc(p.base_url)}">${esc(p.base_url)}</td>
-    <td class="col-strategy">${strat}<br><span class="text-dim">${esc(quotaText)}</span></td>
+    <td class="col-strategy"><div class="strategy-cell"><span class="strategy-name">${strat}</span><span class="text-dim">${esc(quotaText)}</span><span>${antiBanSummary(p)}</span></div></td>
     <td>${badge}</td>
     <td class="col-actions">
       <button class="btn-icon keys-btn" data-provider="${esc(p.provider_id)}" title="管理 API Keys">${isExpanded ? '收起 Keys' : 'Keys'} (${keys.length})</button>
@@ -759,6 +795,16 @@ function quotaSummary(quota) {
   if (quota.max_tokens != null) parts.push(`Token ${quota.max_tokens}`);
   if (quota.soft_stop_threshold != null) parts.push(`阈值 ${quota.soft_stop_threshold}`);
   return parts.length ? `默认配额：${parts.join(' / ')}` : '默认配额：未配置';
+}
+
+// 供应商行的防封摘要 badge：一眼看到自动禁用是否开启 + 自动恢复时长，无需进编辑弹窗。
+function antiBanSummary(p) {
+  const autoDisable = p.auto_disable_on_error !== false;
+  if (!autoDisable) return '<span class="badge badge-off">自动禁用 关</span>';
+  const recover = Number(p.auto_recover_minutes) || 0;
+  return recover > 0
+    ? `<span class="badge badge-info">自动恢复 ${recover} 分钟</span>`
+    : '<span class="badge badge-warn">仅手动恢复</span>';
 }
 
 function renderKeyPanelHtml(providerId) {
@@ -1256,9 +1302,9 @@ function providerFormHtml(item) {
   const quotaTokVal = quota.max_tokens != null ? quota.max_tokens : '';
   const quotaThrVal = quota.soft_stop_threshold != null ? quota.soft_stop_threshold : '';
   const keyDisplay = keys.length > 0
-    ? `<div class="key-info-box"><span class="form-label">当前 API Keys</span><div class="key-list-preview">${keys.map((k, i) =>
+    ? `<div class="key-info-box"><div class="form-label-row"><span class="form-label">当前 API Keys</span><i class="info-tip" data-tip="在供应商列表的&quot;Keys&quot;面板中管理各 Key 的启用/禁用/重置。新增 Key 请在下方输入。">i</i></div><div class="key-list-preview">${keys.map((k, i) =>
         `<div class="key-list-item ${k.enabled ? '' : 'key-disabled'}">${i + 1}. ${maskKey(k.key)} <span class="badge ${k.enabled ? 'badge-on' : 'badge-off'}">${k.enabled ? '启用' : '禁用'}</span> <span class="text-dim">错误: ${k.error_count || 0}</span></div>`
-      ).join('')}</div><p class="form-hint">在供应商列表的"Keys"面板中管理各 Key 的启用/禁用/重置。新增 Key 请在下方输入。</p></div>`
+      ).join('')}</div></div>`
     : '';
 
   return `
@@ -1297,17 +1343,18 @@ function providerFormHtml(item) {
           <option value="on_429" ${p.key_rotation_strategy==='on_429'?'selected':''}>遇 429 自动切换</option>
         </select>
       </div>
-      <div class="form-group">
-        <label class="checkbox-wrapper">
-          <input id="mf-auto_disable_on_error" type="checkbox" ${p.auto_disable_on_error!==false?'checked':''} />
-          <span class="checkbox-label">错误累计自动禁用 Key <span class="field-key">auto_disable_on_error</span></span>
-        </label>
-        <p class="form-hint">累计错误达到阈值（顶部全局配置「Key 自动禁用阈值 key_max_errors」，默认 5）后禁用该 Key；429 限流同样计入。调用成功后错误计数自动清零。部分不稳定供应商可关闭此功能。</p>
-      </div>
-      <div class="form-group">
-        <div class="form-label-row"><span class="form-label">自动禁用后自动恢复</span><span class="field-key">auto_recover_minutes</span><span class="form-label-unit">分钟</span></div>
-        <input id="mf-auto_recover_minutes" type="number" min="0" value="${p.auto_recover_minutes||0}" placeholder="0 = 不自动恢复" />
-        <p class="form-hint">自动禁用的 Key 经过指定分钟数后自动重新启用并清零错误计数（仅在有请求进来时惰性触发）。0 或留空表示只能手动恢复。手动禁用的 Key 不受影响。</p>
+      <div class="field-fieldset">
+        <div class="field-fieldset-title">错误自动禁用 / 恢复</div>
+        <div class="form-group">
+          <label class="checkbox-wrapper">
+            <input id="mf-auto_disable_on_error" type="checkbox" ${p.auto_disable_on_error!==false?'checked':''} />
+            <span class="checkbox-label">错误累计自动禁用 Key <span class="field-key">auto_disable_on_error</span><i class="info-tip" data-tip="累计错误达到阈值（顶部全局配置「Key 自动禁用阈值 key_max_errors」，默认 5）后禁用该 Key；429 限流同样计入。调用成功后错误计数自动清零。部分不稳定供应商可关闭此功能。">i</i></span>
+          </label>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <div class="form-label-row"><span class="form-label">自动禁用后自动恢复</span><span class="field-key">auto_recover_minutes</span><span class="form-label-unit">分钟</span><i class="info-tip" data-tip="自动禁用的 Key 经过指定分钟数后会按时重新启用并清零错误计数，无需等待新请求。0 或留空表示只能手动恢复。手动禁用的 Key 不受影响。">i</i></div>
+          <input id="mf-auto_recover_minutes" type="number" min="0" value="${p.auto_recover_minutes||0}" placeholder="0 = 不自动恢复" />
+        </div>
       </div>
       <div class="form-group">
         <div class="form-label-row"><span class="form-label">请求超时</span><span class="field-key">timeout_seconds</span><span class="form-label-unit">秒</span></div>
@@ -1326,11 +1373,10 @@ function providerFormHtml(item) {
         <input id="mfq-max-tok" type="number" min="1" value="${esc(quotaTokVal)}" placeholder="留空 = 不限" />
       </div>
       <div class="form-group">
-        <div class="form-label-row"><span class="form-label">默认软停阈值</span><span class="field-key">quota.soft_stop_threshold</span></div>
+        <div class="form-label-row"><span class="form-label">默认软停阈值</span><span class="field-key">quota.soft_stop_threshold</span><i class="info-tip" data-tip="供应商配额会作为所有 Key 的默认值；单个 Key 设置了 quota 字段时优先使用 Key 自己的配额。软停阈值表示用量达到该比例（0~1）后停止该供应商。">i</i></div>
         <input id="mfq-threshold" type="number" min="0" max="1" step="0.01" value="${esc(quotaThrVal)}" placeholder="0.95" />
       </div>
     </div>
-    <p class="form-hint">供应商配额会作为所有 Key 的默认值；单个 Key 设置了 quota 字段时优先使用 Key 自己的配额。</p>
     ${keyDisplay}
     <div class="form-group">
       <label class="checkbox-wrapper">
@@ -1462,6 +1508,8 @@ $('#logoutBtn').addEventListener('click', async () => {
 defaultClientModel.addEventListener('change', updatePreview);
 proxyAuthTokenInput.addEventListener('input', updatePreview);
 keyMaxErrorsInput.addEventListener('input', updatePreview);
+modelFilterName.addEventListener('input', () => { modelFilter.name = modelFilterName.value; modelPage = 1; renderTable(); });
+modelFilterProvider.addEventListener('change', () => { modelFilter.provider = modelFilterProvider.value; modelPage = 1; renderTable(); });
 antiBanModeInput.addEventListener('change', () => {
   const mode = antiBanModeInput.value === 'throughput' ? 'throughput' : 'conservative';
   const defaults = antiBanDefaults(mode);
