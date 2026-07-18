@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { validateRuntimeConfig } from '../src/models.js';
+import { ProviderHealthRegistry } from '../src/services/provider-health.js';
 import { RuntimeConfigManager } from '../src/services/runtime-config.js';
 
 describe('允许模型重名', () => {
@@ -30,7 +31,7 @@ describe('允许模型重名', () => {
     expect(() => validateRuntimeConfig(config)).not.toThrow();
   });
 
-  it('resolveModel 从多个同名路由中随机选择', () => {
+  it('resolveModel 从多个同名默认权重路由中确定性选择', () => {
     const config = {
       providers: [
         {
@@ -59,22 +60,21 @@ describe('允许模型重名', () => {
       ]
     };
 
-    const manager = new RuntimeConfigManager();
+    const randomValues = [0.1, 0.4, 0.8];
+    let randomIndex = 0;
+    const manager = new RuntimeConfigManager('unused.json', () => randomValues[randomIndex++ % randomValues.length]);
     manager['config'] = config as any;  // 直接设置 config 绕过文件读取
 
-    // 调用 50 次，统计每个 provider 被选中的次数
+    // 三个默认权重候选分别命中一次，验证选择逻辑而不是依赖概率。
     const counts: Record<string, number> = { 'provider-a': 0, 'provider-b': 0, 'provider-c': 0 };
-    const iterations = 50;
+    const iterations = 3;
 
     for (let i = 0; i < iterations; i++) {
       const { provider } = manager.resolveModel('shared-model');
       counts[provider.provider_id]++;
     }
 
-    // 验证所有 3 个 provider 都被选中过（随机分布）
-    expect(counts['provider-a']).toBeGreaterThan(0);
-    expect(counts['provider-b']).toBeGreaterThan(0);
-    expect(counts['provider-c']).toBeGreaterThan(0);
+    expect(counts).toEqual({ 'provider-a': 1, 'provider-b': 1, 'provider-c': 1 });
 
     // 验证总次数正确
     expect(counts['provider-a'] + counts['provider-b'] + counts['provider-c']).toBe(iterations);
@@ -191,4 +191,66 @@ describe('允许模型重名', () => {
 
     expect(() => manager.resolveModel('shared')).toThrow('模型 shared 没有启用且具备可用 Key 的供应商。');
   });
+
+  it('优先级高于权重，并在高优先级 Provider 熔断时故障转移', () => {
+    const manager = new RuntimeConfigManager('unused.json', () => 0.99);
+    const health = new ProviderHealthRegistry();
+    manager.setProviderHealth(health);
+    manager['config'] = {
+      providers: [
+        providerConfig('primary', 'primary-key'),
+        providerConfig('backup', 'backup-key'),
+      ],
+      models: [
+        { client_model: 'shared', provider_id: 'primary', upstream_model: 'm1', priority: 0, weight: 1 },
+        { client_model: 'shared', provider_id: 'backup', upstream_model: 'm2', priority: 10, weight: 1000 },
+      ],
+      default_client_model: 'shared',
+    };
+
+    expect(manager.resolveModel('shared').provider.provider_id).toBe('primary');
+    health.configure('primary', { failure_threshold: 1, recovery_seconds: 30 });
+    const lease = health.acquire('primary')!;
+    health.recordFailure('primary', 'network', lease);
+
+    expect(manager.resolveModel('shared').provider.provider_id).toBe('backup');
+  });
+
+  it('只有全部启用候选都熔断时才返回熔断错误', () => {
+    const manager = new RuntimeConfigManager('unused.json', () => 0);
+    const health = new ProviderHealthRegistry();
+    manager.setProviderHealth(health);
+    manager['config'] = {
+      providers: [
+        providerConfig('blocked', 'blocked-key'),
+        providerConfig('no-key', null),
+      ],
+      models: [
+        { client_model: 'shared', provider_id: 'blocked', upstream_model: 'm1' },
+        { client_model: 'shared', provider_id: 'no-key', upstream_model: 'm2' },
+      ],
+      default_client_model: 'shared',
+    };
+    health.configure('blocked', { failure_threshold: 1, recovery_seconds: 30 });
+    const lease = health.acquire('blocked')!;
+    health.recordFailure('blocked', 'network', lease);
+
+    expect(() => manager.resolveModel('shared')).toThrow('模型 shared 没有启用且具备可用 Key 的供应商。');
+
+    manager['config'].providers[1].api_key = 'second-key';
+    health.configure('no-key', { failure_threshold: 1, recovery_seconds: 30 });
+    const secondLease = health.acquire('no-key')!;
+    health.recordFailure('no-key', 'server', secondLease);
+    expect(() => manager.resolveModel('shared')).toThrow('模型 shared 的供应商均处于熔断冷却中，请稍后重试。');
+  });
 });
+
+function providerConfig(providerId: string, apiKey: string | null) {
+  return {
+    provider_id: providerId,
+    provider_type: 'openai_compatible' as const,
+    base_url: `https://${providerId}.example.com`,
+    api_key: apiKey,
+    enabled: true,
+  };
+}

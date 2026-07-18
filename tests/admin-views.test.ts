@@ -13,17 +13,23 @@ describe('管理端视图模块', () => {
       base_url: 'https://example.com/?q="><img src=x>',
       api_key: [],
       enabled: true,
+      circuit_status: { state: 'open', consecutive_failures: 3, open_until: Date.now() + 30_000 },
     }, 0, null, { key_auto_disable: true });
     const model = renderModelRow({
       client_model: '<img src=x>',
       provider_id: 'p1',
       upstream_model: 'upstream',
+      priority: 2,
+      weight: 4.5,
       enabled: true,
     }, 0);
 
     expect(provider).not.toContain('<script>alert(1)</script>');
     expect(provider).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(provider).toContain('熔断中');
     expect(model).not.toContain('<img src=x>');
+    expect(model).toContain('>2<');
+    expect(model).toContain('>4.5<');
   });
 
   it('Key 面板只渲染掩码并转义诊断信息', () => {

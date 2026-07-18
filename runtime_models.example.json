@@ -29,6 +29,10 @@
       "auto_recover_minutes": 0,
       "timeout_seconds": 300,
       "stream_idle_timeout_seconds": 120,
+      "circuit_breaker": {
+        "failure_threshold": 3,
+        "recovery_seconds": 30
+      },
       "enabled": true,
       "headers": {},
       "description": "示例供应商"
@@ -40,6 +44,8 @@
       "client_model": "claude-model",
       "provider_id": "openai-compatible",
       "upstream_model": "your-upstream-model",
+      "priority": 0,
+      "weight": 1,
       "enabled": true,
       "extra_body": {},
       "description": "示例模型映射"

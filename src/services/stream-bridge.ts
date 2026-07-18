@@ -202,8 +202,6 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
 
     log('info', '流式响应完成', {
       provider_id: metrics.providerId,
-      client_model: metrics.clientModel,
-      upstream_model: metrics.upstreamModel,
       input_tokens: state.usageInputTokens,
       output_tokens: state.usageOutputTokens,
       stop_reason: state.stopReason,
@@ -222,16 +220,12 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
     }
     if (clientClosed) {
       log('info', '客户端断开，停止流式桥接', {
-        provider_id: metrics.providerId,
-        client_model: metrics.clientModel,
-        upstream_model: metrics.upstreamModel
+        provider_id: metrics.providerId
       });
       return;
     }
     log('error', '流式桥接失败', {
       provider_id: metrics.providerId,
-      client_model: metrics.clientModel,
-      upstream_model: metrics.upstreamModel,
       error
     });
     writeSse(output, 'error', {

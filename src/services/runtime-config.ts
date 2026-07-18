@@ -3,11 +3,11 @@ import { isProxyTokenRequired, setRuntimeProxyToken } from '../auth.js';
 import { ConfigConflictError, RuntimeConfigError } from '../errors.js';
 import { ApiKeyRotator, type KeyStateChange } from './api-key-rotator.js';
 import { resolveAntiBanConfig, type ResolvedAntiBan } from './anti-ban-config.js';
-import type { UsageStore } from './usage-store.js';
-import type { KeyStateStore, KeyRuntimeRecord } from './key-state-store.js';
-import type { ConfigRepository } from './config/repository.js';
+import type { KeyRuntimeRecord } from './key-state-store.js';
+import type { ConfigRepository, KeyStateRepository, UsageRepository } from './config/repository.js';
 import { JsonFileConfigRepository } from './config/json-file-repository.js';
 import { ProviderHealthRegistry } from './provider-health.js';
+import { RoutingPolicy, normalizeRoutePriority, normalizeRouteWeight } from './routing-policy.js';
 import {
   buildAdminRuntimeConfigView,
   buildConfigChangePreview,
@@ -73,11 +73,11 @@ export class RuntimeConfigManager {
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   private persisting: Promise<void> | null = null;
   private persistAgain = false;
-  private usageStore: UsageStore | null = null;
+  private usageStore: UsageRepository | null = null;
   private preloadedUsage: Record<string, KeyUsage> = {};
-  private stateStore: KeyStateStore | null = null;
+  private stateStore: KeyStateRepository | null = null;
   private preloadedState: Record<string, KeyRuntimeRecord> = {};
-  private readonly randomSource: () => number;
+  private readonly routingPolicy: RoutingPolicy;
   private observer: RuntimeConfigObserver = {};
   private providerHealth: ProviderHealthRegistry | null = null;
   private initialized = false;
@@ -89,7 +89,7 @@ export class RuntimeConfigManager {
     this.repository = typeof configPathOrRepository === 'string'
       ? new JsonFileConfigRepository(configPathOrRepository)
       : configPathOrRepository;
-    this.randomSource = randomSource;
+    this.routingPolicy = new RoutingPolicy(randomSource);
   }
 
   async init(): Promise<void> {
@@ -248,6 +248,7 @@ export class RuntimeConfigManager {
     await this.persistNow();
     if (this.usageStore) await this.usageStore.forceFlush();
     if (this.stateStore) await this.stateStore.forceFlush();
+    await this.repository.close?.();
   }
 
   async ensureDefaultConfig(): Promise<void> {
@@ -333,7 +334,7 @@ export class RuntimeConfigManager {
     }
 
     return {
-      config: buildAdminRuntimeConfigView(this.config, keyStates),
+      config: buildAdminRuntimeConfigView(this.config, keyStates, this.providerHealth ?? undefined),
       revision: this.getRevision(),
       proxy_auth_token_configured: this.isProxyAuthTokenConfigured(),
       summary: this.summary(),
@@ -381,13 +382,15 @@ export class RuntimeConfigManager {
       throw new Error(`未找到可用的模型映射：${normalizedModel}`);
     }
 
-    let circuitBlocked = false;
+    let enabledProviderRoutes = 0;
+    let circuitBlockedRoutes = 0;
     const candidates = matchedRoutes.flatMap((route) => {
       const provider = this.config.providers.find((item) => item.provider_id === route.provider_id);
       if (!provider || provider.enabled === false) return [];
+      enabledProviderRoutes += 1;
       this.providerHealth?.configure(provider.provider_id, provider.circuit_breaker);
       if (this.providerHealth && !this.providerHealth.isAvailable(provider.provider_id)) {
-        circuitBlocked = true;
+        circuitBlockedRoutes += 1;
         return [];
       }
       const apiKeys = resolveApiKeys(provider);
@@ -406,15 +409,13 @@ export class RuntimeConfigManager {
     });
 
     if (candidates.length === 0) {
-      if (circuitBlocked) {
+      if (enabledProviderRoutes > 0 && circuitBlockedRoutes === enabledProviderRoutes) {
         throw new Error(`模型 ${normalizedModel} 的供应商均处于熔断冷却中，请稍后重试。`);
       }
       throw new Error(`模型 ${normalizedModel} 没有启用且具备可用 Key 的供应商。`);
     }
 
-    const highestPriority = Math.min(...candidates.map((candidate) => normalizePriority(candidate.route.priority)));
-    const prioritized = candidates.filter((candidate) => normalizePriority(candidate.route.priority) === highestPriority);
-    const selected = pickWeighted(prioritized, this.randomSource);
+    const selected = this.routingPolicy.select(candidates);
     const { route, provider, apiKeys, rotator, autoDisable, antiBan } = selected;
     const resolvedProvider = this.toResolvedProvider(provider, apiKeys, autoDisable, antiBan);
 
@@ -423,9 +424,9 @@ export class RuntimeConfigManager {
       client_model: route.client_model,
       provider_id: route.provider_id,
       upstream_model: route.upstream_model,
-      priority: normalizePriority(route.priority),
-      weight: normalizeWeight(route.weight),
-      enabled: !!route.enabled,
+      priority: normalizeRoutePriority(route.priority),
+      weight: normalizeRouteWeight(route.weight),
+      enabled: route.enabled !== false,
       extra_body: route.extra_body || {},
       description: route.description || ''
     };
@@ -450,10 +451,10 @@ export class RuntimeConfigManager {
       auto_recover_minutes: provider.auto_recover_minutes ?? 0,
       timeout_seconds: provider.timeout_seconds || 300,
       stream_idle_timeout_seconds: provider.stream_idle_timeout_seconds || 120,
-      enabled: !!provider.enabled,
+      enabled: provider.enabled !== false,
       headers: normalizeHeaders(provider.headers || {}),
       anti_ban: antiBan,
-      circuit_breaker: provider.circuit_breaker ?? {},
+      circuit_breaker: provider.circuit_breaker === null ? null : provider.circuit_breaker ?? {},
       description: provider.description || '',
     };
   }
@@ -998,33 +999,6 @@ function keysEqual(a: ApiKeyEntry[], b: ApiKeyEntry[]): boolean {
 function antiBanEqual(a: ResolvedAntiBan, b: ResolvedAntiBan): boolean {
   if (a === b) return true;
   return JSON.stringify(a) === JSON.stringify(b);
-}
-
-function normalizePriority(value: unknown): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.max(0, Math.min(1000, Math.trunc(parsed))) : 0;
-}
-
-function normalizeWeight(value: unknown): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.max(0, Math.min(100000, parsed)) : 1;
-}
-
-function pickWeighted<T extends { route: { weight?: number } }>(items: T[], randomSource: () => number): T {
-  if (items.length === 1) return items[0];
-  const weights = items.map((item) => normalizeWeight(item.route.weight));
-  const total = weights.reduce((sum, weight) => sum + weight, 0);
-  const rawRandom = randomSource();
-  const randomValue = Number.isFinite(rawRandom)
-    ? Math.max(0, Math.min(0.999999999999, rawRandom))
-    : 0;
-  if (total <= 0) return items[Math.min(items.length - 1, Math.floor(randomValue * items.length))];
-  let cursor = randomValue * total;
-  for (let index = 0; index < items.length; index += 1) {
-    cursor -= weights[index];
-    if (cursor < 0) return items[index];
-  }
-  return items[items.length - 1];
 }
 
 function replaceEnv(value: string): string {

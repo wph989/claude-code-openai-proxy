@@ -8,7 +8,7 @@
  */
 
 import { PassThrough } from 'node:stream';
-import { isLogDetailedEnabled, log } from '../../utils/logger.js';
+import { log } from '../../utils/logger.js';
 import { readStreamChunk } from '../stream-read.js';
 import type { StreamingAnthropicSSEFixer } from '../response-fix.js';
 import { markUpstreamResponseStreamError, releaseUpstreamResponse } from '../upstream/response-meta.js';
@@ -28,8 +28,6 @@ export async function fixAnthropicSseAndPipe(params: {
   onUsage?: (usage: StreamTokenUsage) => void;
 }): Promise<void> {
   const { upstreamResponse, releaseResponse = upstreamResponse, upstreamReadError, output, fixer, metrics, idleTimeoutMs, isClientClosed, clientAbortSignal, onUsage } = params;
-  const captureResponseBody = isLogDetailedEnabled();
-  const responseChunks: Buffer[] = [];
   const usageTracker = new SseUsageTracker();
   try {
     const body = upstreamResponse.body;
@@ -43,7 +41,6 @@ export async function fixAnthropicSseAndPipe(params: {
         usageTracker.push(value);
         const fixed = fixer.push(value);
         if (fixed) {
-          if (captureResponseBody) responseChunks.push(fixed);
           output.write(fixed);
         }
       }
@@ -54,7 +51,6 @@ export async function fixAnthropicSseAndPipe(params: {
     if (isClientClosed?.()) return;
     const tail = fixer.finalize();
     if (tail.length > 0) {
-      if (captureResponseBody) responseChunks.push(tail);
       output.write(tail);
     }
     const usage = usageTracker.finish();
@@ -68,8 +64,7 @@ export async function fixAnthropicSseAndPipe(params: {
       stream: true,
       sse_kind: upstreamReadError ? 'anthropic-sse-repaired-partial' : 'anthropic-sse-repaired',
       ...(upstreamReadError ? { error_message: upstreamReadError } : {}),
-      fix_info: fixer.getFixInfo(),
-      response_body: captureResponseBody ? Buffer.concat(responseChunks).toString('utf8') : undefined,
+      repaired: true,
     });
   } catch (error) {
     const clientClosed = isClientClosed?.() === true;
@@ -81,7 +76,6 @@ export async function fixAnthropicSseAndPipe(params: {
         recoveredPartial = true;
         // 已经开始 Anthropic message 时，优先补齐合法收尾；额外 error 事件会让 Claude Code
         // 在半截消息后继续报协议错误，反而掩盖上游断流的根因。
-        if (captureResponseBody) responseChunks.push(tail);
         output.write(tail);
         log('warn', 'Anthropic SSE 修复遇到上游流异常，已补齐收尾', {
           ...buildLogContext(metrics),
@@ -90,8 +84,7 @@ export async function fixAnthropicSseAndPipe(params: {
           stream: true,
           sse_kind: 'anthropic-sse-repaired-partial',
           error_message: error instanceof Error ? error.message : String(error),
-          fix_info: fixer.getFixInfo(),
-          response_body: captureResponseBody ? Buffer.concat(responseChunks).toString('utf8') : undefined,
+          repaired: true,
         });
       } else {
         output.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'api_error', message: '流式修复失败。' } })}\n\n`);
@@ -150,7 +143,6 @@ export async function bufferTransformAndPipeSse(params: {
       sse_kind: 'openai-sse-converted',
       transform_kind: kind,
       response_bytes: fixed.length,
-      response_body: fixed.toString('utf8'),
     });
   } catch (error) {
     const clientClosed = isClientClosed?.() === true;

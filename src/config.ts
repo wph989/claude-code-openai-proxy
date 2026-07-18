@@ -22,10 +22,10 @@ export function generateAdminAuthToken(): string {
   return `ccop_${randomBytes(24).toString('base64url')}`;
 }
 
-export function logGeneratedAdminAuthToken(envFile: string, token: string): void {
-  // 只在实际生成随机口令时打印，避免用户首次启动后不知道管理后台密码。
+export function logGeneratedAdminAuthToken(envFile: string, _token: string): void {
+  // 控制台和进程日志经常被集中采集；只提示保存位置，避免首次启动直接泄露管理口令。
   console.log('[config] 随机管理口令已写入:', envFile);
-  console.log(`[config] ADMIN_AUTH_TOKEN=${token}`);
+  console.log('[config] 请从该 .env 文件读取 ADMIN_AUTH_TOKEN。');
 }
 
 export function resolveAdminAuthToken(raw: string | undefined, isProdMode: boolean): string {

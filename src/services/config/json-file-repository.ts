@@ -16,6 +16,8 @@ import type { RuntimeConfig } from '../../types/runtime-config.js';
 import type { ConfigRepository, UsageStoreInitOptions } from './repository.js';
 
 export class JsonFileConfigRepository implements ConfigRepository {
+  readonly storageKind = 'json' as const;
+  readonly supportsSharedRuntime = false;
   private readonly configPath: string;
   private readonly stateFilePath: string;
 
@@ -32,6 +34,16 @@ export class JsonFileConfigRepository implements ConfigRepository {
 
   async saveConfig(config: RuntimeConfig): Promise<void> {
     await writeJsonAtomic(this.configPath, config);
+  }
+
+  async getConfigRevision(): Promise<number | null> {
+    try {
+      const config = await this.loadConfig();
+      const revision = Number(config.revision);
+      return Number.isSafeInteger(revision) && revision > 0 ? revision : 1;
+    } catch {
+      return null;
+    }
   }
 
   async ensureDefaultConfig(buildDefault: () => RuntimeConfig): Promise<RuntimeConfig> {

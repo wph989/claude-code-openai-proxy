@@ -64,7 +64,7 @@ describe('Logger 实例隔离', () => {
     expect(entries.map((entry) => entry.index)).toEqual(Array.from({ length: 20 }, (_, index) => index));
   });
 
-  it('默认过滤正文类字段，详细模式仅由当前实例控制', async () => {
+  it('普通和详细模式都过滤正文、凭证、模型名及高基数标识', async () => {
     const file = path.join(tempDir, 'detail.log');
     const logger = new Logger({
       logFile: file,
@@ -73,17 +73,36 @@ describe('Logger 实例隔离', () => {
       logDetailed: false,
     }, captureOutput().sink);
 
-    logger.log('info', '普通日志', { request_body: 'secret-body', request_id: 'req-1' });
+    logger.log('info', '普通日志', {
+      request_body: 'secret-body',
+      request_id: 'req-1',
+      client_model: 'private-model',
+      Authorization: 'Bearer direct-secret',
+      input_tokens: 12,
+      error: new Error('failed with Bearer nested-secret'),
+    });
     logger.logDetailed('info', '不会输出', { response_body: 'secret-response' });
     logger.configure({ logDetailed: true });
-    logger.logDetailed('info', '详细日志', { request_body: 'allowed-detail' });
+    logger.logDetailed('info', '详细日志', {
+      request_body: 'still-secret',
+      provider_id: 'provider-a',
+      nested: { access_token: 'nested-token', status: 'safe' },
+    });
     await logger.flush();
 
     const content = readFileSync(file, 'utf8');
-    expect(content).toContain('req-1');
+    expect(content).toContain('"input_tokens":12');
+    expect(content).toContain('provider-a');
+    expect(content).toContain('"status":"safe"');
+    expect(content).toContain('Bearer [已脱敏]');
+    expect(content).not.toContain('req-1');
+    expect(content).not.toContain('private-model');
+    expect(content).not.toContain('direct-secret');
+    expect(content).not.toContain('nested-secret');
+    expect(content).not.toContain('nested-token');
     expect(content).not.toContain('secret-body');
     expect(content).not.toContain('secret-response');
-    expect(content).toContain('allowed-detail');
+    expect(content).not.toContain('still-secret');
   });
 });
 

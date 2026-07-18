@@ -9,6 +9,7 @@
 
 import { nanoid } from '../../utils/nanoid.js';
 import { isPlainObject } from '../../utils/guards.js';
+import { normalizeRoutePriority, normalizeRouteWeight } from '../routing-policy.js';
 import {
   KeyRotationStrategy,
   type AntiBanConfig,
@@ -57,8 +58,8 @@ export function normalizeRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
     client_model: String(item.client_model || '').trim(),
     provider_id: String(item.provider_id || '').trim(),
     upstream_model: String(item.upstream_model || '').trim(),
-    priority: normalizePriority(item.priority),
-    weight: normalizeWeight(item.weight),
+    priority: normalizeRoutePriority(item.priority),
+    weight: normalizeRouteWeight(item.weight),
     enabled: item.enabled !== false,
     extra_body: isPlainObject(item.extra_body) ? item.extra_body : {},
     description: String(item.description || '').trim()
@@ -350,18 +351,6 @@ function normalizeOptionalNumber(value: unknown): number | null {
   if (value == null) return null;
   const num = Number(value);
   return Number.isFinite(num) && num > 0 ? num : null;
-}
-
-function normalizePriority(value: unknown): number {
-  if (value == null || value === '') return 0;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.max(0, Math.min(1000, Math.trunc(parsed))) : 0;
-}
-
-function normalizeWeight(value: unknown): number {
-  if (value == null || value === '') return 1;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.max(0, Math.min(100000, parsed)) : 1;
 }
 
 function normalizeCircuitBreaker(value: unknown): CircuitBreakerConfig | null {

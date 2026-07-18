@@ -22,7 +22,11 @@ import {
   transformOpenAISSEToAnthropicSSE,
 } from './response-fix.js';
 import { filterForwardResponseHeaders, setForwardResponseHeaders } from './http-headers.js';
-import { releaseUpstreamResponse, markUpstreamResponseStreamError } from './upstream/response-meta.js';
+import {
+  markUpstreamResponseBodyComplete,
+  markUpstreamResponseStreamError,
+  releaseUpstreamResponse,
+} from './upstream/response-meta.js';
 import { peekAndRestore } from './passthrough/peek-restore.js';
 import {
   ensureAnthropicJsonShape,
@@ -36,8 +40,6 @@ import {
 } from './passthrough/sse-pipelines.js';
 import {
   buildLogContext,
-  parseJsonBodyOrText,
-  previewText,
   type PassthroughLogContext,
   type StreamMetrics,
 } from './passthrough/log-helpers.js';
@@ -75,7 +77,7 @@ export async function sendUpstreamErrorResponse(
   upstreamResponse: Response,
   context: PassthroughLogContext = {}
 ): Promise<unknown> {
-  const bodyText = await upstreamResponse.text();
+  const bodyText = await readUpstreamText(upstreamResponse);
   setForwardResponseHeaders(reply, upstreamResponse);
   releaseUpstreamResponse(upstreamResponse);
 
@@ -86,8 +88,6 @@ export async function sendUpstreamErrorResponse(
     downstream_status: upstreamResponse.status,
     stream: context.stream === true,
     content_type: contentType || null,
-    error_preview: previewText(bodyText),
-    response_body: parseJsonBodyOrText(bodyText),
   });
 
   if (contentType.includes('application/json')) {
@@ -114,7 +114,7 @@ export async function sendAnthropicPassthroughResponse(params: {
   }
 
   const contentType = upstreamResponse.headers.get('content-type')?.toLowerCase() || '';
-  const bodyText = await upstreamResponse.text();
+  const bodyText = await readUpstreamText(upstreamResponse);
   if (!contentType.includes('application/json')) {
     releaseUpstreamResponse(upstreamResponse);
     log('warn', 'Anthropic 透传响应异常', {
@@ -124,8 +124,6 @@ export async function sendAnthropicPassthroughResponse(params: {
       stream: false,
       response_kind: 'non-json',
       content_type: contentType || null,
-      response_preview: previewText(bodyText),
-      response_body: bodyText,
     });
     return reply.code(502).send({
       type: 'error',
@@ -148,8 +146,6 @@ export async function sendAnthropicPassthroughResponse(params: {
       stream: false,
       response_kind: 'invalid-json',
       content_type: contentType || null,
-      response_preview: previewText(bodyText),
-      response_body: bodyText,
     });
     return reply.code(502).send({
       type: 'error',
@@ -188,7 +184,6 @@ export async function sendAnthropicPassthroughResponse(params: {
     input_tokens: inputTokens,
     output_tokens: outputTokens,
     content_blocks: Array.isArray(output.content) ? output.content.length : 0,
-    response_body: output,
   });
   return reply.code(upstreamResponse.status).send(output);
 }
@@ -262,4 +257,16 @@ export function writeStreamHeaders(reply: FastifyReply, upstreamResponse: Respon
 
 function isOpenAIChatCompletionJson(data: Record<string, unknown>): boolean {
   return typeof data.object === 'string' && data.object.startsWith('chat.completion');
+}
+
+async function readUpstreamText(response: Response): Promise<string> {
+  try {
+    const text = await response.text();
+    markUpstreamResponseBodyComplete(response);
+    return text;
+  } catch (error) {
+    markUpstreamResponseStreamError(response, error instanceof Error ? error.message : String(error), 'network');
+    releaseUpstreamResponse(response);
+    throw error;
+  }
 }

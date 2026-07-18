@@ -13,7 +13,7 @@ export function renderProviderRow(provider, index, expandedProviderId, runtimeSe
     <td class="col-id">${esc(provider.provider_id)}</td>
     <td>${typeLabel}</td>
     <td class="col-url" title="${esc(provider.base_url)}">${esc(provider.base_url)}</td>
-    <td class="col-strategy"><div class="strategy-cell"><span class="strategy-name">${strategy}</span><span class="text-dim">${esc(quotaText)}</span><span>${antiBanSummary(provider, runtimeSettings)}</span></div></td>
+    <td class="col-strategy"><div class="strategy-cell"><span class="strategy-name">${strategy}</span><span class="text-dim">${esc(quotaText)}</span><span>${antiBanSummary(provider, runtimeSettings)} ${circuitSummary(provider)}</span></div></td>
     <td>${badge}</td>
     <td class="col-actions">
       <button class="btn-icon keys-btn" data-provider="${esc(provider.provider_id)}" title="管理 API Keys">${isExpanded ? '收起 Keys' : 'Keys'} (${keys.length})</button>
@@ -34,6 +34,8 @@ export function renderModelRow(model, index) {
     <td class="col-model">${esc(model.client_model)}</td>
     <td>${esc(model.provider_id)}</td>
     <td>${esc(model.upstream_model)}</td>
+    <td class="col-number">${esc(model.priority ?? 0)}</td>
+    <td class="col-number">${esc(model.weight ?? 1)}</td>
     <td>${badge}</td>
     <td class="col-actions">
       <button class="btn-icon move-up-btn" data-idx="${index}">上移</button>
@@ -64,4 +66,13 @@ function antiBanSummary(provider, runtimeSettings) {
   return recover > 0
     ? `<span class="badge badge-info">自动恢复 ${recover} 分钟</span>`
     : '<span class="badge badge-warn">仅手动恢复</span>';
+}
+
+function circuitSummary(provider) {
+  if (provider.circuit_breaker === null) return '<span class="badge badge-off">熔断 关</span>';
+  if (provider.circuit_status?.state === 'open') return '<span class="badge badge-off">熔断中</span>';
+  if (provider.circuit_status?.state === 'half_open') return '<span class="badge badge-warn">半开探测</span>';
+  const threshold = provider.circuit_breaker?.failure_threshold ?? 3;
+  const recovery = provider.circuit_breaker?.recovery_seconds ?? 30;
+  return `<span class="badge badge-info">熔断 ${esc(threshold)}次 / ${esc(recovery)}秒</span>`;
 }

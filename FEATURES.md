@@ -499,7 +499,7 @@ if provider.auto_recover_minutes > 0
 | `network error` (fetch 抛错) | 同 transient |
 | 等待 Key 超时 (`等待可用 API Key 超时`) | 返回上次响应或 503 |
 
-### 11.3 截断条件
+### 10.3 截断条件
 
 每次循环开头检查：
 - 已尝试次数 >= `max_attempts`
@@ -508,11 +508,25 @@ if provider.auto_recover_minutes > 0
 
 满足任一即返回 `lastResponse` 或 502。
 
-### 11.4 流式与重试
+### 10.4 流式与重试
 
 流式请求 `timeoutMs = undefined`（不设单次 fetch 超时，依赖 idle 超时）。
 
 流式响应一旦 `response.ok === true`，重试机制即结束；后续的流中断只能通过 `markUpstreamResponseStreamError` 回写 Key 健康状态，不能再换 Key 重发。
+
+### 10.5 模型路由与 Provider 熔断
+
+同一 `client_model` 可配置多条路由。`RuntimeConfigManager` 先排除停用 Provider、无可用 Key、配额阻断和熔断中的候选；`RoutingPolicy` 再选择最小 `priority` 组，并按 `weight` 加权。两字段默认分别为 `0` 和 `1`。
+
+Provider 的 `circuit_breaker` 默认开启：连续 3 次网络或 5xx 失败后打开 30 秒。冷却结束进入半开，只允许一个探测请求；探测成功关闭熔断，失败重新开始冷却。每个探测 lease 带代际与唯一 ID，因此旧请求的迟到结果不能覆盖新状态。429、鉴权、配额及请求大小错误证明链路可达，不计入 Provider 失败。
+
+```json
+{
+  "circuit_breaker": { "failure_threshold": 3, "recovery_seconds": 30 }
+}
+```
+
+显式配置 `circuit_breaker: null` 可关闭。管理 DTO 只返回熔断状态、连续失败数和恢复时间，不包含 Key、模型名或请求内容。跨 Provider 自动重放暂未启用；熔断影响后续路由选择，避免上游已受理时重复计费。
 
 ---
 
@@ -612,7 +626,7 @@ interface ConfigRepository {
 
 ### 13.2 详细模式
 
-`LOG_DETAILED=true` 时记录 `request_body` / `response_body` / `request` / `response` 字段；默认关闭。
+`LOG_DETAILED=true` 只允许代码显式调用安全诊断事件；Logger 边界始终删除请求/响应正文、Header、Key、Token、模型名、请求 ID 和会话 ID，并对错误字符串中的常见凭证格式再次脱敏。SSE 管线不会为日志额外缓冲完整响应。
 
 ### 13.3 轮转
 

@@ -87,11 +87,8 @@ export class Logger {
   log(level: LogLevel, message: string, extra: Record<string, unknown> = {}): void {
     if (LEVEL_WEIGHT[level] < LEVEL_WEIGHT[this.currentLevel]) return;
 
-    let filteredExtra = extra;
-    if (!this.detailedLogging) {
-      const { request_body, response_body, request, response, ...rest } = extra;
-      filteredExtra = rest;
-    }
+    // 所有输出都经过同一脱敏边界；详细模式只控制 logDetailed 调用是否生效，不能放开正文或凭证。
+    const filteredExtra = sanitizeLogRecord(extra);
 
     const text = this.logFormat === 'json'
       ? JSON.stringify({ ts: nowBeijingIso(), level, message, ...filteredExtra }, ensureReplacer)
@@ -261,7 +258,69 @@ function formatTextLog(level: LogLevel, message: string, extra: Record<string, u
 
 function ensureReplacer(_key: string, value: unknown): unknown {
   if (value instanceof Error) {
-    return { name: value.name, message: value.message, stack: value.stack };
+    return { name: value.name, message: redactLogText(value.message) };
   }
   return value;
+}
+
+const OMITTED_LOG_FIELDS = new Set([
+  'request',
+  'response',
+  'request_body',
+  'response_body',
+  'body_preview',
+  'error_preview',
+  'response_preview',
+  'response_id',
+  'request_id',
+  'session_id',
+  'client_model',
+  'upstream_model',
+  'model',
+  'used_key',
+  'headers',
+  'incoming_headers',
+]);
+
+function sanitizeLogRecord(value: Record<string, unknown>, depth = 0): Record<string, unknown> {
+  if (depth > 4) return {};
+  const result: Record<string, unknown> = {};
+  for (const [name, fieldValue] of Object.entries(value)) {
+    if (shouldOmitLogField(name) || fieldValue === undefined) continue;
+    result[name] = sanitizeLogValue(fieldValue, depth + 1);
+  }
+  return result;
+}
+
+function sanitizeLogValue(value: unknown, depth: number): unknown {
+  if (value instanceof Error) {
+    return { name: value.name, message: redactLogText(value.message) };
+  }
+  if (typeof value === 'string') return redactLogText(value);
+  if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) return value.slice(0, 20).map((item) => sanitizeLogValue(item, depth + 1));
+  if (typeof value === 'object') return sanitizeLogRecord(value as Record<string, unknown>, depth + 1);
+  return String(value);
+}
+
+function shouldOmitLogField(name: string): boolean {
+  const normalized = name
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toLowerCase()
+    .replace(/[-\s]+/g, '_');
+  if (OMITTED_LOG_FIELDS.has(normalized)) return true;
+  return normalized === 'key'
+    || normalized === 'token'
+    || normalized === 'password'
+    || normalized === 'authorization'
+    || normalized === 'cookie'
+    || /(^|_)(api_key|access_token|refresh_token|auth_token|secret|password|authorization|cookie)(_|$)/.test(normalized);
+}
+
+function redactLogText(value: string): string {
+  return value
+    .replace(/\b(Bearer|Basic)\s+[^\s,;"']+/gi, '$1 [已脱敏]')
+    .replace(/\b(?:sk|pk|token|key)_[A-Za-z0-9._~+/=-]{8,}\b/gi, '[已脱敏]')
+    .replace(/([?&](?:api[_-]?key|token|secret|password)=)[^&#\s]*/gi, '$1[已脱敏]')
+    .slice(0, 1000);
 }

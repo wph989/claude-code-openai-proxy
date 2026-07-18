@@ -96,10 +96,7 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
     log('info', '收到 Claude Code 请求', {
       provider_id: provider.provider_id,
       provider_type: provider.provider_type,
-      client_model: payload.model,
-      upstream_model: route.upstream_model,
       stream: payload.stream === true,
-      request_body: payload,
     });
 
     if (provider.provider_type === 'anthropic') {

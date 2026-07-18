@@ -32,6 +32,8 @@ src/
     admin-config.ts   # 管理 DTO 脱敏、秘密合并与变更预览
     admin-event-stream.ts # 管理端有界 SSE 事件流
     provider-connectivity.ts # Provider 无生成成本连接探测
+    provider-health.ts # Provider 熔断与单半开探测
+    routing-policy.ts  # 模型路由优先级与加权策略
     config/
       repository.ts  # 配置/状态/用量存储端口
       json-file-repository.ts # JSON 原子持久化适配器
@@ -93,12 +95,15 @@ src/
   - 加载/保存 `runtime_models.json`
   - 持久化运行态到 `runtime_state.json` / `runtime_usage.json`
   - 为每个 provider 维护一个 `ApiKeyRotator`
+  - 过滤不可用 Provider/Key，并委托 `RoutingPolicy` 选择同名模型路由
   - 暴露 Key 的 CRUD（启用/禁用/重置/添加/删除/配额）
 - **`services/admin-config.ts`** 构造 `AdminConfigView` / `AdminKeyView`：Key 只返回掩码，Token 只返回是否配置，敏感 Header 在服务端置空；保存时按稳定 ID 合并服务端秘密。
 - **`services/admin-config-service.ts`** 承担全局设置、Provider 和模型路由的资源级写入；路由层只解析 HTTP 参数并映射响应。
 - **`services/key-admin-service.ts`** 统一稳定 ID Key 的增删、启停、重置、备注、配额和主动导出，避免路由层直接操作运行时门面。
 - **`services/admin-event-stream.ts`** 只承载管理面需要的低基数摘要，事件历史限制为 100 条，并拒绝把秘密、正文或查询参数放入事件。
 - **`services/provider-connectivity.ts`** 按显式 Provider 类型选择认证头，通过 `GET /models` 做无生成成本探测；不复用生产 Key lease。
+- **`services/routing-policy.ts`** 先选最小 `priority`，再按 `weight` 加权；随机源可注入，边界测试不依赖概率。
+- **`services/provider-health.ts`** 维护进程内 closed/open/half-open 状态。探测 lease 带唯一 ID 和代际，避免旧并发请求误关新熔断。
 - **`anti-ban-config.ts`** 把多层默认值（全局/供应商/preset）合并成 `ResolvedAntiBan`，供 rotator 使用。
 
 ### 3.4 API Key 轮询与防封 (`api-key-rotator.ts`、`key-selectors.ts`、`quota-guard.ts`)
@@ -135,7 +140,8 @@ src/
   - 自动加上鉴权头（OpenAI 用 `Authorization: Bearer`、Anthropic 用 `x-api-key`）
   - 错误分类 (`classifyUpstreamError`) → `hard_limit` / `rate_limit` / `request_limit` / `transient`
   - 按 `retry.max_attempts` + `max_total_ms` 重试，必要时切换 Key
-  - 暴露 `releaseUpstreamResponse` / `markUpstreamResponseStreamError` 给路由层在响应完成或流式中断时回调
+  - 网络/5xx 回写 Provider 熔断；429/4xx 只影响 Key 或请求
+  - 暴露 `releaseUpstreamResponse` / `markUpstreamResponseStreamError`，在响应真正消费完成后确认 Provider 成功，断流时记录失败
 - **`services/providers/`** 按显式 `provider_type` 注册 `ProviderAdapter`，统一 URL、认证头与协议能力；禁止根据 URL、Key 或模型名隐式推断协议。
 - **`http-headers.ts`** 黑名单剥离 hop-by-hop 头与代理无意义头，保留 Claude Code/Anthropic SDK 依赖的私有头。
 
@@ -231,6 +237,5 @@ markError / markRateLimited / markQuotaError
 ## 6. 已知后续改进方向
 
 - 接入 SQLite + WAL 或其他集中式状态存储后，再开放多 Worker 集群。
-- `logger.ts` 全局可变状态较多，未来可抽成实例化的 `Logger`，让测试更容易隔离。
-- `runtime-config.ts` 中 Key CRUD 接口较多，可考虑独立成 `KeyAdminService`。
-- `response-fix.ts` 修复状态机较复杂，建议补充单元测试覆盖各分支。
+- 跨 Provider 重试需先定义幂等键透传与重复计费边界；当前只对后续请求执行健康故障转移。
+- 配置历史/回滚、费用预算、Webhook 告警和 Responses API 按产品需求逐项引入。

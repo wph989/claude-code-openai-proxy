@@ -10,7 +10,7 @@
  */
 
 import type { ApiKeyRotator, KeyErrorCategory, KeyLease } from '../api-key-rotator.js';
-import type { ProviderHealthRegistry } from '../provider-health.js';
+import type { ProviderCircuitLease, ProviderHealthRegistry } from '../provider-health.js';
 
 interface ResponseMeta {
   rotator?: ApiKeyRotator;
@@ -18,6 +18,8 @@ interface ResponseMeta {
   lease?: KeyLease;
   providerHealth?: ProviderHealthRegistry;
   providerId?: string;
+  providerCircuitLease?: ProviderCircuitLease;
+  providerOutcomeRecorded?: boolean;
 }
 
 const responseMeta = new WeakMap<Response, ResponseMeta>();
@@ -35,6 +37,9 @@ export function releaseUpstreamResponse(response: Response, usage?: { requests: 
   if (!meta) return;
   if (usage && meta.rotator && meta.key) meta.rotator.recordUsage(meta.key, usage.requests, usage.tokens);
   if (meta.lease && meta.rotator) meta.rotator.release(meta.lease);
+  if (meta.providerHealth && meta.providerId && !meta.providerOutcomeRecorded) {
+    meta.providerHealth.recordSuccess(meta.providerId, meta.providerCircuitLease);
+  }
   responseMeta.delete(response);
 }
 
@@ -51,8 +56,17 @@ export function markUpstreamResponseStreamError(
   const meta = responseMeta.get(response);
   if (!meta) return;
   if (meta.rotator && meta.key) meta.rotator.markError(meta.key, message, category);
-  if (meta.providerHealth && meta.providerId) {
+  if (meta.providerHealth && meta.providerId && !meta.providerOutcomeRecorded) {
     // 流式阶段已经拿到 HTTP 头；此处的断流只能归为链路故障，不能把它算成单 Key 配额错误。
-    meta.providerHealth.recordFailure(meta.providerId, 'network');
+    meta.providerHealth.recordFailure(meta.providerId, 'network', meta.providerCircuitLease);
+    meta.providerOutcomeRecorded = true;
   }
+}
+
+/** 非流式 body 已完整读完时先确认 Provider 成功，后续协议转换异常不应占住半开探测。 */
+export function markUpstreamResponseBodyComplete(response: Response): void {
+  const meta = responseMeta.get(response);
+  if (!meta?.providerHealth || !meta.providerId || meta.providerOutcomeRecorded) return;
+  meta.providerHealth.recordSuccess(meta.providerId, meta.providerCircuitLease);
+  meta.providerOutcomeRecorded = true;
 }

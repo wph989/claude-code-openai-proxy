@@ -90,8 +90,6 @@ export async function handleOpenAICompatibleMessages(
     setForwardResponseHeaders(reply, upstreamResponse);
     log('info', '非流式响应完成', {
       provider_id: provider.provider_id,
-      client_model: payload.model,
-      upstream_model: route.upstream_model,
       upstream_status: upstreamResponse.status,
       downstream_status: upstreamResponse.status,
       stream: false,
@@ -101,7 +99,6 @@ export async function handleOpenAICompatibleMessages(
       input_tokens: inputTokens,
       output_tokens: outputTokens,
       content_blocks: Array.isArray(body.content) ? body.content.length : 0,
-      response_body: body,
     });
     return reply.code(upstreamResponse.status).send(body);
   }

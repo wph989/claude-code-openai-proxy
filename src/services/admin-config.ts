@@ -8,6 +8,7 @@ import type {
   RuntimeConfig,
 } from '../types/runtime-config.js';
 import type { KeyErrorCategory, KeyRuntimeStatus } from './api-key-rotator.js';
+import type { ProviderHealthRegistry } from './provider-health.js';
 
 export interface AdminKeyView {
   id: string;
@@ -35,6 +36,12 @@ export type AdminProviderView = Omit<ProviderConfig, 'api_key' | 'headers'> & {
   api_key: AdminKeyView[];
   /** 敏感 Header 的值固定为 null，表示“已配置但不下发”。 */
   headers: Record<string, string | null>;
+  /** 仅包含进程内低基数健康状态，不暴露请求或凭证。 */
+  circuit_status?: {
+    state: 'closed' | 'open' | 'half_open';
+    consecutive_failures: number;
+    open_until: number | null;
+  };
 };
 
 export type AdminRuntimeConfigView = Omit<RuntimeConfig, 'providers' | 'proxy_auth_token'> & {
@@ -104,16 +111,27 @@ export function toAdminKeyView(
 export function buildAdminRuntimeConfigView(
   config: RuntimeConfig,
   keyStates: Record<string, KeyRuntimeStatus[]>,
+  providerHealth?: ProviderHealthRegistry,
 ): AdminRuntimeConfigView {
-  const providers = config.providers.map((provider): AdminProviderView => ({
-    ...provider,
-    // 配置视图只列出可持久化 Key；环境变量 Key 只出现在 key_states，避免整体保存把环境变量秘密写回文件。
-    api_key: (Array.isArray(provider.api_key) ? provider.api_key : []).map((entry) => {
-      const status = (keyStates[provider.provider_id] || []).find((item) => item.id === entry.id);
-      return toAdminKeyView(status || entry);
-    }),
-    headers: redactHeaders(provider.headers || {}),
-  }));
+  const providers = config.providers.map((provider): AdminProviderView => {
+    const circuit = providerHealth?.snapshot(provider.provider_id);
+    return {
+      ...provider,
+      // 配置视图只列出可持久化 Key；环境变量 Key 只出现在 key_states，避免整体保存把环境变量秘密写回文件。
+      api_key: (Array.isArray(provider.api_key) ? provider.api_key : []).map((entry) => {
+        const status = (keyStates[provider.provider_id] || []).find((item) => item.id === entry.id);
+        return toAdminKeyView(status || entry);
+      }),
+      headers: redactHeaders(provider.headers || {}),
+      ...(circuit ? {
+        circuit_status: {
+          state: circuit.state,
+          consecutive_failures: circuit.consecutiveFailures,
+          open_until: circuit.openUntil,
+        },
+      } : {}),
+    };
+  });
   const { proxy_auth_token: _secret, ...safeConfig } = config;
   return { ...safeConfig, providers };
 }

@@ -22,6 +22,10 @@ export function providerFormHtml(item) {
   const quotaReqVal = quota.max_requests != null ? quota.max_requests : '';
   const quotaTokVal = quota.max_tokens != null ? quota.max_tokens : '';
   const quotaThrVal = quota.soft_stop_threshold != null ? quota.soft_stop_threshold : '';
+  const circuitBreakerEnabled = p.circuit_breaker !== null;
+  const circuitBreaker = p.circuit_breaker || {};
+  const failureThreshold = circuitBreaker.failure_threshold ?? 3;
+  const recoverySeconds = circuitBreaker.recovery_seconds ?? 30;
   const keyDisplay = keys.length > 0
     ? `<div class="key-info-box"><div class="form-label-row"><span class="form-label">当前 API Keys</span><i class="info-tip" data-tip="在供应商列表的&quot;Keys&quot;面板中管理各 Key 的启用/禁用/重置。新增 Key 请在下方输入。">i</i></div><div class="key-list-preview">${keys.map((k, i) =>
         `<div class="key-list-item ${k.enabled ? '' : 'key-disabled'}">${i + 1}. ${esc(k.key_mask || '********')} <span class="badge ${k.enabled ? 'badge-on' : 'badge-off'}">${k.enabled ? '启用' : '禁用'}</span> <span class="text-dim">错误: ${k.error_count || 0}</span></div>`
@@ -73,6 +77,25 @@ export function providerFormHtml(item) {
           <input id="mf-auto_recover_minutes" type="number" min="0" value="${p.auto_recover_minutes||0}" placeholder="0 = 不自动恢复" />
         </div>
       </div>
+      <div class="field-fieldset">
+        <div class="field-fieldset-title">Provider 熔断</div>
+        <div class="form-group">
+          <label class="checkbox-wrapper">
+            <input id="mf-circuit_breaker_enabled" type="checkbox" ${circuitBreakerEnabled?'checked':''} />
+            <span class="checkbox-label">启用链路熔断 <span class="field-key">circuit_breaker</span><i class="info-tip" data-tip="只统计网络异常和 5xx。达到阈值后暂停选择该 Provider，冷却结束只放行一个半开探测；429、鉴权和请求大小错误不会打开熔断。">i</i></span>
+          </label>
+        </div>
+        <div class="form-grid form-grid-compact">
+          <div class="form-group" style="margin-bottom:0">
+            <div class="form-label-row"><span class="form-label">连续失败阈值</span><span class="field-key">failure_threshold</span></div>
+            <input id="mf-circuit_failure_threshold" type="number" min="1" max="100" step="1" value="${esc(failureThreshold)}" />
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <div class="form-label-row"><span class="form-label">恢复冷却</span><span class="field-key">recovery_seconds</span><span class="form-label-unit">秒</span></div>
+            <input id="mf-circuit_recovery_seconds" type="number" min="1" max="3600" step="1" value="${esc(recoverySeconds)}" />
+          </div>
+        </div>
+      </div>
       <div class="form-group">
         <div class="form-label-row"><span class="form-label">请求超时</span><span class="field-key">timeout_seconds</span><span class="form-label-unit">秒</span></div>
         <input id="mf-timeout_seconds" type="number" min="1" value="${p.timeout_seconds||300}" />
@@ -113,6 +136,15 @@ export function collectProviderForm() {
   if (!base_url) throw new Error('上游接入地址 不能为空');
 
   const quota = readQuotaInputs('mfq');
+  const circuitBreakerEnabled = $('#mf-circuit_breaker_enabled').checked;
+  const failureThreshold = Number($('#mf-circuit_failure_threshold').value);
+  const recoverySeconds = Number($('#mf-circuit_recovery_seconds').value);
+  if (circuitBreakerEnabled && (!Number.isInteger(failureThreshold) || failureThreshold < 1 || failureThreshold > 100)) {
+    throw new Error('熔断连续失败阈值必须是 1~100 的整数');
+  }
+  if (circuitBreakerEnabled && (!Number.isInteger(recoverySeconds) || recoverySeconds < 1 || recoverySeconds > 3600)) {
+    throw new Error('熔断恢复冷却必须是 1~3600 秒的整数');
+  }
 
   return {
     provider_id,
@@ -126,6 +158,10 @@ export function collectProviderForm() {
     enabled: $('#mf-enabled').checked,
     auto_disable_on_error: $('#mf-auto_disable_on_error').checked,
     auto_recover_minutes: Number($('#mf-auto_recover_minutes').value || 0),
+    circuit_breaker: circuitBreakerEnabled ? {
+      failure_threshold: failureThreshold,
+      recovery_seconds: recoverySeconds,
+    } : null,
     quota,
     headers: parseJsonSafe($('#mf-headers').value, {}),
     description: $('#mf-description').value.trim(),

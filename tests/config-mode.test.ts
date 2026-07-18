@@ -51,12 +51,13 @@ describe('配置模式判断', () => {
     });
   });
 
-  it('首次生成随机管理口令时会把 token 打印到日志', () => {
+  it('首次生成随机管理口令时只提示文件位置，不打印 token', () => {
     const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
       logGeneratedAdminAuthToken('/tmp/.ccop/.env', 'ccop_test_token');
       expect(spy).toHaveBeenCalledWith('[config] 随机管理口令已写入:', '/tmp/.ccop/.env');
-      expect(spy).toHaveBeenCalledWith('[config] ADMIN_AUTH_TOKEN=ccop_test_token');
+      expect(spy).toHaveBeenCalledWith('[config] 请从该 .env 文件读取 ADMIN_AUTH_TOKEN。');
+      expect(JSON.stringify(spy.mock.calls)).not.toContain('ccop_test_token');
     } finally {
       spy.mockRestore();
     }

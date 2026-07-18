@@ -494,7 +494,7 @@ function renderTable() {
     if (isProvider) {
       html += renderTableHead(['provider_id','provider_type','base_url','key_rotation_strategy','enabled'], st, ['ID','类型','URL','切换策略','状态']);
     } else {
-      html += renderTableHead(['client_model','provider_id','upstream_model','enabled'], st, ['客户端模型','供应商','上游模型','状态']);
+      html += renderTableHead(['client_model','provider_id','upstream_model','priority','weight','enabled'], st, ['客户端模型','供应商','上游模型','优先级','权重','状态']);
     }
     html += '<tbody>';
     for (let i = 0; i < pageItems.length; i++) {

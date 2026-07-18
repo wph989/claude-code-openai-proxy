@@ -452,6 +452,7 @@ body {
 .strategy-cell .strategy-name { font-size: 13px; color: var(--text); }
 .strategy-cell .badge { font-size: 10px; }
 .data-table .col-model { font-weight: 500; }
+.data-table .col-number { width: 72px; text-align: right; font-variant-numeric: tabular-nums; }
 .data-table .col-actions { white-space: nowrap; text-align: right; }
 .badge {
   display: inline-block; padding: 4px 10px; border-radius: 3px; font-size: 11px;

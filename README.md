@@ -200,7 +200,7 @@ ADMIN_AUTH_TOKEN=change-me-random-admin-token
 # 日志配置
 LOG_LEVEL=info          # debug, info, warn, error
 LOG_FORMAT=json         # json, text
-LOG_DETAILED=false      # 是否记录详细请求/响应
+LOG_DETAILED=false      # 是否允许显式安全诊断事件；始终不记录正文或凭证
 ```
 
 ## runtime_models.json 配置
@@ -227,6 +227,7 @@ LOG_DETAILED=false      # 是否记录详细请求/响应
       "auto_disable_on_error": true,
       "auto_recover_minutes": 0,
       "timeout_seconds": 300,
+      "circuit_breaker": { "failure_threshold": 3, "recovery_seconds": 30 },
       "enabled": true,
       "headers": {},
       "description": "示例供应商"
@@ -238,6 +239,8 @@ LOG_DETAILED=false      # 是否记录详细请求/响应
       "client_model": "claude-model",
       "provider_id": "openai-compatible",
       "upstream_model": "your-upstream-model",
+      "priority": 0,
+      "weight": 1,
       "enabled": true,
       "extra_body": {},
       "description": "示例模型映射"
@@ -253,28 +256,30 @@ LOG_DETAILED=false      # 是否记录详细请求/响应
 
 ### 模型重名与负载均衡
 
-从 v0.4.2 开始，**允许多个路由使用相同的 `client_model` 名称**。请求时先排除停用 Provider、无 Key 和本地配额已阻断的候选，再从健康路由中随机选择，实现简单的负载均衡与故障回退：
+允许多个路由使用相同的 `client_model` 名称。请求时先排除停用 Provider、无可用 Key、本地配额阻断和熔断冷却中的候选，再选择数值最小的 `priority` 组，并按 `weight` 做加权分配：
 
 ```json
 {
   "providers": [
-    { "provider_id": "openai", "base_url": "https://api.openai.com/v1", "api_key": "sk-..." },
-    { "provider_id": "azure", "base_url": "https://azure.openai.azure.com", "api_key": "..." },
+    { "provider_id": "openai", "base_url": "https://api.openai.com/v1", "api_key": "sk-...", "circuit_breaker": { "failure_threshold": 3, "recovery_seconds": 30 } },
+    { "provider_id": "azure", "base_url": "https://azure.openai.azure.com", "api_key": "...", "circuit_breaker": { "failure_threshold": 3, "recovery_seconds": 30 } },
     { "provider_id": "deepseek", "base_url": "https://api.deepseek.com", "api_key": "sk-..." }
   ],
   "models": [
-    { "client_model": "gpt-4", "provider_id": "openai", "upstream_model": "gpt-4-turbo" },
-    { "client_model": "gpt-4", "provider_id": "azure", "upstream_model": "gpt-4" },
-    { "client_model": "gpt-4", "provider_id": "deepseek", "upstream_model": "gpt-4" }
+    { "client_model": "gpt-4", "provider_id": "openai", "upstream_model": "gpt-4-turbo", "priority": 0, "weight": 3 },
+    { "client_model": "gpt-4", "provider_id": "azure", "upstream_model": "gpt-4", "priority": 0, "weight": 1 },
+    { "client_model": "gpt-4", "provider_id": "deepseek", "upstream_model": "gpt-4", "priority": 10, "weight": 1 }
   ]
 }
 ```
 
-每次客户端请求 `gpt-4` 时，代理会从三个供应商中随机选一个。配合 `enabled: false` 可以临时禁用某个路由：
+上例正常状态下按 3:1 使用 OpenAI 与 Azure；只有优先级 0 的候选都不可用时才使用 DeepSeek。`priority` 默认 0，`weight` 默认 1；同优先级全部权重为 0 时均匀回退。配合 `enabled: false` 可以临时禁用某个路由：
 
 ```json
 { "client_model": "gpt-4", "provider_id": "azure", "upstream_model": "gpt-4", "enabled": false }
 ```
+
+Provider 默认连续 3 次网络异常或 5xx 后熔断 30 秒；冷却结束只允许一个半开探测，成功后关闭熔断，失败则重新冷却。429、鉴权、配额和请求大小错误不打开熔断。配置 `"circuit_breaker": null` 可关闭该 Provider 的熔断。熔断后续请求会选择其他健康候选；代理不会在已经向上游发送的同一次请求中跨 Provider 自动重放，以免造成重复计费。
 
 **使用场景：**
 - **负载分散**：把流量分散到多个供应商，避免单点配额消耗

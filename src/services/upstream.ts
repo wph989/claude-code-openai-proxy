@@ -15,6 +15,7 @@ import { getProviderAdapter } from './providers/provider-adapter.js';
 import { NOOP_METRICS, type MetricsSink } from './metrics.js';
 import {
   attachResponseMeta,
+  markUpstreamResponseBodyComplete,
   markUpstreamResponseStreamError,
   releaseUpstreamResponse,
 } from './upstream/response-meta.js';
@@ -26,6 +27,7 @@ export {
   classifyUpstreamError,
   isQuotaLimitError,
   markUpstreamResponseStreamError,
+  markUpstreamResponseBodyComplete,
   releaseUpstreamResponse,
 };
 export type { UpstreamErrorClassification };
@@ -181,7 +183,7 @@ export class UpstreamService {
       if (this.providerHealth) {
         circuitLease = this.providerHealth.acquire(params.provider.provider_id) ?? undefined;
         if (!circuitLease) {
-          return new Response('Provider circuit is open', { status: 503, statusText: 'Service Unavailable' });
+          return lastResponse ?? new Response('Provider circuit is open', { status: 503, statusText: 'Service Unavailable' });
         }
       }
 
@@ -227,7 +229,6 @@ export class UpstreamService {
       const usedKey = result.lease?.key;
 
       if (response.ok) {
-        this.providerHealth?.recordSuccess(params.provider.provider_id, circuitLease);
         if (params.rotator && usedKey) {
           params.rotator.markSuccess(usedKey);
           if (isStream && result.lease) {
@@ -237,6 +238,7 @@ export class UpstreamService {
               lease: result.lease,
               providerHealth: this.providerHealth,
               providerId: params.provider.provider_id,
+              providerCircuitLease: circuitLease,
             });
           } else {
             attachResponseMeta(response, {
@@ -244,6 +246,7 @@ export class UpstreamService {
               key: usedKey,
               providerHealth: this.providerHealth,
               providerId: params.provider.provider_id,
+              providerCircuitLease: circuitLease,
             });
             if (result.lease) params.rotator.release(result.lease);
           }
@@ -252,6 +255,7 @@ export class UpstreamService {
           attachResponseMeta(response, {
             providerHealth: this.providerHealth,
             providerId: params.provider.provider_id,
+            providerCircuitLease: circuitLease,
           });
         }
         return response;
@@ -265,19 +269,15 @@ export class UpstreamService {
       if (classification.category === 'transient') {
         this.providerHealth?.recordFailure(params.provider.provider_id, 'server', circuitLease);
       } else {
-        // hard-limit / rate-limit / request-limit 是 Key 或请求级问题，不打开 Provider 熔断。
-        this.providerHealth?.release(params.provider.provider_id, circuitLease);
+        // hard-limit / rate-limit / request-limit 证明链路可达，只影响 Key 或请求，并会终止连续链路失败计数。
+        this.providerHealth?.recordSuccess(params.provider.provider_id, circuitLease);
       }
 
       // 排查 429 / 4xx 自动禁用是否生效：把分类结果与原始 body 一起打出来。
       this.logger.log('warn', '上游错误响应分类', {
         provider_id: params.provider.provider_id,
         status: response.status,
-        status_text: response.statusText,
         category: classification.category,
-        reason: classification.reason,
-        used_key: usedKey ? usedKey.slice(0, 6) + '***' : null,
-        body_preview: bodyText.slice(0, 500)
       });
 
       if (params.rotator && usedKey) {
@@ -334,16 +334,20 @@ export class UpstreamService {
       }
     });
 
-    const data = await safeJson(response);
-    if (!response.ok) {
-      throw new Error(`上游 token 统计失败：${JSON.stringify(data)}`);
+    try {
+      const data = await safeJson(response);
+      if (!response.ok) {
+        throw new Error(`上游 token 统计失败（HTTP ${response.status}）。`);
+      }
+      const usage = isPlainObject(data.usage) ? data.usage : {};
+      const promptTokens = Number(usage.prompt_tokens ?? NaN);
+      if (!Number.isFinite(promptTokens)) {
+        throw new Error('上游响应中不存在 usage.prompt_tokens');
+      }
+      return Math.trunc(promptTokens);
+    } finally {
+      releaseUpstreamResponse(response);
     }
-    const usage = isPlainObject(data.usage) ? data.usage : {};
-    const promptTokens = Number(usage.prompt_tokens ?? NaN);
-    if (!Number.isFinite(promptTokens)) {
-      throw new Error('上游响应中不存在 usage.prompt_tokens');
-    }
-    return Math.trunc(promptTokens);
   }
 
   async countTokensAnthropic(params: {
@@ -363,12 +367,12 @@ export class UpstreamService {
       ...params.route.extra_body
     });
 
-    const result = await this.doFetch({
-      url,
+    const response = await this.postToUpstream({
       provider: params.provider,
+      route: params.route,
       rotator: params.rotator,
       payload: body,
-      acquireDeadline: Date.now() + params.provider.timeout_seconds * 1000,
+      url,
       requestId: params.requestId,
       sessionId: params.sessionId,
       anthropicVersion: params.anthropicVersion,
@@ -376,40 +380,29 @@ export class UpstreamService {
     });
 
     try {
-      const data = await safeJson(result.response);
-      if (!result.response.ok) {
-        if (params.rotator && result.lease) {
-          const errorBody = JSON.stringify(data);
-          const errorText = summarizeUpstreamError(result.response, errorBody);
-          const classification = classifyUpstreamError(result.response.status, result.response.statusText, errorBody);
-          if (classification.category === 'hard_limit') {
-            params.rotator.markQuotaError(result.lease.key, errorText);
-          } else if (classification.category === 'rate_limit') {
-            params.rotator.markRateLimited(result.lease.key, errorText);
-          } else if (classification.category === 'transient') {
-            params.rotator.markError(result.lease.key, errorText);
-          }
-        }
-        throw new Error(`上游 token 统计失败：${JSON.stringify(data)}`);
-      }
-      if (params.rotator && result.lease) {
-        params.rotator.markSuccess(result.lease.key);
-      }
+      const data = await safeJson(response);
+      if (!response.ok) throw new Error(`上游 token 统计失败（HTTP ${response.status}）。`);
       const inputTokens = Number(data.input_tokens ?? NaN);
       if (!Number.isFinite(inputTokens)) {
         throw new Error('上游响应中不存在 input_tokens');
       }
       return Math.trunc(inputTokens);
     } finally {
-      if (params.rotator && result.lease) {
-        params.rotator.release(result.lease);
-      }
+      releaseUpstreamResponse(response);
     }
   }
 }
 
 export async function safeJson(response: Response): Promise<Record<string, unknown>> {
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await response.text();
+    markUpstreamResponseBodyComplete(response);
+  } catch (error) {
+    markUpstreamResponseStreamError(response, error instanceof Error ? error.message : String(error), 'network');
+    releaseUpstreamResponse(response);
+    throw error;
+  }
   try {
     return JSON.parse(text) as Record<string, unknown>;
   } catch {

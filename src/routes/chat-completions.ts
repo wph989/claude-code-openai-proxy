@@ -54,10 +54,7 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
 
     log('info', '收到 OpenAI Chat Completions 请求', {
       provider_id: provider.provider_id,
-      client_model: modelName,
-      upstream_model: route.upstream_model,
-      stream: payload.stream === true,
-      request_body: payload
+      stream: payload.stream === true
     });
 
     const upstreamResponse = await app.upstreamService.postChatCompletions({
@@ -92,16 +89,13 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
       setForwardResponseHeaders(reply, upstreamResponse);
       log('info', 'OpenAI 透传响应完成', {
         provider_id: provider.provider_id,
-        client_model: modelName,
-        upstream_model: route.upstream_model,
         upstream_status: upstreamResponse.status,
         downstream_status: upstreamResponse.status,
         stream: false,
         response_kind: 'openai-json',
         input_tokens: inputTokens,
         output_tokens: outputTokens,
-        total_tokens: isPlainObject(data.usage) ? toInt(data.usage.total_tokens) : 0,
-        response_body: data
+        total_tokens: isPlainObject(data.usage) ? toInt(data.usage.total_tokens) : 0
       });
       return reply.code(upstreamResponse.status).send(data);
     }
@@ -154,7 +148,7 @@ export async function pipeOpenAISse(params: {
   clientAbortSignal?: AbortSignal;
   onUsage?: (usage: StreamTokenUsage) => void;
 }): Promise<void> {
-  const { upstreamResponse, output, requestId, sessionId, providerId, clientModel, upstreamModel, idleTimeoutMs, isClientClosed, clientAbortSignal, onUsage } = params;
+  const { upstreamResponse, output, providerId, idleTimeoutMs, isClientClosed, clientAbortSignal, onUsage } = params;
   const usageTracker = new SseUsageTracker();
   try {
     if (!upstreamResponse.ok) {
@@ -189,10 +183,6 @@ export async function pipeOpenAISse(params: {
     });
     log('info', 'OpenAI 流式透传完成', {
       provider_id: providerId,
-      client_model: clientModel,
-      upstream_model: upstreamModel,
-      request_id: requestId,
-      session_id: sessionId,
       upstream_status: upstreamResponse.status,
       downstream_status: upstreamResponse.status,
       stream: true,
@@ -208,9 +198,7 @@ export async function pipeOpenAISse(params: {
     }
     if (clientClosed) {
       log('info', '客户端断开，停止 OpenAI 流式透传', {
-        provider_id: providerId,
-        client_model: clientModel,
-        upstream_model: upstreamModel
+        provider_id: providerId
       });
       return;
     }

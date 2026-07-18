@@ -82,6 +82,11 @@ describe('管理端敏感信息边界', () => {
         'x-service-secret': null,
         'api-version': '2026-07-17',
       });
+      expect(body.config.providers[0].circuit_status).toMatchObject({
+        state: 'closed',
+        consecutive_failures: 0,
+        open_until: null,
+      });
 
       const keysResponse = await app.inject({ method: 'GET', url: '/api/keys/provider-a', cookies: authCookies });
       expect(keysResponse.statusCode).toBe(200);
