@@ -29,7 +29,7 @@ export interface AddKeysResult {
 
 /**
  * Key 管理应用服务统一输入校验和秘密边界，路由层无需接触底层返回的 Key 字符串。
- * Gateway 保持窄接口，后续可把 RuntimeConfigManager 兼容门面替换为独立仓储实现。
+ * Gateway 保持窄接口，避免应用层依赖 RuntimeConfigManager 的其他协调职责。
  */
 export class KeyAdminService {
   constructor(private readonly gateway: KeyAdminGateway) {}

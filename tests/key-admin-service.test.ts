@@ -12,10 +12,6 @@ beforeEach(() => {
     flushRuntimeStores: vi.fn(async () => undefined),
     getAdminKeyStates: vi.fn(() => []),
     exportKeys: vi.fn(() => []),
-    resolveKeyReference: vi.fn((_providerId, keyRef) => ({
-      keyId: String(keyRef),
-      legacyIndex: null,
-    })),
     resetAllKeys: vi.fn(async () => 0),
     addKeys: vi.fn(async () => ({ added: [], skipped: [] })),
     enableKey: vi.fn(async () => undefined),
