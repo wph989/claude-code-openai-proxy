@@ -16,8 +16,8 @@
 
 ## 2. 当前基线
 
-- TypeScript 已启用严格模式，Vitest 当前 35 个测试文件、268 项测试通过。
-- 当前统计范围内行覆盖率为 87.84%、分支为 84.17%、函数为 90.27%；`runtime-config.ts` 为 80.69%、`upstream.ts` 为 84.43%。
+- TypeScript 已启用严格模式，Vitest 当前 36 个测试文件、270 项测试通过。
+- 当前统计范围内行覆盖率为 87.84%、分支为 84.14%、函数为 90.27%；`runtime-config.ts` 为 80.69%、`upstream.ts` 为 84.43%。
 - `vitest.config.ts` 尚未纳入多数路由、`server.ts`、`response-fix.ts` 和管理端主流程，因此总百分比不能代表完整风险覆盖。
 - 当前剩余复杂度主要集中在 `src/services/runtime-config.ts`、`src/services/api-key-rotator.ts` 与智能路由/多 Worker 状态协调；管理路由、响应修复和前端主流程已完成首轮拆分。
 

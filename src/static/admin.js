@@ -12,7 +12,7 @@ import { renderActivityView } from './views/activity-view.js';
 
 // ── State ──
 const state = createAdminStore();
-let currentTab = 'providers';
+let currentTab = 'overview';
 let editingIndex = -1;        // -1 = add new
 let providerPage = 1;
 let modelPage = 1;
@@ -57,13 +57,28 @@ const antiBanRetryMaxAttemptsInput = $('#antiBanRetryMaxAttempts');
 const antiBanRetryMaxTotalMsInput = $('#antiBanRetryMaxTotalMs');
 const antiBanRetryOnRateLimitInput = $('#antiBanRetryOnRateLimit');
 const antiBanRetryOnTransientInput = $('#antiBanRetryOnTransient');
+const tabOverview = $('#tab-overview');
 const tabProviders = $('#tab-providers');
 const tabModels = $('#tab-models');
+const tabPolicy = $('#tab-policy');
 const tabActivity = $('#tab-activity');
 const modelFilterBar = $('#model-filter-bar');
 const modelFilterName = $('#modelFilterName');
 const modelFilterProvider = $('#modelFilterProvider');
-const tableContainer = $('#table-container');
+const workspaceViews = {
+  overview: $('#view-overview'),
+  providers: $('#view-providers'),
+  models: $('#view-models'),
+  policy: $('#view-policy'),
+  activity: $('#view-activity'),
+};
+const tableSlots = {
+  providers: $('#providerTableSlot'),
+  models: $('#modelTableSlot'),
+  activity: $('#activityTableSlot'),
+};
+const tableContainer = document.createElement('div');
+tableContainer.id = 'table-container';
 
 function setStatus(text, isError) {
   statusBox.textContent = text;
@@ -480,8 +495,10 @@ function filterModels(models) {
 
 // ── Table ──
 function renderTable() {
+  const tableSlot = tableSlots[currentTab];
+  if (!tableSlot) return;
+  if (tableContainer.parentElement !== tableSlot) tableSlot.append(tableContainer);
   if (currentTab === 'activity') {
-    modelFilterBar.style.display = 'none';
     tableContainer.innerHTML = renderActivityView(state.activities, {
       connected: state.eventConnected,
       filter: activityFilter,
@@ -492,7 +509,6 @@ function renderTable() {
   const items = isProvider ? state.config.providers : state.config.models;
   // 模型 tab 支持按名称 / 供应商筛选；供应商 tab 不筛选。
   const displayItems = isProvider ? items : filterModels(items);
-  modelFilterBar.style.display = isProvider ? 'none' : '';
   if (!isProvider) syncModelFilterProviderOptions();
   const st = sortState[currentTab];
   const sorted = sortItems(displayItems, st.field, st.asc);
@@ -932,11 +948,22 @@ async function submitModal() {
 
 // ── Tab switching ──
 function switchTab(tab) {
+  if (!(tab in workspaceViews)) return;
   currentTab = tab;
   expandedKeyProvider = null;
-  tabProviders.classList.toggle('active', tab === 'providers');
-  tabModels.classList.toggle('active', tab === 'models');
-  tabActivity.classList.toggle('active', tab === 'activity');
+  const tabs = {
+    overview: tabOverview,
+    providers: tabProviders,
+    models: tabModels,
+    policy: tabPolicy,
+    activity: tabActivity,
+  };
+  for (const [name, view] of Object.entries(workspaceViews)) {
+    const active = name === tab;
+    view.hidden = !active;
+    tabs[name].classList.toggle('active', active);
+    tabs[name].setAttribute('aria-selected', active ? 'true' : 'false');
+  }
   if (tab === 'activity') {
     unreadActivityCount = 0;
     updateActivityTabCount();
@@ -981,8 +1008,10 @@ function updateActivityTabCount() {
 }
 
 // ── Events ──
+tabOverview.addEventListener('click', () => switchTab('overview'));
 tabProviders.addEventListener('click', () => switchTab('providers'));
 tabModels.addEventListener('click', () => switchTab('models'));
+tabPolicy.addEventListener('click', () => switchTab('policy'));
 tabActivity.addEventListener('click', () => switchTab('activity'));
 $('#refreshBtn').addEventListener('click', loadConfig);
 refreshHistoryBtn.addEventListener('click', loadHistory);

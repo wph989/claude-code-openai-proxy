@@ -60,14 +60,30 @@
     <!-- Status -->
     <div class="status-bar loading" id="status">正在加载配置...</div>
 
-    <!-- Stats -->
-    <div class="stats-grid" id="summary">
-      <div class="stat-card"><div class="stat-label">供应商总数</div><div class="stat-value">0</div></div>
-      <div class="stat-card"><div class="stat-label">模型总数</div><div class="stat-value">0</div></div>
-      <div class="stat-card"><div class="stat-label">启用供应商</div><div class="stat-value">0</div></div>
-      <div class="stat-card"><div class="stat-label">启用模型</div><div class="stat-value">0</div></div>
-    </div>
+    <nav class="tabs workspace-tabs" id="workspaceTabs" role="tablist" aria-label="管理工作视图">
+      <button class="tab-btn active" id="tab-overview" type="button" role="tab" aria-selected="true" aria-controls="view-overview">概览</button>
+      <button class="tab-btn" id="tab-providers" type="button" role="tab" aria-selected="false" aria-controls="view-providers">供应商<span class="tab-count"></span></button>
+      <button class="tab-btn" id="tab-models" type="button" role="tab" aria-selected="false" aria-controls="view-models">模型路由<span class="tab-count"></span></button>
+      <button class="tab-btn" id="tab-policy" type="button" role="tab" aria-selected="false" aria-controls="view-policy">策略</button>
+      <button class="tab-btn" id="tab-activity" type="button" role="tab" aria-selected="false" aria-controls="view-activity">活动日志<span class="tab-count" aria-label="未读活动"></span></button>
+    </nav>
 
+    <section class="workspace-view" id="view-overview">
+      <div class="workspace-view-heading">
+        <div>
+          <h2 class="section-title">运行概览</h2>
+          <p class="card-subtitle">查看当前供应商、模型路由和启用状态。</p>
+        </div>
+      </div>
+      <div class="stats-grid" id="summary">
+        <div class="stat-card"><div class="stat-label">供应商总数</div><div class="stat-value">0</div></div>
+        <div class="stat-card"><div class="stat-label">模型总数</div><div class="stat-value">0</div></div>
+        <div class="stat-card"><div class="stat-label">启用供应商</div><div class="stat-value">0</div></div>
+        <div class="stat-card"><div class="stat-label">启用模型</div><div class="stat-value">0</div></div>
+      </div>
+    </section>
+
+    <section class="workspace-view" id="view-policy" hidden>
     <!-- Global Config -->
     <div class="card">
       <div class="card-header">
@@ -209,23 +225,6 @@
       </div>
     </div>
 
-    <!-- Tabs -->
-    <div class="tabs">
-      <button class="tab-btn active" id="tab-providers">供应商<span class="tab-count"></span></button>
-      <button class="tab-btn" id="tab-models">模型映射<span class="tab-count"></span></button>
-      <button class="tab-btn" id="tab-activity">活动日志<span class="tab-count" aria-label="未读活动"></span></button>
-    </div>
-
-    <!-- Model filter (models tab only) -->
-    <div id="model-filter-bar" class="model-filter-bar" style="display:none">
-      <span class="filter-label">筛选</span>
-      <input id="modelFilterName" type="text" placeholder="按模型名筛选（客户端 / 上游）" />
-      <select id="modelFilterProvider"><option value="">全部供应商</option></select>
-    </div>
-
-    <!-- Table -->
-    <div id="table-container"></div>
-
     <section class="change-preview-section" aria-labelledby="changePreviewTitle">
       <h2 id="changePreviewTitle">配置变更</h2>
       <div class="change-preview" id="configChangePreview" aria-live="polite">正在生成预览...</div>
@@ -237,6 +236,24 @@
         <button class="btn btn-small" id="refreshHistoryBtn" type="button">刷新</button>
       </div>
       <div id="configHistory" aria-live="polite"><div class="empty-state">正在加载...</div></div>
+    </section>
+    </section>
+
+    <section class="workspace-view" id="view-providers" hidden>
+      <div id="providerTableSlot"></div>
+    </section>
+
+    <section class="workspace-view" id="view-models" hidden>
+      <div id="model-filter-bar" class="model-filter-bar">
+        <span class="filter-label">筛选</span>
+        <input id="modelFilterName" type="text" placeholder="按模型名筛选（客户端 / 上游）" />
+        <select id="modelFilterProvider"><option value="">全部供应商</option></select>
+      </div>
+      <div id="modelTableSlot"></div>
+    </section>
+
+    <section class="workspace-view" id="view-activity" hidden>
+      <div id="activityTableSlot"></div>
     </section>
   </main>
 
