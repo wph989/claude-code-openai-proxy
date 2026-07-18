@@ -15,94 +15,25 @@
  */
 
 import { createId } from '../utils/id.js';
-import { isPlainObject, toInt } from '../utils/guards.js';
-import { mapFinishReason } from './transformers.js';
+import { isPlainObject } from '../utils/guards.js';
+import { SseEventDecoder, renderSseEvents, type SseEvent } from './response-fix/sse-codec.js';
 
-// OpenAI 兼容的 stop_reason → Anthropic 的映射（与 transformers.ts 保持一致，避免重复实现）。
-// 这里直接复用 transformers.ts 的 mapFinishReason。
-
-interface SseEvent {
-  event?: string;
-  data: string;
-}
+// 保留旧导入路径作为兼容门面，调用方可逐步迁移到职责更窄的子模块。
+export {
+  looksLikeAnthropicSSE,
+  looksLikeBrokenAnthropicSSE,
+  looksLikeOpenAISSE,
+} from './response-fix/detection.js';
+export {
+  transformOpenAIJsonToAnthropicJson,
+  transformOpenAISSEToAnthropicSSE,
+} from './response-fix/openai-converter.js';
 
 export interface FixInfo {
   newId: string;
   droppedThinkingIndices: number[];
   renumbered: Record<number, number>;
   inserted: { contentBlockStop: number[]; messageDelta: boolean; messageStop: boolean };
-}
-
-function toBuffer(body: Buffer | Uint8Array | string): Buffer {
-  if (Buffer.isBuffer(body)) return body;
-  if (typeof body === 'string') return Buffer.from(body, 'utf8');
-  return Buffer.from(body);
-}
-
-/**
- * 粗判：响应头几个字节是否像 OpenAI chat.completion.chunk 流。
- * 命中任一标记或 SSE 首行是 data: {"id":"chatcmpl-...} 即视为 OpenAI 风格。
- */
-export function looksLikeOpenAISSE(body: Buffer | Uint8Array | string): boolean {
-  const buf = toBuffer(body);
-  if (buf.length === 0) return false;
-  const head = buf.subarray(0, 4096).toString('utf8');
-  const markers = [
-    '"object":"chat.completion.chunk"',
-    '"object": "chat.completion.chunk"',
-    '"object":"chat.completion"',
-    '"object": "chat.completion"',
-  ];
-  if (markers.some((m) => head.includes(m))) return true;
-  const stripped = head.replace(/^\s+/, '');
-  return /^data:\s*\{"id":"chatcmpl-/.test(stripped) || /^data:\{"id":"chatcmpl-/.test(stripped);
-}
-
-/**
- * 粗判：响应体已经是 Anthropic SSE 形态（含 message_start），但 id 是 OpenAI 风格的 chatcmpl-。
- * 这是 oneapi 等网关在把 OpenAI 响应包成 Anthropic SSE 时的常见"半成品"。
- */
-export function looksLikeBrokenAnthropicSSE(body: Buffer | Uint8Array | string): boolean {
-  const buf = toBuffer(body);
-  if (buf.length === 0) return false;
-  const head = buf.subarray(0, 16384).toString('utf8');
-  const hasAnthropicFrame =
-    head.includes('event: message_start') ||
-    head.includes('"type":"message_start"') ||
-    head.includes('"type": "message_start"');
-  const hasOpenAiId =
-    head.includes('"id":"chatcmpl-') || head.includes('"id": "chatcmpl-');
-  return hasAnthropicFrame && hasOpenAiId;
-}
-
-export function looksLikeAnthropicSSE(body: Buffer | Uint8Array | string): boolean {
-  const buf = toBuffer(body);
-  if (buf.length === 0) return false;
-  const head = buf.subarray(0, 16384).toString('utf8');
-  return (
-    head.includes('event: message_start') ||
-    head.includes('event: content_block_start') ||
-    head.includes('"type":"message_start"') ||
-    head.includes('"type": "message_start"') ||
-    head.includes('"type":"content_block_start"') ||
-    head.includes('"type": "content_block_start"')
-  );
-}
-
-/**
- * 把 SseEvent[] 渲染回 SSE bytes。每条事件以 event: / data: 双行 + 空行结束。
- */
-function renderSseEvents(events: SseEvent[]): Buffer {
-  if (events.length === 0) return Buffer.from('');
-  const lines: string[] = [];
-  for (const ev of events) {
-    lines.push(`event: ${ev.event ?? 'message'}`);
-    lines.push(`data: ${ev.data ?? '{}'}`);
-    lines.push(''); // 空行 = 事件分隔
-  }
-  // 流式修复会把单个事件分多次 write；末尾必须再补一个换行，
-  // 否则下一次 write 的 event: 会紧跟在 data 行后面，客户端不会派发上一条事件。
-  return Buffer.from(`${lines.join('\n')}\n`, 'utf8');
 }
 
 /**
@@ -123,8 +54,7 @@ function renderSseEvents(events: SseEvent[]): Buffer {
 export class StreamingAnthropicSSEFixer {
   private dropThinking: boolean;
   private newId: string;
-  private buffer = '';
-  private current: SseEvent = { data: '' }; // 跨 push 调用保持，直到遇到空行 flush
+  private decoder = new SseEventDecoder();
   private remap = new Map<number, number>();
   private nextIndex = 0;
   private thinkingIndices = new Set<number>();
@@ -147,30 +77,7 @@ export class StreamingAnthropicSSEFixer {
    * 喂入 SSE 分块（可能不在事件边界），返回已修复的完整事件（可能为空）。
    */
   push(chunk: Buffer | Uint8Array | string): Buffer | null {
-    this.buffer += toBuffer(chunk).toString('utf8');
-    const lines = this.buffer.split('\n');
-    this.buffer = lines.pop() ?? ''; // 保留不完整的最后一行
-    const ready: SseEvent[] = [];
-    const flush = () => {
-      if (this.current.data || this.current.event) {
-        ready.push({ event: this.current.event, data: this.current.data });
-        this.current = { data: '' }; // 重置
-      }
-    };
-    for (const raw of lines) {
-      const line = raw.replace(/\r$/, '');
-      if (line === '') {
-        flush();
-        continue;
-      }
-      if (line.startsWith(':')) continue;
-      if (line.startsWith('event:')) {
-        this.current.event = line.slice(6).trim();
-      } else if (line.startsWith('data:')) {
-        const piece = line.slice(5).trimStart();
-        this.current.data = this.current.data ? `${this.current.data}\n${piece}` : piece;
-      }
-    }
+    const ready = this.decoder.push(chunk);
     if (ready.length === 0) return null;
 
     // 第一遍：扫描 thinking 块的 index
@@ -408,234 +315,4 @@ export function fixBrokenAnthropicSSE(
     fixed: Buffer.concat([fixed1, tail]),
     info: fixer.getFixInfo(),
   };
-}
-
-/**
- * 把 OpenAI 风格的 chat.completion.chunk SSE 流转成 Anthropic Messages SSE。
- * 输入/输出都是 utf-8 bytes；本函数不接受裸流（流式由调用方 buffer 完整 body 后调用）。
- */
-export function transformOpenAISSEToAnthropicSSE(body: Buffer | Uint8Array): Buffer {
-  const text = toBuffer(body).toString('utf8');
-  const chunks: string[] = [];
-
-  let msgId = createId('msg');
-  let model = 'unknown';
-  let outputTokens = 0;
-  let inputTokens = 0;
-  let sentMessageStart = false;
-  let thinkingOpen = false;
-  let textOpen = false;
-  let nextBlockIndex = 0;
-  let thinkingIndex: number | null = null;
-  let textIndex: number | null = null;
-  let stopReason = 'end_turn';
-  let finalUsage: Record<string, unknown> | null = null;
-
-  const emit = (event: string, data: Record<string, unknown>): void => {
-    chunks.push(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  };
-
-  for (const rawLine of text.split('\n')) {
-    const line = rawLine.trim();
-    if (!line || !line.startsWith('data:')) continue;
-    const payload = line.slice(5).trim();
-    if (payload === '[DONE]') break;
-    let obj: Record<string, unknown>;
-    try { obj = JSON.parse(payload) as Record<string, unknown>; } catch { continue; }
-
-    if (!sentMessageStart) {
-      if (typeof obj.id === 'string' && obj.id && !obj.id.startsWith('chatcmpl-')) msgId = obj.id;
-      if (typeof obj.model === 'string' && obj.model) model = obj.model;
-      emit('message_start', {
-        type: 'message_start',
-        message: {
-          id: msgId,
-          type: 'message',
-          role: 'assistant',
-          model,
-          content: [],
-          stop_reason: null,
-          stop_sequence: null,
-          usage: {
-            input_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            output_tokens: 1,
-            server_tool_use: null,
-          },
-        },
-      });
-      sentMessageStart = true;
-    }
-
-    const choices = Array.isArray(obj.choices) ? (obj.choices as Array<Record<string, unknown>>) : [];
-    for (const ch of choices) {
-      const delta = (ch.delta as Record<string, unknown> | undefined) || {};
-      const reasoningContent = delta.reasoning_content;
-      if (typeof reasoningContent === 'string' && reasoningContent) {
-        if (!thinkingOpen) {
-          thinkingIndex = nextBlockIndex;
-          nextBlockIndex += 1;
-          emit('content_block_start', {
-            type: 'content_block_start',
-            index: thinkingIndex,
-            content_block: { type: 'thinking', thinking: '' },
-          });
-          thinkingOpen = true;
-        }
-        emit('content_block_delta', {
-          type: 'content_block_delta',
-          index: thinkingIndex,
-          delta: { type: 'thinking_delta', thinking: reasoningContent },
-        });
-      }
-      const content = delta.content;
-      if (typeof content === 'string' && content) {
-        if (thinkingOpen) {
-          emit('content_block_stop', { type: 'content_block_stop', index: thinkingIndex });
-          thinkingOpen = false;
-        }
-        if (!textOpen) {
-          textIndex = nextBlockIndex;
-          nextBlockIndex += 1;
-          emit('content_block_start', {
-            type: 'content_block_start',
-            index: textIndex,
-            content_block: { type: 'text', text: '' },
-          });
-          textOpen = true;
-        }
-        outputTokens += Math.max(1, Math.floor((content.length + 3) / 4));
-        emit('content_block_delta', {
-          type: 'content_block_delta',
-          index: textIndex,
-          delta: { type: 'text_delta', text: content },
-        });
-      }
-      const finishReason = ch.finish_reason;
-      if (typeof finishReason === 'string' && finishReason) {
-        stopReason = mapFinishReason(finishReason) ?? 'end_turn';
-      }
-    }
-
-    const usage = (obj.usage as Record<string, unknown> | undefined) || null;
-    if (usage) {
-      finalUsage = usage;
-      const promptTokens = Number(usage.prompt_tokens);
-      if (Number.isFinite(promptTokens)) inputTokens = Math.trunc(promptTokens);
-      const completionTokens = Number(usage.completion_tokens);
-      if (Number.isFinite(completionTokens)) outputTokens = Math.trunc(completionTokens);
-    }
-  }
-
-  if (!sentMessageStart) {
-    emit('message_start', {
-      type: 'message_start',
-      message: {
-        id: msgId,
-        type: 'message',
-        role: 'assistant',
-        model,
-        content: [],
-        stop_reason: null,
-        stop_sequence: null,
-        usage: {
-          input_tokens: 0,
-          cache_creation_input_tokens: 0,
-          cache_read_input_tokens: 0,
-          output_tokens: 0,
-          server_tool_use: null,
-        },
-      },
-    });
-  }
-  if (thinkingOpen) {
-    emit('content_block_stop', { type: 'content_block_stop', index: thinkingIndex });
-  }
-  if (textOpen) {
-    emit('content_block_stop', { type: 'content_block_stop', index: textIndex });
-  }
-  const usageOut: Record<string, number | null> = { output_tokens: outputTokens };
-  if (inputTokens || (finalUsage && Number.isFinite(Number(finalUsage.prompt_tokens)))) {
-    usageOut.input_tokens = inputTokens || Math.trunc(Number(finalUsage?.prompt_tokens ?? 0));
-  } else {
-    usageOut.input_tokens = 0;
-  }
-  emit('message_delta', {
-    type: 'message_delta',
-    delta: { stop_reason: stopReason, stop_sequence: null },
-    usage: usageOut,
-  });
-  emit('message_stop', { type: 'message_stop' });
-
-  return Buffer.from(chunks.join(''), 'utf8');
-}
-
-/**
- * 把非流式 OpenAI chat.completion JSON 转成 Anthropic message JSON。
- * 输入解析失败时原样返回 bytes。
- */
-export function transformOpenAIJsonToAnthropicJson(body: Buffer | Uint8Array): Buffer {
-  const text = toBuffer(body).toString('utf8');
-  let obj: Record<string, unknown>;
-  try { obj = JSON.parse(text) as Record<string, unknown>; } catch { return toBuffer(body); }
-  const choices = Array.isArray(obj.choices) ? (obj.choices as Array<Record<string, unknown>>) : [];
-  if (choices.length === 0) return toBuffer(body);
-
-  const choice = choices[0] || {};
-  const message = (choice.message as Record<string, unknown> | undefined) || {};
-  const content: Array<Record<string, unknown>> = [];
-  const reasoning = message.reasoning_content;
-  if (typeof reasoning === 'string' && reasoning) {
-    content.push({ type: 'thinking', thinking: reasoning });
-  }
-  const mainContent = message.content;
-  if (typeof mainContent === 'string' && mainContent) {
-    content.push({ type: 'text', text: mainContent });
-  }
-
-  const toolCalls = Array.isArray(message.tool_calls) ? (message.tool_calls as Array<Record<string, unknown>>) : [];
-  for (const toolCall of toolCalls) {
-    const fn = (toolCall.function as Record<string, unknown> | undefined) || {};
-    let input: Record<string, unknown> = {};
-    try {
-      input = JSON.parse(String(fn.arguments ?? '{}')) as Record<string, unknown>;
-    } catch {
-      input = { raw: String(fn.arguments ?? '') };
-    }
-    content.push({
-      type: 'tool_use',
-      id: String(toolCall.id ?? ''),
-      name: String(fn.name ?? ''),
-      input,
-    });
-  }
-
-  const usage = (obj.usage as Record<string, unknown> | undefined) || {};
-  const inputTokens = toInt(usage.prompt_tokens);
-  const outputTokens = toInt(usage.completion_tokens);
-
-  const rawId = typeof obj.id === 'string' ? obj.id : '';
-  const fixedId = rawId.startsWith('chatcmpl-') || !rawId ? createId('msg') : rawId;
-
-  const finishReason = typeof choice.finish_reason === 'string' ? choice.finish_reason : 'stop';
-  const stopReason = mapFinishReason(finishReason) ?? 'end_turn';
-
-  const out = {
-    id: fixedId,
-    type: 'message',
-    role: 'assistant',
-    model: typeof obj.model === 'string' ? obj.model : 'unknown',
-    content,
-    stop_reason: stopReason,
-    stop_sequence: null,
-    usage: {
-      input_tokens: inputTokens,
-      cache_creation_input_tokens: 0,
-      cache_read_input_tokens: 0,
-      output_tokens: outputTokens || 1,
-      server_tool_use: null,
-    },
-  };
-  return Buffer.from(JSON.stringify(out), 'utf8');
 }

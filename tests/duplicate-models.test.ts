@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { validateRuntimeConfig } from '../src/models.js';
 import { RuntimeConfigManager } from '../src/services/runtime-config.js';
 
@@ -131,5 +131,64 @@ describe('允许模型重名', () => {
     manager['config'] = config as any;
 
     expect(() => manager.resolveModel('disabled-model')).toThrow('未找到可用的模型映射：disabled-model');
+  });
+
+  it('随机选择前排除停用 Provider，始终回退到健康候选', () => {
+    const random = vi.fn(() => 0);
+    const manager = new RuntimeConfigManager('unused.json', random);
+    manager['config'] = {
+      providers: [
+        {
+          provider_id: 'disabled-provider',
+          provider_type: 'openai_compatible',
+          base_url: 'https://disabled.example.com',
+          api_key: 'disabled-key',
+          enabled: false,
+        },
+        {
+          provider_id: 'healthy-provider',
+          provider_type: 'openai_compatible',
+          base_url: 'https://healthy.example.com',
+          api_key: 'healthy-key',
+          enabled: true,
+        },
+      ],
+      models: [
+        { client_model: 'shared', provider_id: 'disabled-provider', upstream_model: 'bad' },
+        { client_model: 'shared', provider_id: 'healthy-provider', upstream_model: 'good' },
+      ],
+      default_client_model: 'shared',
+    };
+
+    const resolved = manager.resolveModel('shared');
+    expect(resolved.provider.provider_id).toBe('healthy-provider');
+    // 单一健康候选不需要消费随机源，测试也不会因概率偶发失败。
+    expect(random).not.toHaveBeenCalled();
+  });
+
+  it('同名路由均无启用 Key 时返回稳定错误', () => {
+    const manager = new RuntimeConfigManager('unused.json', () => Number.NaN);
+    manager['config'] = {
+      providers: [{
+        provider_id: 'p1',
+        provider_type: 'openai_compatible',
+        base_url: 'https://example.com',
+        api_key: [{
+          id: 'DISABLED01',
+          key: 'disabled-key',
+          enabled: false,
+          error_count: 0,
+          disabled_at: null,
+          last_error_at: null,
+          last_error_message: null,
+          auto_disabled_at: null,
+        }],
+        enabled: true,
+      }],
+      models: [{ client_model: 'shared', provider_id: 'p1', upstream_model: 'u' }],
+      default_client_model: 'shared',
+    };
+
+    expect(() => manager.resolveModel('shared')).toThrow('模型 shared 没有启用且具备可用 Key 的供应商。');
   });
 });

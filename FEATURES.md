@@ -2,7 +2,7 @@
 
 本文档面向"想理解代理内部到底在做什么"的读者，按功能维度梳理代码里实现的所有重要策略。如果你只想看模块划分，请看 [`ARCHITECTURE.md`](./ARCHITECTURE.md)。
 
-> 当前仓库版本：0.4.1，分支 `refactor/modular-cleanup`。
+> 当前仓库版本：0.4.2。
 
 ## 目录
 
@@ -20,6 +20,8 @@
 12. [集群模式](#12-集群模式)
 13. [日志与诊断](#13-日志与诊断)
 14. [鉴权](#14-鉴权)
+15. [健康检查与指标](#15-健康检查与指标)
+16. [管理事件与 Provider 测试](#16-管理事件与-provider-测试)
 
 ---
 
@@ -361,9 +363,9 @@ if provider.auto_recover_minutes > 0
 
 | 操作 | 入口 | 行为 |
 |---|---|---|
-| 手动启用 | Admin → `PUT /api/keys/:p/:i/enable` | enabled=true、清错误计数与冷却 |
-| 手动禁用 | Admin → `PUT /api/keys/:p/:i/disable` | enabled=false |
-| 重置单 Key | Admin → `PUT /api/keys/:p/:i/reset` | 清错误计数 + 清配额计数 + 清冷却态 + 启用 |
+| 手动启用 | Admin → `PUT /api/keys/:p/:keyId/enable` | enabled=true、清错误计数与冷却 |
+| 手动禁用 | Admin → `PUT /api/keys/:p/:keyId/disable` | enabled=false |
+| 重置单 Key | Admin → `PUT /api/keys/:p/:keyId/reset` | 清错误计数 + 清配额计数 + 清冷却态 + 启用 |
 | 重置所有 | Admin → `PUT /api/keys/:p/reset-all` | 对 provider 下所有 Key 重置 |
 | 自动恢复 | provider `auto_recover_minutes` | 自动禁用满 N 分钟后按时重新启用，无需等待新请求 |
 
@@ -520,7 +522,7 @@ if provider.auto_recover_minutes > 0
 
 | 文件 | 内容 | 写入方 |
 |---|---|---|
-| `runtime_models.json` | 用户配置（providers / models / api_key 用户字段） | Admin 编辑 / 启动时补 id |
+| `runtime_models.json` | 用户配置、`revision`、Provider/路由/Key 稳定 ID | Admin 编辑 / 启动时补 ID |
 | `runtime_state.json` | Key 运行态（error_count / disabled_at / last_error_* / auto_disabled_at / 自动禁用后的 enabled） | `KeyStateStore` |
 | `runtime_usage.json` | Key 累计计数（requests_used / tokens_used） | `UsageStore` |
 
@@ -530,6 +532,7 @@ if provider.auto_recover_minutes > 0
 
 - `keyId` 是 nanoid（Crockford base32，10 字符）
 - 一旦生成不变；用户改 key 字面量也保留历史
+- 模型映射使用独立 `route_id`；环境变量 Key 使用 `env:<变量名>`，秘密本身不进入任何持久化主键
 - v1 → v2 升级时（v2 改用 id 主键），旧格式直接当空对象处理，相当于一次"用户选择全部重置"
 
 ### 11.3 atomic 写入
@@ -652,12 +655,38 @@ interface ConfigRepository {
   - 开发模式无 `.env` 时降级为 `admin123`
 - 生产模式必须设置；缺失则拒绝启动
 
+管理配置 API 额外执行以下安全约束：
+
+- `GET /api/config` 与普通 Key 查询只返回服务端脱敏 DTO，不返回完整 Key、代理 Token 或敏感 Header 值。
+- Token 通过独立端点轮换；配置预览由服务端生成字段名摘要，不返回原始 JSON。
+- 配置读取返回 `ETag`，写入要求 `If-Match`；revision 冲突返回 `409`，避免多个页面静默覆盖。
+- 全局设置、Provider 与模型路由提供资源级 `PATCH` / `POST` / `DELETE` 接口，旧整体配置写入仅作为兼容入口保留。
+- 完整 Key 仅在管理员主动导出时返回；导出沿用现有管理员登录态，并记录不含 Key 内容的审计事件。
+
 ### 14.3 限流
 
 `@fastify/rate-limit`：
 - `RATE_LIMIT_MAX`（默认 100）
 - `RATE_LIMIT_TIME_WINDOW`（默认 60000ms）
 - 命中限流时返回 Anthropic 风格错误 JSON
+
+---
+
+## 15. 健康检查与指标
+
+`routes/health.ts` 提供三个健康入口：`/livez` 表示进程存活，`/readyz` 仅在运行时配置初始化完成后返回 200，`/healthz` 保留为兼容入口。`/metrics` 输出 Prometheus 文本格式。
+
+`MetricsRegistry` 记录 HTTP 请求量、状态码、延迟、TTFB、活跃请求，以及上游错误、重试和 usage 中的输入/输出 Token。Anthropic 与 OpenAI 的流式 usage 通过跨 chunk 解析器统计；上游未返回 usage 时保持为 0，不做不可靠估算。
+
+指标标签只允许路由模板、状态类别和 `provider_type` 等低基数字段。Key、Token、模型名、查询参数、请求 ID 和请求/响应正文均不得进入指标。
+
+---
+
+## 16. 管理事件与 Provider 测试
+
+管理页通过 `GET /api/admin/events` 建立 Cookie 鉴权的 SSE 连接。服务端保留最近 100 条事件，并依据 `Last-Event-ID` 回放断线期间仍在缓冲区内的事件；心跳只使用注释帧，不制造业务记录。事件类型包括配置、Key 状态、配额、请求完成和 Provider 测试，字段均为脱敏摘要。
+
+Provider 测试接口为 `POST /api/providers/:providerId/test`。服务按显式 `provider_type` 选择认证头，对 OpenAI-compatible 或 Anthropic 上游请求 `GET /models`，最多等待 10 秒；它不申请生产 rotator lease，不发送 `/messages` 或 `/chat/completions`，也不读取或返回响应正文。失败结果按认证、限流、服务端、HTTP 或网络类别返回并写入活动日志。
 
 ---
 

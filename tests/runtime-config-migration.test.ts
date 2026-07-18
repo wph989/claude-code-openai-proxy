@@ -60,6 +60,7 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
     await mgr.init();
 
     await expect(mgr.saveConfig(mgr.getConfig())).rejects.toThrow('disk full');
+    expect(mgr.getRevision()).toBe(1);
     failSave = false;
     await mgr.shutdown();
   });
@@ -639,6 +640,33 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
     await mgr.shutdown();
   });
 
+  it('为旧模型映射补稳定 route_id，重启后保持不变', async () => {
+    const cfgPath = path.join(tmp, 'runtime_models.json');
+    writeConfig(cfgPath, {
+      providers: [{
+        provider_id: 'p1',
+        provider_type: 'openai_compatible',
+        base_url: 'https://example.com',
+        api_key: [{ id: 'ROUTEKEY01', key: 'sk-1' }],
+        enabled: true,
+        headers: {},
+      }],
+      models: [{ client_model: 'm', provider_id: 'p1', upstream_model: 'u' }],
+      default_client_model: 'm',
+    });
+
+    const first = new RuntimeConfigManager(cfgPath);
+    await first.init();
+    const routeId = JSON.parse(readFileSync(cfgPath, 'utf-8')).models[0].route_id;
+    expect(routeId).toMatch(/^[0-9A-Z]{10}$/);
+    await first.shutdown();
+
+    const restarted = new RuntimeConfigManager(cfgPath);
+    await restarted.init();
+    expect(restarted.getConfig().models[0].route_id).toBe(routeId);
+    await restarted.shutdown();
+  });
+
   it('启动时会按时间恢复昨天自动禁用的 Key 并清理持久化状态', async () => {
     const cfgPath = path.join(tmp, 'runtime_models.json');
     writeConfig(cfgPath, {
@@ -817,6 +845,7 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
         method: 'PUT',
         url: '/api/config',
         cookies: { [settings.adminCookieName]: settings.adminAuthToken },
+        headers: { 'if-match': '"1"' },
         payload: {
           providers: [],
           models: [{ client_model: 'm', provider_id: 'missing', upstream_model: 'u' }],

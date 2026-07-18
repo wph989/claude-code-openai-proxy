@@ -13,6 +13,7 @@ import { readStreamChunk } from '../stream-read.js';
 import type { StreamingAnthropicSSEFixer } from '../response-fix.js';
 import { markUpstreamResponseStreamError, releaseUpstreamResponse } from '../upstream/response-meta.js';
 import { buildLogContext, logStreamStop, type StreamMetrics } from './log-helpers.js';
+import { SseUsageTracker, type StreamTokenUsage } from './sse-usage.js';
 
 export async function fixAnthropicSseAndPipe(params: {
   upstreamResponse: Response;
@@ -24,10 +25,12 @@ export async function fixAnthropicSseAndPipe(params: {
   idleTimeoutMs: number;
   isClientClosed?: () => boolean;
   clientAbortSignal?: AbortSignal;
+  onUsage?: (usage: StreamTokenUsage) => void;
 }): Promise<void> {
-  const { upstreamResponse, releaseResponse = upstreamResponse, upstreamReadError, output, fixer, metrics, idleTimeoutMs, isClientClosed, clientAbortSignal } = params;
+  const { upstreamResponse, releaseResponse = upstreamResponse, upstreamReadError, output, fixer, metrics, idleTimeoutMs, isClientClosed, clientAbortSignal, onUsage } = params;
   const captureResponseBody = isLogDetailedEnabled();
   const responseChunks: Buffer[] = [];
+  const usageTracker = new SseUsageTracker();
   try {
     const body = upstreamResponse.body;
     if (!body) return;
@@ -37,6 +40,7 @@ export async function fixAnthropicSseAndPipe(params: {
         const { value, done } = await readStreamChunk(reader, idleTimeoutMs, `SSE idle timeout: ${idleTimeoutMs}ms`, clientAbortSignal);
         if (done) break;
         if (isClientClosed?.()) return;
+        usageTracker.push(value);
         const fixed = fixer.push(value);
         if (fixed) {
           if (captureResponseBody) responseChunks.push(fixed);
@@ -53,7 +57,9 @@ export async function fixAnthropicSseAndPipe(params: {
       if (captureResponseBody) responseChunks.push(tail);
       output.write(tail);
     }
-    releaseUpstreamResponse(releaseResponse);
+    const usage = usageTracker.finish();
+    onUsage?.(usage);
+    releaseUpstreamResponse(releaseResponse, { requests: 1, tokens: usage.inputTokens + usage.outputTokens });
     const logLevel = upstreamReadError ? 'warn' : 'info';
     log(logLevel, upstreamReadError ? 'Anthropic SSE 修复遇到上游流异常，已补齐收尾' : 'Anthropic 流式透传响应完成', {
       ...buildLogContext(metrics),
@@ -108,8 +114,10 @@ export async function bufferTransformAndPipeSse(params: {
   kind: string;
   metrics: StreamMetrics;
   isClientClosed?: () => boolean;
+  onUsage?: (usage: StreamTokenUsage) => void;
 }): Promise<void> {
-  const { upstreamResponse, releaseResponse = upstreamResponse, output, transform, kind, metrics, isClientClosed } = params;
+  const { upstreamResponse, releaseResponse = upstreamResponse, output, transform, kind, metrics, isClientClosed, onUsage } = params;
+  const usageTracker = new SseUsageTracker();
   try {
     const body = upstreamResponse.body;
     if (!body) return;
@@ -119,7 +127,10 @@ export async function bufferTransformAndPipeSse(params: {
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        if (value) chunks.push(value);
+        if (value) {
+          chunks.push(value);
+          usageTracker.push(value);
+        }
       }
     } finally {
       reader.cancel().catch(() => {});
@@ -128,7 +139,9 @@ export async function bufferTransformAndPipeSse(params: {
     if (isClientClosed?.()) return;
     const fixed = transform(Buffer.concat(chunks));
     output.write(fixed);
-    releaseUpstreamResponse(releaseResponse);
+    const usage = usageTracker.finish();
+    onUsage?.(usage);
+    releaseUpstreamResponse(releaseResponse, { requests: 1, tokens: usage.inputTokens + usage.outputTokens });
     log('info', 'Anthropic 流式透传响应完成', {
       ...buildLogContext(metrics),
       upstream_status: upstreamResponse.status,
@@ -160,8 +173,10 @@ export async function pipeRawSse(params: {
   idleTimeoutMs: number;
   isClientClosed?: () => boolean;
   clientAbortSignal?: AbortSignal;
+  onUsage?: (usage: StreamTokenUsage) => void;
 }): Promise<void> {
-  const { upstreamResponse, releaseResponse = upstreamResponse, output, metrics, idleTimeoutMs, isClientClosed, clientAbortSignal } = params;
+  const { upstreamResponse, releaseResponse = upstreamResponse, output, metrics, idleTimeoutMs, isClientClosed, clientAbortSignal, onUsage } = params;
+  const usageTracker = new SseUsageTracker();
   try {
     const body = upstreamResponse.body;
     if (!body) return;
@@ -170,12 +185,17 @@ export async function pipeRawSse(params: {
       while (true) {
         const { value, done } = await readStreamChunk(reader, idleTimeoutMs, `SSE idle timeout: ${idleTimeoutMs}ms`, clientAbortSignal);
         if (done) break;
-        if (value) output.write(value);
+        if (value) {
+          usageTracker.push(value);
+          output.write(value);
+        }
       }
     } finally {
       reader.cancel().catch(() => {});
     }
-    releaseUpstreamResponse(releaseResponse);
+    const usage = usageTracker.finish();
+    onUsage?.(usage);
+    releaseUpstreamResponse(releaseResponse, { requests: 1, tokens: usage.inputTokens + usage.outputTokens });
     log('info', 'Anthropic 流式透传响应完成', {
       ...buildLogContext(metrics),
       upstream_status: upstreamResponse.status,

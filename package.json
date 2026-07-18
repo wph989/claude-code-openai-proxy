@@ -24,7 +24,7 @@
   "scripts": {
     "dev": "tsx src/cli.ts start --dev",
     "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
-    "check": "pnpm run build && node --check src/static/admin.js && node --check src/static/admin-ui.js",
+    "check": "pnpm run build && node --check src/static/admin.js && node --check src/static/admin-ui.js && node --check src/static/api-client.js && node --check src/static/store.js && node --check src/static/forms/shared.js && node --check src/static/forms/provider-form.js && node --check src/static/forms/model-form.js && node --check src/static/components/data-table.js && node --check src/static/views/summary-view.js && node --check src/static/views/resource-rows.js && node --check src/static/views/key-panel.js && node --check src/static/views/activity-view.js",
     "start": "node dist/cli.js start",
     "init-config": "node dist/cli.js init-config",
     "prepublishOnly": "pnpm run build",

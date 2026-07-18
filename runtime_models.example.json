@@ -1,4 +1,5 @@
 {
+  "revision": 1,
   "providers": [
     {
       "provider_id": "openai-compatible",
@@ -35,6 +36,7 @@
   ],
   "models": [
     {
+      "route_id": "ROUTE00001",
       "client_model": "claude-model",
       "provider_id": "openai-compatible",
       "upstream_model": "your-upstream-model",
@@ -52,4 +54,3 @@
     "retry": { "max_attempts": 3, "max_total_ms": 30000 }
   }
 }
-

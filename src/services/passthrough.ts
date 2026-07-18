@@ -26,7 +26,6 @@ import { releaseUpstreamResponse, markUpstreamResponseStreamError } from './upst
 import { peekAndRestore } from './passthrough/peek-restore.js';
 import {
   ensureAnthropicJsonShape,
-  extractAnthropicUsageTokens,
   isPlainObject,
   toNonNegInt,
 } from './passthrough/anthropic-shape.js';
@@ -42,6 +41,7 @@ import {
   type PassthroughLogContext,
   type StreamMetrics,
 } from './passthrough/log-helpers.js';
+import type { StreamTokenUsage } from './passthrough/sse-usage.js';
 
 export { buildAnthropicPassthroughPayload } from './passthrough/anthropic-payload.js';
 export type { PassthroughLogContext, StreamMetrics };
@@ -106,8 +106,9 @@ export async function sendAnthropicPassthroughResponse(params: {
   upstreamResponse: Response;
   fallbackModel: string;
   context?: PassthroughLogContext;
+  onUsage?: (usage: StreamTokenUsage) => void;
 }): Promise<unknown> {
-  const { reply, upstreamResponse, fallbackModel, context = {} } = params;
+  const { reply, upstreamResponse, fallbackModel, context = {}, onUsage } = params;
   if (!upstreamResponse.ok) {
     return sendUpstreamErrorResponse(reply, upstreamResponse, { ...context, stream: false });
   }
@@ -168,9 +169,12 @@ export async function sendAnthropicPassthroughResponse(params: {
     )
     : ensureAnthropicJsonShape(data, fallbackModel);
 
+  const inputTokens = isPlainObject(output.usage) ? toNonNegInt(output.usage.input_tokens) : 0;
+  const outputTokens = isPlainObject(output.usage) ? toNonNegInt(output.usage.output_tokens) : 0;
+  onUsage?.({ inputTokens, outputTokens });
   releaseUpstreamResponse(upstreamResponse, {
     requests: 1,
-    tokens: extractAnthropicUsageTokens(output.usage),
+    tokens: inputTokens + outputTokens,
   });
   setForwardResponseHeaders(reply, upstreamResponse);
   log('info', 'Anthropic 透传响应完成', {
@@ -181,8 +185,8 @@ export async function sendAnthropicPassthroughResponse(params: {
     response_kind: responseKind,
     response_id: output.id,
     stop_reason: output.stop_reason ?? null,
-    input_tokens: isPlainObject(output.usage) ? toNonNegInt(output.usage.input_tokens) : 0,
-    output_tokens: isPlainObject(output.usage) ? toNonNegInt(output.usage.output_tokens) : 0,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
     content_blocks: Array.isArray(output.content) ? output.content.length : 0,
     response_body: output,
   });
@@ -199,8 +203,9 @@ export async function pipeAnthropicSseWithRepair(params: {
   idleTimeoutMs: number;
   isClientClosed?: () => boolean;
   clientAbortSignal?: AbortSignal;
+  onUsage?: (usage: StreamTokenUsage) => void;
 }): Promise<void> {
-  const { upstreamResponse, output, metrics, idleTimeoutMs, isClientClosed, clientAbortSignal } = params;
+  const { upstreamResponse, output, metrics, idleTimeoutMs, isClientClosed, clientAbortSignal, onUsage } = params;
   const { peek, restored, peekError } = await peekAndRestore(upstreamResponse, 16384, idleTimeoutMs, clientAbortSignal);
   // peek 会创建新的 Response，lease 元数据仍挂在原始 Response 上；释放/记错必须用原始对象。
   const releaseResponse = upstreamResponse;
@@ -217,6 +222,7 @@ export async function pipeAnthropicSseWithRepair(params: {
       kind: 'OpenAI-SSE→Anthropic-SSE',
       metrics,
       isClientClosed,
+      onUsage,
     });
     return;
   }
@@ -232,6 +238,7 @@ export async function pipeAnthropicSseWithRepair(params: {
       idleTimeoutMs,
       isClientClosed,
       clientAbortSignal,
+      onUsage,
     });
     return;
   }
@@ -244,6 +251,7 @@ export async function pipeAnthropicSseWithRepair(params: {
     idleTimeoutMs,
     isClientClosed,
     clientAbortSignal,
+    onUsage,
   });
 }
 

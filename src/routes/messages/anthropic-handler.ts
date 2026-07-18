@@ -61,6 +61,10 @@ export async function handleAnthropicPassthrough(
         stream: false,
         endpoint: '/v1/messages',
       },
+      onUsage: ({ inputTokens, outputTokens }) => {
+        app.metricsRegistry.recordTokens(provider.provider_type, 'input', inputTokens);
+        app.metricsRegistry.recordTokens(provider.provider_type, 'output', outputTokens);
+      },
     });
   }
 
@@ -94,5 +98,9 @@ export async function handleAnthropicPassthrough(
     idleTimeoutMs: sse.idleTimeoutMs,
     isClientClosed: sse.isClientClosed,
     clientAbortSignal: sse.clientAbortSignal,
+    onUsage: ({ inputTokens, outputTokens }) => {
+      app.metricsRegistry.recordTokens(provider.provider_type, 'input', inputTokens);
+      app.metricsRegistry.recordTokens(provider.provider_type, 'output', outputTokens);
+    },
   }).finally(sse.cleanup);
 }

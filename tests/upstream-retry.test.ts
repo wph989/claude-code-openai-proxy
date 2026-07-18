@@ -3,6 +3,7 @@ import { ApiKeyRotator } from '../src/services/api-key-rotator.js';
 import { KeyRotationStrategy } from '../src/models.js';
 import { UpstreamService } from '../src/services/upstream.js';
 import { resolveAntiBanConfig, type ResolvedAntiBan } from '../src/services/anti-ban-config.js';
+import { MetricsRegistry } from '../src/services/metrics.js';
 
 function keyEntry(k: string) {
   return { id: `id-${k}`, key: k, enabled: true, error_count: 0, disabled_at: null, last_error_at: null, last_error_message: null, auto_disabled_at: null };
@@ -33,7 +34,8 @@ describe('UpstreamService retry loop', () => {
   afterEach(() => { globalThis.fetch = originalFetch; });
 
   it('retries on 429 then succeeds', async () => {
-    const svc = new UpstreamService();
+    const metrics = new MetricsRegistry();
+    const svc = new UpstreamService(undefined, metrics);
     const ab = resolveAntiBanConfig({ mode: 'conservative', max_concurrent: 5, min_interval_ms: 0, rate_limit_delay_min_ms: 0, rate_limit_delay_max_ms: 0, retry: { max_attempts: 3, max_total_ms: 5000, retry_on_rate_limit: true, retry_on_transient: true } });
     const rotator = new ApiKeyRotator([keyEntry('a'), keyEntry('b')], KeyRotationStrategy.round_robin, true, ab);
     let calls = 0;
@@ -49,6 +51,7 @@ describe('UpstreamService retry loop', () => {
     });
     expect(resp.status).toBe(200);
     expect(calls).toBe(2);
+    expect(metrics.snapshot()).toMatchObject({ upstreamErrorsTotal: 1, retriesTotal: 1 });
   });
 
   it('retries fetch network errors as transient failures', async () => {

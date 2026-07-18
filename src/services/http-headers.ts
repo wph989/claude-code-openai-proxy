@@ -1,6 +1,7 @@
 import type { FastifyReply } from 'fastify';
 import { settings } from '../config.js';
 import type { ResolvedProvider } from '../models.js';
+import { getProviderAdapter } from './providers/provider-adapter.js';
 
 export const HOP_BY_HOP_HEADERS = new Set([
   'connection',
@@ -72,13 +73,7 @@ export function buildForwardRequestHeaders(params: BuildForwardRequestHeadersPar
   }
 
   if (params.apiKey) {
-    if (params.provider.provider_type === 'anthropic') {
-      headers.set('x-api-key', params.apiKey);
-      headers.delete('authorization');
-    } else {
-      headers.set('authorization', `Bearer ${params.apiKey}`);
-      headers.delete('x-api-key');
-    }
+    getProviderAdapter(params.provider.provider_type).applyAuthentication(headers, params.apiKey);
   }
 
   return headers;

@@ -1,12 +1,19 @@
 import { settings } from '../config.js';
-import { setRuntimeProxyToken } from '../auth.js';
-import { RuntimeConfigError } from '../errors.js';
+import { isProxyTokenRequired, setRuntimeProxyToken } from '../auth.js';
+import { ConfigConflictError, RuntimeConfigError } from '../errors.js';
 import { ApiKeyRotator, type KeyStateChange } from './api-key-rotator.js';
 import { resolveAntiBanConfig, type ResolvedAntiBan } from './anti-ban-config.js';
 import type { UsageStore } from './usage-store.js';
 import type { KeyStateStore, KeyRuntimeRecord } from './key-state-store.js';
 import type { ConfigRepository } from './config/repository.js';
 import { JsonFileConfigRepository } from './config/json-file-repository.js';
+import {
+  buildAdminRuntimeConfigView,
+  buildConfigChangePreview,
+  mergeAdminConfigUpdate,
+  toAdminKeyView,
+  type AdminConfigChangePreview,
+} from './admin-config.js';
 import { nanoid } from '../utils/nanoid.js';
 import {
   KeyRotationStrategy,
@@ -22,6 +29,30 @@ import {
   summarizeRuntimeConfig,
   validateRuntimeConfig
 } from '../models.js';
+
+export interface RuntimeKeyStateEvent {
+  providerId: string;
+  keyId: string;
+  enabled: boolean;
+  errorCount: number;
+  autoDisabled: boolean;
+  revision: number;
+}
+
+export interface RuntimeKeyUsageEvent {
+  providerId: string;
+  keyId: string;
+  requestsUsed: number;
+  tokensUsed: number;
+  ratio: number;
+  blocked: boolean;
+  revision: number;
+}
+
+export interface RuntimeConfigObserver {
+  onKeyStateChanged?(event: RuntimeKeyStateEvent): void;
+  onKeyUsageChanged?(event: RuntimeKeyUsageEvent): void;
+}
 
 /**
  * 运行时配置管理器：
@@ -45,11 +76,18 @@ export class RuntimeConfigManager {
   private preloadedUsage: Record<string, KeyUsage> = {};
   private stateStore: KeyStateStore | null = null;
   private preloadedState: Record<string, KeyRuntimeRecord> = {};
+  private readonly randomSource: () => number;
+  private observer: RuntimeConfigObserver = {};
+  private initialized = false;
 
-  constructor(configPathOrRepository: string | ConfigRepository = settings.configFile) {
+  constructor(
+    configPathOrRepository: string | ConfigRepository = settings.configFile,
+    randomSource: () => number = Math.random,
+  ) {
     this.repository = typeof configPathOrRepository === 'string'
       ? new JsonFileConfigRepository(configPathOrRepository)
       : configPathOrRepository;
+    this.randomSource = randomSource;
   }
 
   async init(): Promise<void> {
@@ -61,10 +99,36 @@ export class RuntimeConfigManager {
       await this.ensureDefaultConfig();
       await this.reload();
     }
+    this.initialized = true;
+  }
+
+  isReady(): boolean {
+    return this.initialized;
+  }
+
+  setObserver(observer: RuntimeConfigObserver): void {
+    this.observer = observer;
+  }
+
+  resolveProvider(providerId: string): ResolvedProvider {
+    const provider = this.config.providers.find((item) => item.provider_id === providerId);
+    if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
+    const apiKeys = resolveApiKeys(provider);
+    const autoDisable = provider.auto_disable_on_error !== false;
+    const antiBan = resolveAntiBanConfig(provider.anti_ban, this.config.anti_ban);
+    return this.toResolvedProvider(provider, apiKeys, autoDisable, antiBan);
   }
 
   getConfig(): RuntimeConfig {
     return structuredClone(this.config);
+  }
+
+  getRevision(): number {
+    return this.config.revision ?? 1;
+  }
+
+  isProxyAuthTokenConfigured(): boolean {
+    return isProxyTokenRequired();
   }
 
   getDefaultClientModel(): string | null {
@@ -166,6 +230,7 @@ export class RuntimeConfigManager {
   }
 
   async shutdown(): Promise<void> {
+    this.initialized = false;
     // 先停止自动恢复等后台回调，防止关闭期间又产生新的延迟写入；在途请求应由上层先关闭服务并等待完成。
     for (const rotator of this.rotators.values()) rotator.dispose();
     if (this.persistTimer) {
@@ -182,11 +247,12 @@ export class RuntimeConfigManager {
     await this.repository.ensureDefaultConfig(buildDefaultRuntimeConfig);
   }
 
-  async saveConfig(raw: RuntimeConfig): Promise<RuntimeConfig> {
+  async saveConfig(raw: RuntimeConfig, expectedRevision?: number): Promise<RuntimeConfig> {
+    if (expectedRevision !== undefined) this.assertRevision(expectedRevision);
     await this.flushRuntimeStores();
     let validated: RuntimeConfig;
     try {
-      validated = validateRuntimeConfig(raw);
+      validated = validateRuntimeConfig({ ...raw, revision: this.getRevision() + 1 });
     } catch (error) {
       // Admin 提交的配置校验失败属于客户端输入问题；只在保存边界转换，启动加载失败仍走原有恢复流程。
       throw new RuntimeConfigError(error instanceof Error ? error.message : '运行时配置无效。');
@@ -196,13 +262,54 @@ export class RuntimeConfigManager {
     // 来自 admin 的 payload 通常不含运行态字段，但保险起见仍走一次合并；同时把 admin 改的 enabled / quota 等带回内存。
     this.applyStateStoreToConfig(validated);
 
-    this.config = validated;
-    setRuntimeProxyToken(this.config.proxy_auth_token ?? null);
-    await this.initUsageStore();
-    this.rebuildRotators();
-    await this.reconcileStores();
-    await this.persistNow();
+    const previousConfig = this.config;
+    try {
+      this.config = validated;
+      setRuntimeProxyToken(this.config.proxy_auth_token ?? null);
+      await this.initUsageStore();
+      this.rebuildRotators();
+      await this.reconcileStores();
+      await this.persistNow();
+    } catch (error) {
+      // 管理端已经收到保存失败时，内存不能继续运行未落盘配置，否则重启前后行为会不一致。
+      await this.restoreAfterFailedSave(previousConfig);
+      throw error;
+    }
     return this.getConfig();
+  }
+
+  async saveAdminConfig(raw: unknown, expectedRevision: number): Promise<RuntimeConfig> {
+    this.assertRevision(expectedRevision);
+    return this.saveConfig(mergeAdminConfigUpdate(this.config, raw), expectedRevision);
+  }
+
+  previewAdminConfig(raw: unknown, expectedRevision: number): AdminConfigChangePreview {
+    this.assertRevision(expectedRevision);
+    const merged = mergeAdminConfigUpdate(this.config, raw);
+    let validated: RuntimeConfig;
+    try {
+      validated = validateRuntimeConfig({ ...merged, revision: this.getRevision() });
+    } catch (error) {
+      throw new RuntimeConfigError(error instanceof Error ? error.message : '运行时配置无效。');
+    }
+    return buildConfigChangePreview(this.config, validated);
+  }
+
+  async updateProxyAuthToken(token: string | null, expectedRevision: number): Promise<void> {
+    this.assertRevision(expectedRevision);
+    const previousToken = this.config.proxy_auth_token ?? null;
+    const previousRevision = this.getRevision();
+    this.config.proxy_auth_token = token;
+    this.touchRevision();
+    setRuntimeProxyToken(token);
+    try {
+      await this.persistNow();
+    } catch (error) {
+      this.config.proxy_auth_token = previousToken;
+      this.config.revision = previousRevision;
+      setRuntimeProxyToken(previousToken);
+      throw error;
+    }
   }
 
   summary() {
@@ -210,8 +317,7 @@ export class RuntimeConfigManager {
   }
 
   adminView() {
-    // 收集所有供应商的运行时状态
-    const keyStates: Record<string, unknown[]> = {};
+    const keyStates: Record<string, ReturnType<ApiKeyRotator['getKeyStatuses']>> = {};
     for (const provider of this.config.providers) {
       const rotator = this.rotators.get(provider.provider_id);
       if (rotator) {
@@ -220,7 +326,9 @@ export class RuntimeConfigManager {
     }
 
     return {
-      config: this.getConfig(),
+      config: buildAdminRuntimeConfigView(this.config, keyStates),
+      revision: this.getRevision(),
+      proxy_auth_token_configured: this.isProxyAuthTokenConfigured(),
       summary: this.summary(),
       runtime_settings: {
         key_auto_disable: settings.keyAutoDisable,
@@ -230,7 +338,18 @@ export class RuntimeConfigManager {
         provider_id: item.provider_id,
         label: `${item.provider_id} (${item.enabled !== false ? '启用' : '停用'})`
       })),
-      key_states: keyStates  // 新增：所有运行时状态
+      key_states: Object.fromEntries(this.config.providers.map((provider) => {
+        const configuredIds = new Set(Array.isArray(provider.api_key)
+          ? provider.api_key.map((entry) => entry.id)
+          : []);
+        return [
+          provider.provider_id,
+          (keyStates[provider.provider_id] || []).map((entry) => toAdminKeyView(
+            entry,
+            configuredIds.has(entry.id) ? 'config' : 'environment',
+          )),
+        ];
+      }))
     };
   }
 
@@ -248,31 +367,66 @@ export class RuntimeConfigManager {
   resolveModel(clientModel: string): { route: ResolvedRoute; provider: ResolvedProvider; rotator: ApiKeyRotator } {
     const normalizedModel = String(clientModel || '').trim();
 
-    // 支持模型重名：找到所有匹配的路由，随机选择一个
+    // 先只筛选路由开关；供应商和 Key 的可用性必须在随机选择前完成，避免抽中停用候选后随机失败。
     const matchedRoutes = this.config.models.filter((item) => item.client_model === normalizedModel && item.enabled !== false);
 
     if (matchedRoutes.length === 0) {
       throw new Error(`未找到可用的模型映射：${normalizedModel}`);
     }
 
-    // 多个路由时随机选择
-    const route = matchedRoutes.length === 1
-      ? matchedRoutes[0]
-      : matchedRoutes[Math.floor(Math.random() * matchedRoutes.length)];
+    const candidates = matchedRoutes.flatMap((route) => {
+      const provider = this.config.providers.find((item) => item.provider_id === route.provider_id);
+      if (!provider || provider.enabled === false) return [];
+      const apiKeys = resolveApiKeys(provider);
+      if (apiKeys.length === 0) return [];
+      const autoDisable = provider.auto_disable_on_error !== false;
+      const antiBan = resolveAntiBanConfig(provider.anti_ban, this.config.anti_ban);
+      const rotator = this.getOrCreateRotator(
+        provider.provider_id,
+        apiKeys,
+        provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin,
+        autoDisable,
+        antiBan,
+      );
+      const hasUsableKey = rotator.getKeyStatuses().some((key) => key.enabled && !key.quota_blocked);
+      return hasUsableKey ? [{ route, provider, apiKeys, rotator, autoDisable, antiBan }] : [];
+    });
 
-    const provider = this.config.providers.find((item) => item.provider_id === route.provider_id);
-
-    if (!provider || provider.enabled === false) {
-      const enabledProviderIds = this.config.providers.filter((item) => item.enabled !== false).map((item) => item.provider_id);
-      throw new Error(`未找到可用的供应商：${route.provider_id}。当前启用的供应商：${enabledProviderIds.join(', ') || '无'}`);
+    if (candidates.length === 0) {
+      throw new Error(`模型 ${normalizedModel} 没有启用且具备可用 Key 的供应商。`);
     }
 
-    const apiKeys = resolveApiKeys(provider);
-    const autoDisable = provider.auto_disable_on_error !== false;
-    const antiBan = resolveAntiBanConfig(provider.anti_ban, this.config.anti_ban);
-    const rotator = this.getOrCreateRotator(provider.provider_id, apiKeys, provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin, autoDisable, antiBan);
+    let selected = candidates[0];
+    if (candidates.length > 1) {
+      const rawRandom = this.randomSource();
+      const randomValue = Number.isFinite(rawRandom)
+        ? Math.max(0, Math.min(0.999999999999, rawRandom))
+        : 0;
+      selected = candidates[Math.floor(randomValue * candidates.length)];
+    }
+    const { route, provider, apiKeys, rotator, autoDisable, antiBan } = selected;
+    const resolvedProvider = this.toResolvedProvider(provider, apiKeys, autoDisable, antiBan);
 
-    const resolvedProvider: ResolvedProvider = {
+    const resolvedRoute: ResolvedRoute = {
+      route_id: route.route_id || `${route.provider_id}:${route.client_model}:${route.upstream_model}`,
+      client_model: route.client_model,
+      provider_id: route.provider_id,
+      upstream_model: route.upstream_model,
+      enabled: !!route.enabled,
+      extra_body: route.extra_body || {},
+      description: route.description || ''
+    };
+
+    return { route: resolvedRoute, provider: resolvedProvider, rotator };
+  }
+
+  private toResolvedProvider(
+    provider: ProviderConfig,
+    apiKeys: ApiKeyEntry[],
+    autoDisable: boolean,
+    antiBan: ResolvedAntiBan,
+  ): ResolvedProvider {
+    return {
       provider_id: provider.provider_id,
       provider_type: provider.provider_type,
       base_url: replaceEnv(provider.base_url),
@@ -286,19 +440,8 @@ export class RuntimeConfigManager {
       enabled: !!provider.enabled,
       headers: normalizeHeaders(provider.headers || {}),
       anti_ban: antiBan,
-      description: provider.description || ''
+      description: provider.description || '',
     };
-
-    const resolvedRoute: ResolvedRoute = {
-      client_model: route.client_model,
-      provider_id: route.provider_id,
-      upstream_model: route.upstream_model,
-      enabled: !!route.enabled,
-      extra_body: route.extra_body || {},
-      description: route.description || ''
-    };
-
-    return { route: resolvedRoute, provider: resolvedProvider, rotator };
   }
 
   private getOrCreateRotator(providerId: string, keys: ApiKeyEntry[], strategy: KeyRotationStrategy, autoDisable: boolean, antiBan: ResolvedAntiBan): ApiKeyRotator {
@@ -338,18 +481,28 @@ export class RuntimeConfigManager {
       const prior = this.preloadedUsage[ck];
       if (prior) rotator.hydrateUsage(k.key, prior);
     }
-    if (this.usageStore) {
-      const store = this.usageStore;
-      const idByKey = new Map(rotator.getKeys().map((k) => [k.key, k.id]));
-      rotator.setUsageListener((key, usage, ratio) => {
-        const id = idByKey.get(key);
-        if (!id) return;
+    const store = this.usageStore;
+    const idByKey = new Map(rotator.getKeys().map((k) => [k.key, k.id]));
+    rotator.setUsageListener((key, usage, ratio) => {
+      const id = idByKey.get(key);
+      if (!id) return;
+      if (store) {
         const composite = `${providerId}:${id}`;
         // preloadedUsage 是 rebuildRotators 的 hydrate 来源；写 store 时必须同步它，避免重置后旧快照回灌。
         this.preloadedUsage[composite] = { ...usage };
         store.update(composite, usage, ratio);
-      });
-    }
+      }
+      const snapshot = rotator.getQuotaSnapshot(key);
+      this.notifyObserver(() => this.observer.onKeyUsageChanged?.({
+        providerId,
+        keyId: id,
+        requestsUsed: usage.requests_used,
+        tokensUsed: usage.tokens_used,
+        ratio,
+        blocked: snapshot.blocked,
+        revision: this.getRevision(),
+      }));
+    });
   }
 
   private onKeyStateChange(providerId: string, key: string, patch: KeyStateChange): void {
@@ -386,6 +539,23 @@ export class RuntimeConfigManager {
       void this.flushRuntimeStores().catch((err) => {
         console.error('[config] Key 禁用时持久化运行态失败:', err);
       });
+    }
+    this.notifyObserver(() => this.observer.onKeyStateChanged?.({
+      providerId,
+      keyId: entry.id,
+      enabled: entry.enabled !== false,
+      errorCount: entry.error_count,
+      autoDisabled: entry.auto_disabled_at != null,
+      revision: this.getRevision(),
+    }));
+  }
+
+  private notifyObserver(callback: () => void): void {
+    try {
+      // 管理事件属于旁路观测，失败时不能改变 Key 状态机或请求结果。
+      callback();
+    } catch {
+      // ignore observer failures
     }
   }
 
@@ -439,63 +609,98 @@ export class RuntimeConfigManager {
     return rotator.getKeyStatuses();
   }
 
-  async updateKeyState(providerId: string, keyIndex: number, patch: Partial<ApiKeyEntry>): Promise<void> {
+  getAdminKeyStates(providerId: string) {
+    const provider = this.config.providers.find((item) => item.provider_id === providerId);
+    if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
+    const configuredIds = new Set(Array.isArray(provider.api_key)
+      ? provider.api_key.map((entry) => entry.id)
+      : []);
+    return this.getKeyStates(providerId).map((entry) => toAdminKeyView(
+      entry,
+      configuredIds.has(entry.id) ? 'config' : 'environment',
+    ));
+  }
+
+  exportKeys(providerId: string): string[] {
+    const provider = this.config.providers.find((item) => item.provider_id === providerId);
+    if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
+    return resolveApiKeys(provider).map((entry) => entry.key);
+  }
+
+  resolveKeyReference(providerId: string, keyRef: string | number): { keyId: string; legacyIndex: number | null } {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
     if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
-
-    // 确保 api_key 已归一化为数组
     const keys = resolveApiKeys(provider);
-    if (keyIndex < 0 || keyIndex >= keys.length) {
-      throw new RuntimeConfigError(`无效的 key 索引：${keyIndex}`);
+    const raw = String(keyRef).trim();
+    const direct = keys.find((entry) => entry.id === raw);
+    if (direct) return { keyId: direct.id, legacyIndex: null };
+
+    // 兼容一个周期的旧索引 URL；ID 优先，避免纯数字稳定 ID 被误判为索引。
+    if (/^\d+$/.test(raw)) {
+      const index = Number(raw);
+      if (Number.isSafeInteger(index) && index >= 0 && index < keys.length) {
+        return { keyId: keys[index].id, legacyIndex: index };
+      }
+      throw new RuntimeConfigError(`无效的 key 索引：${raw}`);
     }
+    throw new RuntimeConfigError(`未找到 Key：${raw || '<空>'}`);
+  }
+
+  async updateKeyState(providerId: string, keyRef: string | number, patch: Partial<ApiKeyEntry>): Promise<void> {
+    const provider = this.config.providers.find((p) => p.provider_id === providerId);
+    if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
+    const { keyId } = this.resolveKeyReference(providerId, keyRef);
+    const entry = resolveApiKeys(provider).find((key) => key.id === keyId);
+    if (!entry) throw new RuntimeConfigError(`未找到 Key：${keyId}`);
 
     // 直接修改 entry（rotator._keys 指向同一数组，自动同步）
-    const entry = keys[keyIndex];
     Object.assign(entry, patch);
-
+    this.touchRevision();
     await this.persistNow();
   }
 
-  private getRotatorAndKey(providerId: string, keyIndex: number): { rotator: ApiKeyRotator; key: string } {
+  private getRotatorAndKey(providerId: string, keyRef: string | number): { rotator: ApiKeyRotator; key: string; keyId: string } {
     const rotator = this.rotators.get(providerId);
     if (!rotator) throw new RuntimeConfigError(`未找到供应商的 rotator：${providerId}`);
-    const keys = rotator.getKeys();
-    if (keyIndex < 0 || keyIndex >= keys.length) {
-      throw new RuntimeConfigError(`无效的 key 索引：${keyIndex}`);
-    }
-    return { rotator, key: keys[keyIndex].key };
+    const { keyId } = this.resolveKeyReference(providerId, keyRef);
+    const entry = rotator.getKeys().find((key) => key.id === keyId);
+    if (!entry) throw new RuntimeConfigError(`未找到 Key：${keyId}`);
+    return { rotator, key: entry.key, keyId };
   }
 
-  async enableKey(providerId: string, keyIndex: number): Promise<void> {
-    const { rotator, key } = this.getRotatorAndKey(providerId, keyIndex);
+  async enableKey(providerId: string, keyRef: string | number): Promise<void> {
+    const { rotator, key } = this.getRotatorAndKey(providerId, keyRef);
     rotator.enableKey(key);
+    this.touchRevision();
     if (this.stateStore) await this.stateStore.forceFlush();
     await this.persistNow();
   }
 
-  async disableKey(providerId: string, keyIndex: number): Promise<void> {
-    const { rotator, key } = this.getRotatorAndKey(providerId, keyIndex);
+  async disableKey(providerId: string, keyRef: string | number): Promise<void> {
+    const { rotator, key } = this.getRotatorAndKey(providerId, keyRef);
     rotator.disableKey(key);
+    this.touchRevision();
     if (this.stateStore) await this.stateStore.forceFlush();
     await this.persistNow();
   }
 
-  async resetKey(providerId: string, keyIndex: number): Promise<void> {
-    const { rotator, key } = this.getRotatorAndKey(providerId, keyIndex);
+  async resetKey(providerId: string, keyRef: string | number): Promise<void> {
+    const { rotator, key } = this.getRotatorAndKey(providerId, keyRef);
     rotator.resetErrorCount(key);
     rotator.resetUsage(key);
+    this.touchRevision();
     if (this.usageStore) await this.usageStore.forceFlush();
     if (this.stateStore) await this.stateStore.forceFlush();
     await this.persistNow();
   }
 
-  async resetKeyQuota(providerId: string, keyIndex: number): Promise<void> {
-    const { rotator, key } = this.getRotatorAndKey(providerId, keyIndex);
+  async resetKeyQuota(providerId: string, keyRef: string | number): Promise<void> {
+    const { rotator, key } = this.getRotatorAndKey(providerId, keyRef);
     rotator.resetUsage(key);
     if (this.usageStore) await this.usageStore.forceFlush();
   }
 
-  async updateKeyQuota(providerId: string, keyIndex: number, quota: KeyQuotaConfig | null | undefined): Promise<void> {
+  async updateKeyQuota(providerId: string, keyRef: string | number, quota: KeyQuotaConfig | null | undefined): Promise<void> {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
     if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
 
@@ -504,12 +709,10 @@ export class RuntimeConfigManager {
       throw new RuntimeConfigError(`供应商 ${providerId} 的 api_key 不是数组`);
     }
 
-    if (keyIndex < 0 || keyIndex >= provider.api_key.length) {
-      throw new RuntimeConfigError(`无效的 key 索引：${keyIndex}`);
-    }
-
     // 直接修改配置中的 quota（保持 undefined / null / {...} 语义）
-    const entry = provider.api_key[keyIndex];
+    const { keyId } = this.resolveKeyReference(providerId, keyRef);
+    const entry = provider.api_key.find((key) => key.id === keyId);
+    if (!entry) throw new RuntimeConfigError(`Key ${keyId} 由环境变量提供，不能写入独立配额。`);
     entry.quota = quota;
 
     // 同步更新 Rotator 的 QuotaGuard
@@ -518,6 +721,7 @@ export class RuntimeConfigManager {
       rotator.setKeyQuota(entry.key, quota);
     }
 
+    this.touchRevision();
     await this.persistNow();
   }
 
@@ -528,11 +732,11 @@ export class RuntimeConfigManager {
     const trimmed = keyValue.trim();
     if (!trimmed) throw new RuntimeConfigError('Key 值不能为空');
 
-    // 确保 api_key 已归一化为数组
-    const keys = resolveApiKeys(provider);
-    if (keys.some((k) => k.key === trimmed)) {
+    const resolvedKeys = resolveApiKeys(provider);
+    if (resolvedKeys.some((k) => k.key === trimmed)) {
       throw new RuntimeConfigError('该 Key 已存在');
     }
+    const keys = ensureConfiguredApiKeys(provider);
 
     const newKey: ApiKeyEntry = {
       id: nanoid(),
@@ -547,7 +751,9 @@ export class RuntimeConfigManager {
 
     // 直接 push 到数组（keys 就是 provider.api_key）
     keys.push(newKey);
+    invalidateResolvedApiKeys(provider);
 
+    this.touchRevision();
     this.rebuildRotators();
     await this.reconcileStores();
     await this.persistNow();
@@ -578,6 +784,7 @@ export class RuntimeConfigManager {
       count++;
     }
     // keys 就是 provider.api_key，无需重新赋值
+    this.touchRevision();
     this.rebuildRotators();
     if (this.usageStore) await this.usageStore.forceFlush();
     if (this.stateStore) await this.stateStore.forceFlush();
@@ -589,9 +796,8 @@ export class RuntimeConfigManager {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
     if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
 
-    // 确保 api_key 已归一化为数组
-    const keys = resolveApiKeys(provider);
-    const existingSet = new Set(keys.map((k) => k.key));
+    const existingSet = new Set(resolveApiKeys(provider).map((k) => k.key));
+    const keys = ensureConfiguredApiKeys(provider);
     const added: string[] = [];
     const skipped: string[] = [];
 
@@ -619,6 +825,8 @@ export class RuntimeConfigManager {
 
     if (added.length > 0) {
       // keys 就是 provider.api_key，无需重新赋值
+      invalidateResolvedApiKeys(provider);
+      this.touchRevision();
       this.rebuildRotators();
       await this.reconcileStores();
       await this.persistNow();
@@ -627,112 +835,139 @@ export class RuntimeConfigManager {
     return { added, skipped };
   }
 
-  async deleteKey(providerId: string, keyIndex: number): Promise<void> {
+  async deleteKey(providerId: string, keyRef: string | number): Promise<void> {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
     if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
 
-    // 确保 api_key 已归一化为数组
-    const keys = resolveApiKeys(provider);
-    if (keyIndex < 0 || keyIndex >= keys.length) {
-      throw new RuntimeConfigError(`无效的 key 索引：${keyIndex}`);
+    const { keyId } = this.resolveKeyReference(providerId, keyRef);
+    if (!Array.isArray(provider.api_key)) {
+      throw new RuntimeConfigError(`Key ${keyId} 由环境变量提供，不能从配置中删除。`);
     }
-
-    const removed = keys[keyIndex];
-    keys.splice(keyIndex, 1);
-    // keys 就是 provider.api_key，splice 已直接修改
+    const keyIndex = provider.api_key.findIndex((entry) => entry.id === keyId);
+    if (keyIndex < 0) throw new RuntimeConfigError(`未找到 Key：${keyId}`);
+    const removed = provider.api_key[keyIndex];
+    provider.api_key.splice(keyIndex, 1);
+    invalidateResolvedApiKeys(provider);
 
     if (this.stateStore && removed) {
       this.stateStore.remove(`${providerId}:${removed.id}`);
     }
 
+    this.touchRevision();
     this.rebuildRotators();
     await this.reconcileStores();
     await this.persistNow();
   }
+
+  private assertRevision(expectedRevision: number): void {
+    if (expectedRevision !== this.getRevision()) {
+      throw new ConfigConflictError(
+        `配置已被其他会话更新（当前 revision=${this.getRevision()}），请重新加载后再保存。`,
+        this.getRevision(),
+      );
+    }
+  }
+
+  private touchRevision(): void {
+    this.config.revision = this.getRevision() + 1;
+  }
+
+  private async restoreAfterFailedSave(previousConfig: RuntimeConfig): Promise<void> {
+    this.config = previousConfig;
+    setRuntimeProxyToken(previousConfig.proxy_auth_token ?? null);
+    try {
+      await this.initUsageStore();
+      this.rebuildRotators();
+      await this.reconcileStores();
+    } catch (rollbackError) {
+      // 原始保存错误仍是调用方需要处理的主错误；回滚异常只记录，避免覆盖根因。
+      console.error('[config] 保存失败后的内存回滚不完整:', rollbackError);
+    }
+  }
 }
 
+interface ResolvedApiKeyCache {
+  configuredRef: ApiKeyEntry[] | null;
+  sourceSignature: string;
+  keys: ApiKeyEntry[];
+}
+
+const RESOLVED_API_KEYS = Symbol('resolvedApiKeys');
+type RuntimeProviderConfig = ProviderConfig & { [RESOLVED_API_KEYS]?: ResolvedApiKeyCache };
+
 /**
- * 从 Provider 配置中解析出 ApiKeyEntry 数组。
- *
- * 重要变化（重构后）：
- * - 如果 api_key 已经是数组，直接返回原引用（不修改 entry.quota）
- * - 如果是字符串/环境变量，创建新数组并**立即设置回 provider**，然后返回
- * - 保证调用后 provider.api_key 总是数组，且返回值与 provider.api_key 是同一引用
- * - 归一化职责集中在这里，调用方不再需要 `provider.api_key = keys`
- *
- * 配额继承逻辑：
- * - entry.quota === undefined → 使用供应商配额（在 QuotaGuard 层面动态继承）
- * - entry.quota === null → 显式不使用配额
- * - entry.quota === {...} → 使用 Key 自己的配额
- *
- * 这样可以保证：
- * 1. Rotator 持有的 _keys 和 provider.api_key 始终是同一个数组
- * 2. 修改 provider.api_key[i] 会直接影响 Rotator，无需手动同步
- * 3. entry.quota 永远不会被覆盖，保持用户原始配置
+ * 合并文件 Key 与环境变量 Key，但把结果缓存到不可枚举 Symbol 上。
+ * 过去把环境变量值写回 provider.api_key，后续保存配置时会把秘密落进 JSON；
+ * 运行时缓存既保持 Rotator 引用稳定，也确保序列化永远看不到环境变量值。
  */
 function resolveApiKeys(provider: ProviderConfig): ApiKeyEntry[] {
-  // 如果已经是数组，直接返回（不修改 entry.quota）
-  if (Array.isArray(provider.api_key)) {
-    return provider.api_key;
+  const runtimeProvider = provider as RuntimeProviderConfig;
+  const configured = Array.isArray(provider.api_key) ? provider.api_key : null;
+  const envEntries = (provider.api_key_env || '')
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .flatMap((name) => {
+      const key = process.env[name]?.trim();
+      return key ? [{ key, idBase: `env:${name}` }] : [];
+    });
+  const sourceSignature = `${typeof provider.api_key === 'string' ? provider.api_key : ''}\0${envEntries.map((entry) => `${entry.idBase}=${entry.key}`).join('\0')}`;
+  const cached = runtimeProvider[RESOLVED_API_KEYS];
+  if (cached && cached.configuredRef === configured && cached.sourceSignature === sourceSignature) {
+    return cached.keys;
   }
 
-  // 否则创建新数组（字符串或环境变量形式）
-  const keys: ApiKeyEntry[] = [];
-
-  if (typeof provider.api_key === 'string') {
-    for (const key of provider.api_key.split(',')) {
-      const trimmed = key.trim();
-      if (trimmed) {
-        keys.push({
-          id: nanoid(),
-          key: trimmed,
-          enabled: true,
-          error_count: 0,
-          disabled_at: null,
-          last_error_at: null,
-          last_error_message: null,
-          auto_disabled_at: null
-        });
-      }
-    }
+  const keys: ApiKeyEntry[] = configured ? [...configured] : [];
+  const runtimeValues: Array<{ key: string; idBase?: string }> = [
+    ...(typeof provider.api_key === 'string'
+      ? provider.api_key.split(',').map((key) => key.trim()).filter(Boolean).map((key) => ({ key }))
+      : []),
+    ...envEntries,
+  ];
+  for (const runtimeKey of runtimeValues) {
+    if (keys.some((entry) => entry.key === runtimeKey.key)) continue;
+    const prior = cached?.keys.find((entry) => entry.key === runtimeKey.key);
+    const id = runtimeKey.idBase ? uniqueRuntimeKeyId(runtimeKey.idBase, keys) : undefined;
+    keys.push(prior || createRuntimeKey(runtimeKey.key, id));
   }
+  Object.defineProperty(runtimeProvider, RESOLVED_API_KEYS, {
+    value: { configuredRef: configured, sourceSignature, keys },
+    configurable: true,
+    writable: true,
+  });
+  return keys;
+}
 
-  if (provider.api_key_env) {
-    for (const envName of provider.api_key_env.split(',')) {
-      const trimmed = envName.trim();
-      if (trimmed) {
-        const val = process.env[trimmed]?.trim();
-        if (val) {
-          keys.push({
-            id: nanoid(),
-            key: val,
-            enabled: true,
-            error_count: 0,
-            disabled_at: null,
-            last_error_at: null,
-            last_error_message: null,
-            auto_disabled_at: null
-          });
-        }
-      }
-    }
-  }
-
-  // 去重（不应用供应商配额，保持 undefined）
-  const seen = new Set<string>();
-  const unique: ApiKeyEntry[] = [];
-  for (const entry of keys) {
-    if (!seen.has(entry.key)) {
-      seen.add(entry.key);
-      unique.push(entry);
-    }
-  }
-
-  // 立即归一化：设置回 provider，后续返回 provider.api_key（保证引用一致）
-  provider.api_key = unique as unknown as ApiKeyEntry[];
-
-  // 返回的是 provider.api_key 的引用（不是 unique）
+function ensureConfiguredApiKeys(provider: ProviderConfig): ApiKeyEntry[] {
+  if (!Array.isArray(provider.api_key)) provider.api_key = [];
   return provider.api_key;
+}
+
+function invalidateResolvedApiKeys(provider: ProviderConfig): void {
+  delete (provider as RuntimeProviderConfig)[RESOLVED_API_KEYS];
+}
+
+function createRuntimeKey(key: string, id = nanoid()): ApiKeyEntry {
+  return {
+    id,
+    key,
+    enabled: true,
+    error_count: 0,
+    disabled_at: null,
+    last_error_at: null,
+    last_error_message: null,
+    auto_disabled_at: null,
+  };
+}
+
+function uniqueRuntimeKeyId(base: string, keys: ApiKeyEntry[]): string {
+  let candidate = base;
+  let suffix = 2;
+  while (keys.some((entry) => entry.id === candidate)) {
+    candidate = `${base}:${suffix}`;
+    suffix++;
+  }
+  return candidate;
 }
 
 function keysEqual(a: ApiKeyEntry[], b: ApiKeyEntry[]): boolean {
@@ -772,6 +1007,11 @@ function normalizeHeaders(headers: Record<string, string>): Record<string, strin
  * normalize 会现场补 id，不能用 normalize 后的结果判断。
  */
 function detectMissingIds(raw: RuntimeConfig): boolean {
+  if (Array.isArray(raw?.models)) {
+    for (const route of raw.models) {
+      if (!route || typeof route.route_id !== 'string' || route.route_id.trim() === '') return true;
+    }
+  }
   if (!Array.isArray(raw?.providers)) return false;
   for (const p of raw.providers) {
     if (!Array.isArray(p?.api_key)) continue;

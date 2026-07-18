@@ -33,15 +33,16 @@ export const Dialog = {
   container: null,
   keydownHandler: null,
   previousFocus: null,
+  closeHandler: null,
 
   init() {
     if (this.overlay) return;
     this.overlay = document.createElement('div');
     this.overlay.className = 'dialog-overlay';
     this.overlay.innerHTML = `
-      <div class="dialog-container" role="dialog" aria-modal="true">
+      <div class="dialog-container" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
         <div class="dialog-header">
-          <span class="dialog-title"></span>
+          <span class="dialog-title" id="dialog-title"></span>
           <button class="dialog-close" aria-label="关闭">×</button>
         </div>
         <div class="dialog-content"></div>
@@ -56,9 +57,11 @@ export const Dialog = {
     this.overlay.querySelector('.dialog-close').addEventListener('click', () => this.hide());
   },
 
-  show(title, content, buttons = []) {
+  show(title, content, buttons = [], options = {}) {
     this.init();
     this.previousFocus = document.activeElement;
+    this.closeHandler = typeof options.onClose === 'function' ? options.onClose : null;
+    this.container.classList.toggle('dialog-large', options.size === 'large');
     this.overlay.querySelector('.dialog-title').textContent = title;
     this.overlay.querySelector('.dialog-content').innerHTML = content;
     const footer = this.overlay.querySelector('.dialog-footer');
@@ -84,6 +87,25 @@ export const Dialog = {
         this.hide();
         return;
       }
+      if (event.key === 'Tab') {
+        const focusable = [...this.container.querySelectorAll(
+          'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )].filter((element) => element.offsetParent !== null);
+        if (focusable.length === 0) {
+          event.preventDefault();
+          return;
+        }
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+        return;
+      }
       if (event.key === 'Enter' && primaryButton) {
         const tag = (event.target.tagName || '').toLowerCase();
         if (tag === 'textarea' || tag === 'button') return;
@@ -99,6 +121,7 @@ export const Dialog = {
   },
 
   hide() {
+    if (!this.overlay?.classList.contains('show')) return;
     this.overlay?.classList.remove('show');
     if (this.keydownHandler) {
       document.removeEventListener('keydown', this.keydownHandler);
@@ -108,6 +131,9 @@ export const Dialog = {
       try { this.previousFocus.focus(); } catch { /* 节点已删除时无需恢复焦点。 */ }
     }
     this.previousFocus = null;
+    const onClose = this.closeHandler;
+    this.closeHandler = null;
+    if (onClose) onClose();
   },
 
   confirm(title, message, onConfirm, confirmText = '确认', cancelText = '取消', confirmClass = 'btn-primary') {
@@ -130,6 +156,7 @@ export const Toast = {
     if (this.stack) return this.stack;
     this.stack = document.createElement('div');
     this.stack.className = 'toast-stack';
+    this.stack.setAttribute('aria-live', 'polite');
     document.body.appendChild(this.stack);
     return this.stack;
   },
@@ -137,6 +164,7 @@ export const Toast = {
     const stack = this.ensureStack();
     const element = document.createElement('div');
     element.className = `toast toast-${type}`;
+    element.setAttribute('role', type === 'error' ? 'alert' : 'status');
     const icon = type === 'success' ? '✓' : type === 'error' ? '!' : 'i';
     element.innerHTML = `
       <span class="toast-icon" aria-hidden="true">${icon}</span>
@@ -190,18 +218,61 @@ export const Theme = {
   }
 };
 
+let infoTooltip = null;
+let infoTooltipOwner = null;
+
+function ensureInfoTooltip() {
+  if (infoTooltip) return infoTooltip;
+  infoTooltip = document.createElement('div');
+  infoTooltip.id = 'admin-info-tooltip';
+  infoTooltip.className = 'info-tooltip';
+  infoTooltip.setAttribute('role', 'tooltip');
+  infoTooltip.hidden = true;
+  document.body.appendChild(infoTooltip);
+  return infoTooltip;
+}
+
+function showInfoTooltip(tip) {
+  const tooltip = ensureInfoTooltip();
+  tooltip.textContent = tip.dataset.tip || '查看配置说明';
+  tooltip.hidden = false;
+  tooltip.style.left = '0px';
+  tooltip.style.top = '0px';
+  const anchor = tip.getBoundingClientRect();
+  const bounds = tooltip.getBoundingClientRect();
+  const left = Math.min(
+    window.innerWidth - bounds.width - 16,
+    Math.max(16, anchor.left + anchor.width / 2 - bounds.width / 2),
+  );
+  const preferredTop = anchor.top - bounds.height - 8;
+  const top = preferredTop >= 16 ? preferredTop : anchor.bottom + 8;
+  tooltip.style.left = `${Math.round(left)}px`;
+  tooltip.style.top = `${Math.round(top)}px`;
+  infoTooltipOwner = tip;
+}
+
+function hideInfoTooltip(tip = null) {
+  if (!infoTooltip || (tip && infoTooltipOwner !== tip)) return;
+  infoTooltip.hidden = true;
+  infoTooltipOwner = null;
+}
+
 function setInfoTipOpen(tip, open) {
   tip.classList.toggle('is-open', open);
   tip.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) showInfoTooltip(tip);
+  else hideInfoTooltip(tip);
 }
 
 export function closeInfoTips(except = null) {
   document.querySelectorAll('.info-tip.is-open').forEach((tip) => {
     if (tip !== except) setInfoTipOpen(tip, false);
   });
+  if (!except) hideInfoTooltip();
 }
 
 export function enhanceInfoTips(root = document) {
+  ensureInfoTooltip();
   root.querySelectorAll('.info-tip').forEach((tip) => {
     if (tip.dataset.enhanced === 'true') return;
     const description = tip.dataset.tip || '查看配置说明';
@@ -210,6 +281,12 @@ export function enhanceInfoTips(root = document) {
     tip.setAttribute('tabindex', '0');
     tip.setAttribute('aria-label', `配置说明：${description}`);
     tip.setAttribute('aria-expanded', 'false');
+    tip.setAttribute('aria-describedby', 'admin-info-tooltip');
+    tip.addEventListener('mouseenter', () => showInfoTooltip(tip));
+    tip.addEventListener('mouseleave', () => {
+      if (!tip.classList.contains('is-open')) hideInfoTooltip(tip);
+    });
+    tip.addEventListener('focus', () => showInfoTooltip(tip));
     tip.addEventListener('click', (event) => {
       // 提示可能位于 checkbox label 内，必须取消默认行为避免查看说明时切换配置。
       event.preventDefault();
@@ -223,8 +300,7 @@ export function enhanceInfoTips(root = document) {
         event.preventDefault();
         tip.click();
       } else if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
+        // 只关闭说明浮层，Escape 继续冒泡给 Dialog 关闭当前表单。
         setInfoTipOpen(tip, false);
       }
     });

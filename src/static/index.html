@@ -4,9 +4,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>代理配置管理</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600;700&family=Source+Sans+3:wght@300;400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/admin.css" />
   <script>
     // 在主脚本加载前先应用保存的主题，避免暗→亮切换时的闪烁
@@ -83,7 +80,12 @@
             <p class="form-hint">启用后，Claude Code 需要在请求中携带 Token 才能访问代理服务。</p>
           </div>
           <div>
-            <input id="proxyAuthToken" type="password" placeholder="留空则不启用代理鉴权" />
+            <div class="token-controls">
+              <input id="proxyAuthToken" type="password" autocomplete="new-password" placeholder="输入新 Token" />
+              <button class="btn btn-small" id="rotateProxyTokenBtn" type="button">更新</button>
+              <button class="btn btn-small btn-danger" id="clearProxyTokenBtn" type="button">移除</button>
+            </div>
+            <p class="form-hint" id="proxyTokenStatus" aria-live="polite">正在读取状态...</p>
             <p class="form-hint">配置后请求需携带 Authorization: Bearer token 或 X-API-Key 头</p>
           </div>
         </div>
@@ -230,6 +232,7 @@
     <div class="tabs">
       <button class="tab-btn active" id="tab-providers">供应商<span class="tab-count"></span></button>
       <button class="tab-btn" id="tab-models">模型映射<span class="tab-count"></span></button>
+      <button class="tab-btn" id="tab-activity">活动日志<span class="tab-count" aria-label="未读活动"></span></button>
     </div>
 
     <!-- Model filter (models tab only) -->
@@ -242,27 +245,11 @@
     <!-- Table -->
     <div id="table-container"></div>
 
-    <!-- JSON Preview -->
-    <details class="json-section" id="jsonSection">
-      <summary>原始 JSON 预览</summary>
-      <div class="json-preview" id="jsonPreview">加载中...</div>
-    </details>
+    <section class="change-preview-section" aria-labelledby="changePreviewTitle">
+      <h2 id="changePreviewTitle">配置变更</h2>
+      <div class="change-preview" id="configChangePreview" aria-live="polite">正在生成预览...</div>
+    </section>
   </main>
-
-  <!-- Modal -->
-  <div class="modal-overlay" id="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-hidden="true">
-    <div class="modal">
-      <div class="modal-header">
-        <h2 id="modal-title">编辑</h2>
-        <button class="modal-close" id="modal-cancel" aria-label="关闭弹窗">&times;</button>
-      </div>
-      <div class="modal-body" id="modal-body"></div>
-      <div class="modal-footer">
-        <button class="btn" id="modal-cancel-btn">取消</button>
-        <button class="btn btn-primary" id="modal-confirm">确认</button>
-      </div>
-    </div>
-  </div>
 
   <script type="module" src="/admin.js"></script>
 </body>

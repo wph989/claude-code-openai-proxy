@@ -2,6 +2,7 @@ import { PassThrough } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { proxyAuthHook } from '../auth.js';
 import { createSseSession, sendUpstreamErrorResponse, writeStreamHeaders } from '../services/passthrough.js';
+import { SseUsageTracker, type StreamTokenUsage } from '../services/passthrough/sse-usage.js';
 import { isPlainObject } from '../utils/guards.js';
 import { readStreamChunk } from '../services/stream-read.js';
 import { setForwardResponseHeaders } from '../services/http-headers.js';
@@ -83,6 +84,10 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
       }
       const data = await safeJson(upstreamResponse);
       releaseUpstreamResponse(upstreamResponse, { requests: 1, tokens: extractOpenAIUsageTokens(data.usage) });
+      const inputTokens = isPlainObject(data.usage) ? toInt(data.usage.prompt_tokens) : 0;
+      const outputTokens = isPlainObject(data.usage) ? toInt(data.usage.completion_tokens) : 0;
+      app.metricsRegistry.recordTokens(provider.provider_type, 'input', inputTokens);
+      app.metricsRegistry.recordTokens(provider.provider_type, 'output', outputTokens);
       if (data.model) data.model = modelName;
       setForwardResponseHeaders(reply, upstreamResponse);
       log('info', 'OpenAI 透传响应完成', {
@@ -93,8 +98,8 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
         downstream_status: upstreamResponse.status,
         stream: false,
         response_kind: 'openai-json',
-        input_tokens: isPlainObject(data.usage) ? toInt(data.usage.prompt_tokens) : 0,
-        output_tokens: isPlainObject(data.usage) ? toInt(data.usage.completion_tokens) : 0,
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
         total_tokens: isPlainObject(data.usage) ? toInt(data.usage.total_tokens) : 0,
         response_body: data
       });
@@ -127,7 +132,11 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
       upstreamModel: route.upstream_model,
       idleTimeoutMs: sse.idleTimeoutMs,
       isClientClosed: sse.isClientClosed,
-      clientAbortSignal: sse.clientAbortSignal
+      clientAbortSignal: sse.clientAbortSignal,
+      onUsage: ({ inputTokens, outputTokens }) => {
+        app.metricsRegistry.recordTokens(provider.provider_type, 'input', inputTokens);
+        app.metricsRegistry.recordTokens(provider.provider_type, 'output', outputTokens);
+      }
     }).finally(sse.cleanup);
   });
 }
@@ -143,8 +152,10 @@ export async function pipeOpenAISse(params: {
   idleTimeoutMs: number;
   isClientClosed?: () => boolean;
   clientAbortSignal?: AbortSignal;
+  onUsage?: (usage: StreamTokenUsage) => void;
 }): Promise<void> {
-  const { upstreamResponse, output, requestId, sessionId, providerId, clientModel, upstreamModel, idleTimeoutMs, isClientClosed, clientAbortSignal } = params;
+  const { upstreamResponse, output, requestId, sessionId, providerId, clientModel, upstreamModel, idleTimeoutMs, isClientClosed, clientAbortSignal, onUsage } = params;
+  const usageTracker = new SseUsageTracker();
   try {
     if (!upstreamResponse.ok) {
       const errorText = await upstreamResponse.text();
@@ -163,12 +174,19 @@ export async function pipeOpenAISse(params: {
         const readResult = await readStreamChunk(reader, idleTimeoutMs, `SSE idle timeout: ${idleTimeoutMs}ms`, clientAbortSignal);
         const { value, done } = readResult;
         if (done) break;
+        usageTracker.push(value);
         output.write(value);
       }
     } finally {
       reader.cancel().catch(() => {});
     }
 
+    const usage = usageTracker.finish();
+    onUsage?.(usage);
+    releaseUpstreamResponse(upstreamResponse, {
+      requests: 1,
+      tokens: usage.inputTokens + usage.outputTokens,
+    });
     log('info', 'OpenAI 流式透传完成', {
       provider_id: providerId,
       client_model: clientModel,
@@ -178,7 +196,9 @@ export async function pipeOpenAISse(params: {
       upstream_status: upstreamResponse.status,
       downstream_status: upstreamResponse.status,
       stream: true,
-      sse_kind: 'openai-sse-raw'
+      sse_kind: 'openai-sse-raw',
+      input_tokens: usage.inputTokens,
+      output_tokens: usage.outputTokens
     });
   } catch (error) {
     const clientClosed = isClientClosed?.() === true;

@@ -51,6 +51,7 @@ export function normalizeRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
   }));
 
   const models = (raw.models || []).map((item) => ({
+    route_id: typeof item.route_id === 'string' && item.route_id.trim() ? item.route_id.trim() : nanoid(),
     client_model: String(item.client_model || '').trim(),
     provider_id: String(item.provider_id || '').trim(),
     upstream_model: String(item.upstream_model || '').trim(),
@@ -60,6 +61,7 @@ export function normalizeRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
   }));
 
   return {
+    revision: normalizeRevision(raw.revision),
     providers,
     models,
     default_client_model: normalizeOptional(raw.default_client_model),
@@ -100,6 +102,12 @@ export function validateRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
     throw new Error(`models 中引用了不存在的 provider_id: ${invalidRefs.join(', ')}`);
   }
 
+  const routeIds = config.models.map((item) => item.route_id || '');
+  const repeatedRouteIds = findDuplicates(routeIds);
+  if (repeatedRouteIds.length > 0) {
+    throw new Error(`models 中存在重复的 route_id: ${repeatedRouteIds.join(', ')}`);
+  }
+
   if (config.default_client_model) {
     const modelNames = config.models.map((item) => item.client_model);
     const modelSet = new Set(modelNames);
@@ -111,6 +119,13 @@ export function validateRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
   for (const item of config.providers) {
     if (!item.provider_id) throw new Error('provider_id 不能为空');
     if (!item.base_url) throw new Error(`供应商 ${item.provider_id} 的 base_url 不能为空`);
+  }
+  const keyIds = config.providers.flatMap((provider) => Array.isArray(provider.api_key)
+    ? provider.api_key.map((entry) => entry.id)
+    : []);
+  const repeatedKeyIds = findDuplicates(keyIds);
+  if (repeatedKeyIds.length > 0) {
+    throw new Error(`providers 中存在重复的 Key id: ${repeatedKeyIds.join(', ')}`);
   }
   for (const item of config.models) {
     if (!item.client_model) throw new Error('client_model 不能为空');
@@ -331,6 +346,11 @@ function normalizeOptionalNumber(value: unknown): number | null {
   if (value == null) return null;
   const num = Number(value);
   return Number.isFinite(num) && num > 0 ? num : null;
+}
+
+function normalizeRevision(value: unknown): number {
+  const revision = Number(value);
+  return Number.isSafeInteger(revision) && revision > 0 ? revision : 1;
 }
 
 function normalizeNonNegativeNumber(value: unknown): number | null {

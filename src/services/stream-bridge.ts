@@ -46,8 +46,9 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
   idleTimeoutMs: number;
   isClientClosed?: () => boolean;
   clientAbortSignal?: AbortSignal;
+  onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
 }): Promise<void> {
-  const { upstreamResponse, output, clientModel, messageId, metrics, idleTimeoutMs, isClientClosed, clientAbortSignal } = params;
+  const { upstreamResponse, output, clientModel, messageId, metrics, idleTimeoutMs, isClientClosed, clientAbortSignal, onUsage } = params;
   const state: StreamState = {
     messageId,
     clientModel,
@@ -243,6 +244,10 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
     // 已经向客户端发出 message_start 后，必须补齐关闭事件，避免客户端一直等待未闭合的 content block。
     closeAnthropicMessage(output, state);
   } finally {
+    onUsage?.({
+      inputTokens: state.usageInputTokens ?? 0,
+      outputTokens: state.usageOutputTokens ?? 0,
+    });
     releaseUpstreamResponse(upstreamResponse);
     output.end();
   }

@@ -130,6 +130,8 @@ export interface ProviderConfig {
 }
 
 export interface ModelRouteConfig {
+  /** 稳定资源 ID；旧配置缺失时由 normalize 自动补齐。 */
+  route_id?: string;
   client_model: string;
   provider_id: string;
   upstream_model: string;
@@ -139,6 +141,8 @@ export interface ModelRouteConfig {
 }
 
 export interface RuntimeConfig {
+  /** 配置的单调递增版本，用于管理端乐观并发控制。 */
+  revision?: number;
   providers: ProviderConfig[];
   models: ModelRouteConfig[];
   default_client_model?: string | null;
@@ -177,6 +181,7 @@ export interface ResolvedProvider {
 }
 
 export interface ResolvedRoute {
+  route_id: string;
   client_model: string;
   provider_id: string;
   upstream_model: string;

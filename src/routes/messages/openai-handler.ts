@@ -83,6 +83,10 @@ export async function handleOpenAICompatibleMessages(
     }
 
     releaseUpstreamResponse(upstreamResponse, { requests: 1, tokens: usageTokens });
+    const inputTokens = isPlainObject(body.usage) ? toNonNegInt(body.usage.input_tokens) : 0;
+    const outputTokens = isPlainObject(body.usage) ? toNonNegInt(body.usage.output_tokens) : 0;
+    app.metricsRegistry.recordTokens(provider.provider_type, 'input', inputTokens);
+    app.metricsRegistry.recordTokens(provider.provider_type, 'output', outputTokens);
     setForwardResponseHeaders(reply, upstreamResponse);
     log('info', '非流式响应完成', {
       provider_id: provider.provider_id,
@@ -94,8 +98,8 @@ export async function handleOpenAICompatibleMessages(
       response_kind: isAnthropicJson ? 'anthropic-json' : 'openai-json',
       response_id: body.id,
       stop_reason: body.stop_reason ?? null,
-      input_tokens: isPlainObject(body.usage) ? toNonNegInt(body.usage.input_tokens) : 0,
-      output_tokens: isPlainObject(body.usage) ? toNonNegInt(body.usage.output_tokens) : 0,
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
       content_blocks: Array.isArray(body.content) ? body.content.length : 0,
       response_body: body,
     });
@@ -137,6 +141,10 @@ export async function handleOpenAICompatibleMessages(
     idleTimeoutMs: sse.idleTimeoutMs,
     isClientClosed: sse.isClientClosed,
     clientAbortSignal: sse.clientAbortSignal,
+    onUsage: ({ inputTokens, outputTokens }) => {
+      app.metricsRegistry.recordTokens(provider.provider_type, 'input', inputTokens);
+      app.metricsRegistry.recordTokens(provider.provider_type, 'output', outputTokens);
+    },
   }).finally(sse.cleanup);
 }
 

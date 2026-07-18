@@ -2,7 +2,7 @@ import { setGlobalDispatcher, Agent } from 'undici';
 import { settings } from '../config.js';
 import type { ResolvedProvider, ResolvedRoute } from '../models.js';
 import type { ApiKeyRotator, KeyLease } from './api-key-rotator.js';
-import { log } from '../utils/logger.js';
+import { getDefaultLogger, type Logger } from '../utils/logger.js';
 import { isPlainObject } from '../utils/guards.js';
 import { buildForwardRequestHeaders } from './http-headers.js';
 import {
@@ -10,12 +10,9 @@ import {
   isQuotaLimitError,
   type UpstreamErrorClassification,
 } from './upstream/error-classifier.js';
-import {
-  buildChatCompletionsUrl,
-  buildCountTokensUrl,
-  buildMessagesUrl,
-  normalizeAnthropicBaseUrl,
-} from './upstream/url-builder.js';
+import { normalizeAnthropicBaseUrl } from './upstream/url-builder.js';
+import { getProviderAdapter } from './providers/provider-adapter.js';
+import { NOOP_METRICS, type MetricsSink } from './metrics.js';
 import {
   attachResponseMeta,
   markUpstreamResponseStreamError,
@@ -47,8 +44,13 @@ setGlobalDispatcher(agent);
  * - 错误分类 / URL 构造 / lease 元数据分别拆到 ./upstream/* 子模块
  */
 export class UpstreamService {
+  constructor(
+    private readonly logger: Logger = getDefaultLogger(),
+    private readonly metrics: MetricsSink = NOOP_METRICS,
+  ) {}
+
   buildChatCompletionsUrl(provider: ResolvedProvider): string {
-    return buildChatCompletionsUrl(provider);
+    return getProviderAdapter(provider.provider_type).buildChatCompletionsUrl(provider);
   }
 
   private buildHeadersWithKey(params: {
@@ -119,7 +121,7 @@ export class UpstreamService {
   }): Promise<Response> {
     return this.postToUpstream({
       ...params,
-      url: buildChatCompletionsUrl(params.provider)
+      url: getProviderAdapter(params.provider.provider_type).buildChatCompletionsUrl(params.provider)
     });
   }
 
@@ -136,7 +138,7 @@ export class UpstreamService {
   }): Promise<Response> {
     return this.postToUpstream({
       ...params,
-      url: buildMessagesUrl(params.provider)
+      url: getProviderAdapter(params.provider.provider_type).buildMessagesUrl(params.provider)
     });
   }
 
@@ -192,14 +194,16 @@ export class UpstreamService {
         if (isAcquireTimeout(error)) {
           return lastResponse ?? new Response('waiting for available API Key timed out', { status: 503, statusText: 'Service Unavailable' });
         }
+        this.metrics.recordUpstreamError(params.provider.provider_type, 'network');
         if (retry.retry_on_transient) {
-          log('warn', '上游网络错误，准备按 transient 策略重试', {
+          this.logger.log('warn', '上游网络错误，准备按 transient 策略重试', {
             provider_id: params.provider.provider_id,
             attempt: attempt + 1,
             max_attempts: retry.max_attempts,
             error: error instanceof Error ? error.message : String(error)
           });
           if (attempt < retry.max_attempts - 1 && Date.now() < deadline) {
+            this.metrics.recordUpstreamRetry(params.provider.provider_type, 'network');
             continue;
           }
           return lastResponse ?? new Response(error instanceof Error ? error.message : String(error), { status: 502, statusText: 'Bad Gateway' });
@@ -226,9 +230,10 @@ export class UpstreamService {
       const bodyText = await readResponseText(response);
       const errorText = summarizeUpstreamError(response, bodyText);
       const classification = classifyUpstreamError(response.status, response.statusText, bodyText);
+      this.metrics.recordUpstreamError(params.provider.provider_type, classification.category);
 
       // 排查 429 / 4xx 自动禁用是否生效：把分类结果与原始 body 一起打出来。
-      log('warn', '上游错误响应分类', {
+      this.logger.log('warn', '上游错误响应分类', {
         provider_id: params.provider.provider_id,
         status: response.status,
         status_text: response.statusText,
@@ -257,6 +262,9 @@ export class UpstreamService {
       if (classification.category === 'request_limit') return response;
       if (classification.category === 'rate_limit' && !retry.retry_on_rate_limit) return response;
       if (classification.category === 'transient' && !retry.retry_on_transient) return response;
+      if (attempt < retry.max_attempts - 1 && Date.now() < deadline) {
+        this.metrics.recordUpstreamRetry(params.provider.provider_type, classification.category);
+      }
     }
 
     return lastResponse ?? new Response('upstream retry exhausted with no response', { status: 502 });
@@ -311,7 +319,7 @@ export class UpstreamService {
     anthropicVersion?: string;
     anthropicBeta?: string;
   }): Promise<number> {
-    const url = buildCountTokensUrl(params.provider);
+    const url = getProviderAdapter(params.provider.provider_type).buildCountTokensUrl(params.provider);
     const body = JSON.stringify({
       ...params.anthropicPayload,
       model: params.route.upstream_model,

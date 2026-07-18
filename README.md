@@ -1,6 +1,6 @@
 # Claude Code OpenAI Proxy
 
-Claude Code 多供应商代理（TypeScript / npm 版）：
+Claude Code 多供应商代理（TypeScript ESM）：
 
 - 对外暴露 Anthropic Messages 风格接口，供 Claude Code 使用
 - 对内转发到 OpenAI-compatible 上游，例如 Ollama、vLLM、NIM、各类兼容网关
@@ -31,6 +31,7 @@ Claude Code 多供应商代理（TypeScript / npm 版）：
 - **守护进程**：支持后台运行、自动记录 PID
 - **便捷 CLI**：`ccop start/stop/status/ui` 命令
 - **日志**：结构化 JSON 日志，支持日志级别控制
+- **可观测性**：提供存活/就绪检查和 Prometheus 指标
 
 ## 目录结构
 
@@ -43,7 +44,7 @@ src/
   models.ts           # 数据模型
   routes/
     admin.ts            # 管理后台 API
-    health.ts           # 健康检查
+    health.ts           # 存活、就绪与 Prometheus 指标
     messages.ts         # Anthropic Messages API
     chat-completions.ts # OpenAI Chat Completions 透传
   services/
@@ -51,6 +52,7 @@ src/
     transformers.ts     # 协议转换
     upstream.ts         # 上游请求 + 重试预算
     stream-bridge.ts    # 流式响应桥
+    metrics.ts          # 低基数 Prometheus 指标
     api-key-rotator.ts  # 多 Key 调度器（acquire/release/markError）
     anti-ban-config.ts  # anti-ban 字段归一化与 mode 预设
     key-selectors.ts    # Sticky（咬住可用 Key）/ Balanced（随机）选择器
@@ -205,6 +207,7 @@ LOG_DETAILED=false      # 是否记录详细请求/响应
 
 ```json
 {
+  "revision": 1,
   "providers": [
     {
       "provider_id": "openai-compatible",
@@ -213,11 +216,12 @@ LOG_DETAILED=false      # 是否记录详细请求/响应
       "api_key_env": "PROVIDER_API_KEY",
       "api_key": [
         {
+          "id": "EXAMPLE001",
           "key": "sk-example-key-1",
           "enabled": true,
           "quota": { "max_requests": 1000, "max_tokens": null, "soft_stop_threshold": 0.95 }
         },
-        { "key": "sk-example-key-2", "enabled": true }
+        { "id": "EXAMPLE002", "key": "sk-example-key-2", "enabled": true }
       ],
       "key_rotation_strategy": "round_robin",
       "auto_disable_on_error": true,
@@ -230,6 +234,7 @@ LOG_DETAILED=false      # 是否记录详细请求/响应
   ],
   "models": [
     {
+      "route_id": "ROUTE00001",
       "client_model": "claude-model",
       "provider_id": "openai-compatible",
       "upstream_model": "your-upstream-model",
@@ -244,11 +249,11 @@ LOG_DETAILED=false      # 是否记录详细请求/响应
 }
 ```
 
-`api_key` 支持单字符串或对象数组：数组项可单独配 `enabled`、`quota`、`note` 等字段。多数场景只需要配置 `anti_ban.mode`，其他字段都有保守默认值。
+`api_key` 支持单字符串或对象数组：数组项可单独配 `enabled`、`quota`、`note` 等字段。`id`、`route_id` 和 `revision` 缺失时会自动生成；管理端依靠这些稳定 ID 与版本号避免重排误操作和并发覆盖。多数场景只需要配置 `anti_ban.mode`，其他字段都有保守默认值。
 
 ### 模型重名与负载均衡
 
-从 v0.4.2 开始，**允许多个路由使用相同的 `client_model` 名称**。请求时会从所有启用的匹配路由中**随机选择**一个，实现简单的负载均衡或多供应商容错：
+从 v0.4.2 开始，**允许多个路由使用相同的 `client_model` 名称**。请求时先排除停用 Provider、无 Key 和本地配额已阻断的候选，再从健康路由中随机选择，实现简单的负载均衡与故障回退：
 
 ```json
 {
@@ -312,25 +317,52 @@ LOG_DETAILED=false      # 是否记录详细请求/响应
 
 代理会在尚未向客户端输出响应体前自动切换可用 Key，因此 429、5xx、网络瞬时错误、单 Key 配额耗尽或 Key 失效通常不会直接暴露给客户端。流式响应已经开始输出后，代理不会尝试 token 级续写；上游中途断流时会输出协议兼容的结束/错误事件、释放当前 Key，并让后续请求自动选择健康 Key。
 
+### 健康检查与 Prometheus 指标
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/livez` | 进程存活检查；`/healthz` 保留为兼容别名 |
+| `GET` | `/readyz` | 配置初始化完成后返回 revision，否则返回 503 |
+| `GET` | `/metrics` | Prometheus 文本格式指标 |
+
+指标覆盖请求量、状态码、延迟、TTFB、活跃请求、上游错误/重试及上游返回的输入/输出 Token。标签只使用路由模板、状态类别和 `provider_type` 等低基数字段，不包含 Key、模型名、查询参数或请求 ID。未返回 usage 的上游不会被估算 Token。
+
+管理端通过 `GET /api/admin/events` 建立带 Cookie 鉴权的 SSE 连接，活动日志会接收配置、Provider、Key、配额和请求摘要变化；服务端只保留最近 100 条脱敏事件，支持 `Last-Event-ID` 重连补发。供应商列表的“测试”操作只执行对应 Provider 的 `GET /models`，不会调用生成模型。
+
 ### Admin 端点
+
+配置接口使用乐观并发控制：`GET /api/config` 返回脱敏 DTO 与 `ETag`；所有配置写入和预览请求都必须携带对应的 `If-Match`。旧版本写入返回 `409 Conflict`，缺少版本返回 `428 Precondition Required`。普通配置响应不包含完整 Key、代理 Token 或敏感 Header 值。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/config` | 获取脱敏配置、运行态和当前 revision |
+| `POST` | `/api/config/preview` | 服务端生成不含秘密的字段级变更摘要 |
+| `PUT` | `/api/config` | 保存配置；要求 `If-Match` |
+| `PUT` | `/api/config/proxy-token` | 独立轮换或移除代理 Token |
+| `PATCH` | `/api/settings` | 更新全局代理与防封设置 |
+| `POST` | `/api/providers` | 创建 Provider |
+| `PATCH` / `DELETE` | `/api/providers/:providerId` | 更新或删除 Provider |
+| `POST` | `/api/providers/:providerId/test` | 使用 `GET /models` 主动测试连接，不产生模型生成请求 |
+| `POST` | `/api/routes` | 创建模型路由并返回稳定 `route_id` |
+| `PATCH` / `DELETE` | `/api/routes/:routeId` | 按稳定 ID 更新或删除模型路由 |
 
 Key 与配额管理（均在 `/api/keys/:providerId/...` 下）：
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET`    | `/api/keys/:providerId`                        | 列出所有 Key + 运行态 + 配额状态 |
-| `GET`    | `/api/keys/:providerId/export`                 | 导出（脱敏可选） |
+| `GET`    | `/api/keys/:providerId`                        | 列出 Key ID、掩码、运行态与配额状态 |
+| `GET`    | `/api/keys/:providerId/export`                 | 使用管理员登录态主动导出完整 Key |
 | `POST`   | `/api/keys/:providerId`                        | 新增 Key |
-| `DELETE` | `/api/keys/:providerId/:keyIndex`              | 删除 Key |
-| `PUT`    | `/api/keys/:providerId/:keyIndex/enable`       | 启用 |
-| `PUT`    | `/api/keys/:providerId/:keyIndex/disable`      | 禁用 |
-| `PUT`    | `/api/keys/:providerId/:keyIndex/reset`        | 清零错误计数 |
+| `DELETE` | `/api/keys/:providerId/:keyId`                 | 删除 Key |
+| `PUT`    | `/api/keys/:providerId/:keyId/enable`          | 启用 |
+| `PUT`    | `/api/keys/:providerId/:keyId/disable`         | 禁用 |
+| `PUT`    | `/api/keys/:providerId/:keyId/reset`           | 清零错误计数 |
 | `PUT`    | `/api/keys/:providerId/reset-all`              | 批量清零错误计数 |
-| `PUT`    | `/api/keys/:providerId/:keyIndex/note`         | 修改备注 |
-| `POST`   | `/api/keys/:providerId/:keyIndex/quota/reset`  | 清零本地 usage 计数 |
-| `PUT`    | `/api/keys/:providerId/:keyIndex/quota`        | 更新或清除 `quota`（in-place 应用，保留运行态） |
+| `PUT`    | `/api/keys/:providerId/:keyId/note`            | 修改备注 |
+| `POST`   | `/api/keys/:providerId/:keyId/quota/reset`     | 清零本地 usage 计数 |
+| `PUT`    | `/api/keys/:providerId/:keyId/quota`           | 更新或清除 `quota`（in-place 应用，保留运行态） |
 
-Admin UI（`/admin`）：每个 Key 展示错误计数徽章（累计 ≥ 3 次转为警告色）、最近错误信息、请求与 Token 配额进度条、软停用标记，以及「重置」「重置配额」「删除」按钮。
+纯数字旧索引仍兼容一个周期，并通过 `Deprecation: true` 响应头提示迁移。Admin UI（`/admin`）只持有脱敏配置，原始 JSON 展示已替换为服务端变更预览；完整 Key 仅在主动导出响应中出现。
 
 详细设计文档：`docs/superpowers/specs/2026-06-06-anti-ban-strategies-design.md`。
 
@@ -349,21 +381,21 @@ export ANTHROPIC_AUTH_TOKEN=your-proxy-auth-token
 
 ```bash
 # 安装依赖
-npm install
+pnpm install
 
 # 开发模式（热加载）
-npm run dev
+pnpm dev
 
 # 构建
-npm run build
+pnpm build
 
 # 本地运行
-npm start
+pnpm start
 
 # 测试
-npm test              # 跑一次 vitest
-npm run test:watch    # 监听模式
-npm run test:coverage # 覆盖率报告（@vitest/coverage-v8）
+pnpm test          # 跑一次 vitest
+pnpm test:watch    # 监听模式
+pnpm test:coverage # 覆盖率报告（@vitest/coverage-v8）
 ```
 
 ## 发布到 npm
