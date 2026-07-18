@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { proxyAuthHook } from '../auth.js';
 import { createSseSession, sendUpstreamErrorResponse, writeStreamHeaders } from '../services/passthrough.js';
 import { SseUsageTracker, type StreamTokenUsage } from '../services/passthrough/sse-usage.js';
+import { SseModelAliasRewriter } from '../services/passthrough/sse-model-alias.js';
 import { isPlainObject } from '../utils/guards.js';
 import { readStreamChunk } from '../services/stream-read.js';
 import { setForwardResponseHeaders } from '../services/http-headers.js';
@@ -24,7 +25,7 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
 
     let route, provider, rotator;
     try {
-      const resolved = app.runtimeConfigManager.resolveModel(modelName);
+      const resolved = app.runtimeConfigManager.resolveModel(modelName, 'chat_completions');
       route = resolved.route;
       provider = resolved.provider;
       rotator = resolved.rotator;
@@ -152,14 +153,24 @@ export async function pipeOpenAISse(params: {
   isClientClosed?: () => boolean;
   clientAbortSignal?: AbortSignal;
   onUsage?: (usage: StreamTokenUsage) => void;
+  protocol?: 'chat_completions' | 'responses';
 }): Promise<void> {
-  const { upstreamResponse, output, providerId, idleTimeoutMs, isClientClosed, clientAbortSignal, onUsage } = params;
+  const {
+    upstreamResponse,
+    output,
+    providerId,
+    idleTimeoutMs,
+    isClientClosed,
+    clientAbortSignal,
+    onUsage,
+    protocol = 'chat_completions',
+  } = params;
   const usageTracker = new SseUsageTracker();
+  const modelAliasRewriter = new SseModelAliasRewriter(params.upstreamModel, params.clientModel);
   try {
     if (!upstreamResponse.ok) {
       const errorText = await upstreamResponse.text();
-      output.write(`data: ${JSON.stringify({ error: { message: errorText || `上游请求失败，状态码=${upstreamResponse.status}`, type: 'api_error' } })}\n\n`);
-      output.write('data: [DONE]\n\n');
+      writeOpenAIStreamError(output, protocol, errorText || `上游请求失败，状态码=${upstreamResponse.status}`);
       output.end();
       return;
     }
@@ -174,13 +185,16 @@ export async function pipeOpenAISse(params: {
         const { value, done } = readResult;
         if (done) break;
         usageTracker.push(value);
-        output.write(value);
+        const rewritten = modelAliasRewriter.push(value);
+        if (rewritten) output.write(rewritten);
       }
     } finally {
       reader.cancel().catch(() => {});
     }
 
     const usage = usageTracker.finish();
+    const trailing = modelAliasRewriter.finish();
+    if (trailing) output.write(trailing);
     onUsage?.(usage);
     releaseUpstreamResponse(upstreamResponse, {
       requests: 1,
@@ -188,12 +202,12 @@ export async function pipeOpenAISse(params: {
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
     });
-    log('info', 'OpenAI 流式透传完成', {
+    log('info', protocol === 'responses' ? 'OpenAI Responses 流式透传完成' : 'OpenAI 流式透传完成', {
       provider_id: providerId,
       upstream_status: upstreamResponse.status,
       downstream_status: upstreamResponse.status,
       stream: true,
-      sse_kind: 'openai-sse-raw',
+      sse_kind: protocol === 'responses' ? 'openai-responses-sse-raw' : 'openai-chat-sse-raw',
       input_tokens: usage.inputTokens,
       output_tokens: usage.outputTokens
     });
@@ -210,12 +224,25 @@ export async function pipeOpenAISse(params: {
       return;
     }
     log('error', 'OpenAI 流式透传失败', { error });
-    output.write(`data: ${JSON.stringify({ error: { message: '流式透传失败。', type: 'api_error' } })}\n\n`);
-    output.write('data: [DONE]\n\n');
+    writeOpenAIStreamError(output, protocol, '流式透传失败。');
   } finally {
     releaseUpstreamResponse(upstreamResponse);
     output.end();
   }
+}
+
+function writeOpenAIStreamError(
+  output: PassThrough,
+  protocol: 'chat_completions' | 'responses',
+  message: string,
+): void {
+  const error = { type: 'error', error: { message, type: 'api_error' } };
+  if (protocol === 'responses') {
+    output.write(`event: error\ndata: ${JSON.stringify(error)}\n\n`);
+    return;
+  }
+  output.write(`data: ${JSON.stringify({ error: error.error })}\n\n`);
+  output.write('data: [DONE]\n\n');
 }
 
 function extractOpenAIUsageTokens(value: unknown): number {

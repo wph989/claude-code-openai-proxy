@@ -58,9 +58,31 @@ export const AdminApi = {
   previewConfig: (config, revision, signal) => request('/api/config/preview', {
     method: 'POST', body: config, ifMatch: revision, signal,
   }),
-  saveConfig: (config, revision) => request('/api/config', {
-    method: 'PUT', body: config, ifMatch: revision,
+  updateSettings: (settings, revision) => request('/api/settings', {
+    method: 'PATCH', body: settings, ifMatch: revision,
   }),
+  createProvider: (provider, revision) => request('/api/providers', {
+    method: 'POST', body: provider, ifMatch: revision,
+  }),
+  updateProvider: (providerId, provider, revision) => request(
+    `/api/providers/${encodeURIComponent(providerId)}`,
+    { method: 'PATCH', body: provider, ifMatch: revision },
+  ),
+  deleteProvider: (providerId, revision) => request(
+    `/api/providers/${encodeURIComponent(providerId)}`,
+    { method: 'DELETE', ifMatch: revision },
+  ),
+  createRoute: (route, revision) => request('/api/routes', {
+    method: 'POST', body: route, ifMatch: revision,
+  }),
+  updateRoute: (routeId, route, revision) => request(
+    `/api/routes/${encodeURIComponent(routeId)}`,
+    { method: 'PATCH', body: route, ifMatch: revision },
+  ),
+  deleteRoute: (routeId, revision) => request(
+    `/api/routes/${encodeURIComponent(routeId)}`,
+    { method: 'DELETE', ifMatch: revision },
+  ),
   updateProxyToken: (token, revision) => request('/api/config/proxy-token', {
     method: 'PUT', body: { token }, ifMatch: revision,
   }),

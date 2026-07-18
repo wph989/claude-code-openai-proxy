@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-import { writeFile } from 'node:fs/promises';
 import path, { join, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { Command } from 'commander';
-import { resolveStorageBackend, settings } from './config.js';
+import { settings } from './config.js';
 import { startServer } from './server.js';
 import { buildDefaultRuntimeConfig } from './services/runtime-config.js';
+import { SqliteConfigRepository } from './services/config/sqlite-config-repository.js';
+import { migrateJsonToSqlite } from './services/config/json-to-sqlite-migration.js';
 import { log } from './utils/logger.js';
 import { checkExistingProcess, stopProcess, getStatus, writeProcessInfo, removeProcessInfo, openAdminUI } from './utils/pid.js';
 import process from 'node:process';
@@ -30,8 +31,6 @@ program
   .description('启动代理服务')
   .option('--host <host>', '监听地址', settings.host)
   .option('--port <port>', '监听端口', String(settings.port))
-  .option('--config <path>', '运行时模型配置文件路径', settings.configFile)
-  .option('--storage <backend>', '持久化后端：json 或 sqlite', settings.storageBackend)
   .option('--sqlite-file <path>', 'SQLite 数据库路径', settings.sqliteFile)
   .option('--dev', '强制开发模式（使用本地目录配置）', false)
   .option('-d, --daemon', '后台运行（守护进程模式）', false)
@@ -39,7 +38,6 @@ program
   .action(async (options) => {
     const port = Number(options.port || settings.port);
     const host = options.host || settings.host;
-    const storageBackend = resolveStorageBackend(options.storage);
     const sqlitePath = path.resolve(options.sqliteFile || settings.sqliteFile);
 
     // check if already running
@@ -65,24 +63,19 @@ program
     } else if (options.cluster !== false) {
       // Cluster mode
       const workers = options.cluster === true ? 0 : Number(options.cluster);
-      const { startCluster, resolveClusterWorkerCount, assertClusterWorkerCount } = await import('./cluster.js');
+      const { startCluster, resolveClusterWorkerCount } = await import('./cluster.js');
       const workerCount = resolveClusterWorkerCount(
         Number.isFinite(workers) && workers > 0 ? workers : settings.clusterWorkers
       );
-      // 在写 PID 文件和 fork 前失败，避免不安全配置留下看似仍在运行的进程记录。
-      assertClusterWorkerCount(workerCount, storageBackend);
       await writeProcessInfo({ pid: process.pid, port, host });
       process.on('exit', () => { void removeProcessInfo(); });
 
       await startCluster({
         workers: workerCount,
-        storageKind: storageBackend,
         startWorker: async () => {
           await startServer({
             host,
             port: Number.isFinite(port) ? port : settings.port,
-            configPath: options.config || settings.configFile,
-            storageBackend,
             sqlitePath,
           });
         }
@@ -96,8 +89,6 @@ program
       await startServer({
         host,
         port: Number.isFinite(port) ? port : settings.port,
-        configPath: options.config || settings.configFile,
-        storageBackend,
         sqlitePath,
       });
     }
@@ -159,21 +150,51 @@ program
     }
   });
 
-import { USER_CONFIG_FILE } from './config.js';
-
 program
   .command('init-config')
-  .description('初始化配置文件到当前模式的默认配置路径')
-  .option('--config <path>', '输出路径（默认使用当前模式的 CONFIG_FILE）')
-  .option('--force', '覆盖已存在的文件', false)
+  .description('在 SQLite 中初始化默认配置')
+  .option('--sqlite-file <path>', 'SQLite 数据库路径', settings.sqliteFile)
   .action(async (options) => {
-    const output = options.config ? path.resolve(options.config) : USER_CONFIG_FILE;
-    const content = JSON.stringify(buildDefaultRuntimeConfig(), null, 2) + '\n';
+    const output = path.resolve(options.sqliteFile || settings.sqliteFile);
+    let repository: SqliteConfigRepository | null = null;
     try {
-      await writeFile(output, content, { encoding: 'utf-8', flag: options.force ? 'w' : 'wx' });
-      log('info', '初始化配置文件完成', { output });
+      repository = new SqliteConfigRepository(output);
+      const existingRevision = await repository.getConfigRevision();
+      const config = await repository.ensureDefaultConfig(buildDefaultRuntimeConfig);
+      const message = existingRevision == null ? 'SQLite 配置初始化完成' : 'SQLite 配置已存在，未做修改';
+      console.log(`${message}: ${output} (revision=${config.revision ?? 1})`);
+      log('info', message, { output, revision: config.revision ?? 1 });
     } catch (error) {
-      log('error', '初始化配置文件失败', { output, error });
+      log('error', '初始化 SQLite 配置失败', { output, error });
+      process.exitCode = 1;
+    } finally {
+      repository?.close();
+    }
+  });
+
+program
+  .command('migrate')
+  .description('将旧 JSON 配置和运行数据一次性迁移到 SQLite')
+  .requiredOption('--config <path>', '旧 runtime_models.json 路径')
+  .option('--sqlite-file <path>', 'SQLite 数据库路径', settings.sqliteFile)
+  .option('--dry-run', '只校验并展示迁移摘要，不创建或修改数据库', false)
+  .action(async (options) => {
+    try {
+      const result = await migrateJsonToSqlite({
+        configPath: path.resolve(options.config),
+        sqlitePath: path.resolve(options.sqliteFile || settings.sqliteFile),
+        dryRun: options.dryRun === true,
+      });
+      const action = result.dryRun ? '迁移预检通过' : '迁移完成';
+      console.log(
+        `${action}: revision=${result.revision}, Provider=${result.providerCount}, `
+        + `路由=${result.routeCount}, Key=${result.keyCount}, 状态=${result.stateCount}, `
+        + `用量=${result.usageCount}, 历史=${result.historyCount}`,
+      );
+      console.log(`SQLite: ${result.sqlitePath}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`迁移失败: ${message}`);
       process.exitCode = 1;
     }
   });

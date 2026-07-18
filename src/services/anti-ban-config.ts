@@ -3,8 +3,7 @@ import type {
   AntiBanMode,
   KeySelectionMode,
   StickyOnCooldown,
-  RetryConfig,
-  QuotaPersistConfig
+  RetryConfig
 } from '../models.js';
 
 export interface ResolvedAntiBan {
@@ -16,7 +15,6 @@ export interface ResolvedAntiBan {
   key_selection: KeySelectionMode;
   sticky_on_cooldown: StickyOnCooldown;
   retry: Required<RetryConfig>;
-  quota: Required<QuotaPersistConfig>;
 }
 
 export const ANTI_BAN_DEFAULTS: ResolvedAntiBan = {
@@ -33,11 +31,6 @@ export const ANTI_BAN_DEFAULTS: ResolvedAntiBan = {
     retry_on_rate_limit: true,
     retry_on_transient: true
   },
-  quota: {
-    persist_every_n_requests: 50,
-    persist_critical_threshold: 0.85,
-    usage_file: 'runtime_usage.json'
-  }
 };
 
 const MODE_PRESETS: Record<AntiBanMode, Partial<ResolvedAntiBan>> = {
@@ -62,7 +55,6 @@ export function resolveAntiBanConfig(
   const base: ResolvedAntiBan = {
     ...ANTI_BAN_DEFAULTS,
     retry: { ...ANTI_BAN_DEFAULTS.retry },
-    quota: { ...ANTI_BAN_DEFAULTS.quota }
   };
   const mode = primary?.mode ?? fallback?.mode ?? base.mode;
   applyPartial(base, MODE_PRESETS[mode] ?? {});
@@ -77,7 +69,7 @@ function applyPartial(target: ResolvedAntiBan, src: Partial<AntiBanConfig> | Par
   const t = target as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(src)) {
     if (v === undefined || v === null) continue;
-    if (k === 'retry' || k === 'quota') {
+    if (k === 'retry') {
       Object.assign(t[k] as object, v);
     } else {
       t[k] = v;
@@ -92,6 +84,4 @@ function clamp(c: ResolvedAntiBan): void {
   c.rate_limit_delay_max_ms = Math.max(c.rate_limit_delay_min_ms, Math.trunc(Number(c.rate_limit_delay_max_ms) || 0));
   c.retry.max_attempts = Math.max(1, Math.trunc(Number(c.retry.max_attempts) || 1));
   c.retry.max_total_ms = Math.max(0, Math.trunc(Number(c.retry.max_total_ms) || 0));
-  c.quota.persist_every_n_requests = Math.max(0, Math.trunc(Number(c.quota.persist_every_n_requests) || 0));
-  c.quota.persist_critical_threshold = Math.max(0, Math.min(1, Number(c.quota.persist_critical_threshold) || 0.85));
 }

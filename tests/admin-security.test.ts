@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { settings } from '../src/config.js';
-import { createApp } from '../src/server.js';
+import { createMigratedApp } from './test-app.js';
 import { isSensitiveHeaderName } from '../src/services/admin-config.js';
 
 let tempDir: string;
@@ -21,7 +21,7 @@ afterEach(() => {
 describe('管理端敏感信息边界', () => {
   it('未登录不能读取配置，登录接口设置 HttpOnly 管理会话', async () => {
     const secrets = writeSensitiveConfig('runtime_models.json');
-    const app = await createApp(secrets.configPath);
+    const app = await createMigratedApp(secrets.configPath);
     try {
       const denied = await app.inject({ method: 'GET', url: '/api/config' });
       expect(denied.statusCode).toBe(401);
@@ -58,7 +58,7 @@ describe('管理端敏感信息边界', () => {
 
   it('普通配置和 Key 查询不返回秘密，主动导出仍返回完整 Key', async () => {
     const secrets = writeSensitiveConfig('runtime_models.json');
-    const app = await createApp(secrets.configPath);
+    const app = await createMigratedApp(secrets.configPath);
     try {
       const { rotator } = app.runtimeConfigManager.resolveModel('client-model');
       rotator.markError(secrets.key, `Bearer ${secrets.diagnosticBearer} echoed ${secrets.key}`);
@@ -108,7 +108,7 @@ describe('管理端敏感信息边界', () => {
 
   it('脱敏配置可预览和保存，同时保留服务端 Key、Token 与敏感 Header', async () => {
     const secrets = writeSensitiveConfig('runtime_models.json');
-    const app = await createApp(secrets.configPath);
+    const app = await createMigratedApp(secrets.configPath);
     try {
       const loaded = await app.inject({ method: 'GET', url: '/api/config', cookies: authCookies });
       const payload = loaded.json().config;
@@ -126,17 +126,17 @@ describe('管理端敏感信息边界', () => {
       for (const secret of secrets.values) expect(preview.body).not.toContain(secret);
 
       const saved = await app.inject({
-        method: 'PUT',
-        url: '/api/config',
+        method: 'PATCH',
+        url: '/api/providers/provider-a',
         cookies: authCookies,
         headers: { 'if-match': loaded.headers.etag as string },
-        payload,
+        payload: { description: '已更新' },
       });
       expect(saved.statusCode).toBe(200);
       expect(saved.headers.etag).toBe('"8"');
       for (const secret of secrets.values) expect(saved.body).not.toContain(secret);
 
-      const persisted = JSON.parse(readFileSync(secrets.configPath, 'utf-8'));
+      const persisted = app.runtimeConfigManager.getConfig();
       expect(persisted.revision).toBe(8);
       expect(persisted.providers[0].api_key[0].key).toBe(secrets.key);
       expect(persisted.proxy_auth_token).toBe(secrets.proxyToken);
@@ -145,22 +145,31 @@ describe('管理端敏感信息边界', () => {
       expect(persisted.providers[0].description).toBe('已更新');
 
       const stale = await app.inject({
-        method: 'PUT',
-        url: '/api/config',
+        method: 'PATCH',
+        url: '/api/providers/provider-a',
         cookies: authCookies,
         headers: { 'if-match': '"7"' },
-        payload,
+        payload: { description: '过期更新' },
       });
       expect(stale.statusCode).toBe(409);
       expect(stale.json()).toMatchObject({ revision: 8 });
 
       const missingPrecondition = await app.inject({
+        method: 'PATCH',
+        url: '/api/providers/provider-a',
+        cookies: authCookies,
+        payload: { description: '无版本更新' },
+      });
+      expect(missingPrecondition.statusCode).toBe(428);
+
+      const removedLegacyPut = await app.inject({
         method: 'PUT',
         url: '/api/config',
         cookies: authCookies,
+        headers: { 'if-match': '"8"' },
         payload,
       });
-      expect(missingPrecondition.statusCode).toBe(428);
+      expect(removedLegacyPut.statusCode).toBe(404);
     } finally {
       await closeApp(app);
     }
@@ -168,17 +177,15 @@ describe('管理端敏感信息边界', () => {
 
   it('配置历史仅返回字段摘要，回滚不暴露历史秘密', async () => {
     const secrets = writeSensitiveConfig('runtime_models.json');
-    const app = await createApp(secrets.configPath);
+    const app = await createMigratedApp(secrets.configPath);
     try {
       const loaded = await app.inject({ method: 'GET', url: '/api/config', cookies: authCookies });
-      const payload = loaded.json().config;
-      payload.providers[0].description = '历史测试变更';
       const saved = await app.inject({
-        method: 'PUT',
-        url: '/api/config',
+        method: 'PATCH',
+        url: '/api/providers/provider-a',
         cookies: authCookies,
         headers: { 'if-match': '"7"' },
-        payload,
+        payload: { description: '历史测试变更' },
       });
       expect(saved.statusCode).toBe(200);
 
@@ -205,7 +212,7 @@ describe('管理端敏感信息边界', () => {
       expect(rolledBack.statusCode).toBe(200);
       expect(rolledBack.headers.etag).toBe('"9"');
       for (const secret of secrets.values) expect(rolledBack.body).not.toContain(secret);
-      const persisted = JSON.parse(readFileSync(secrets.configPath, 'utf-8'));
+      const persisted = app.runtimeConfigManager.getConfig();
       expect(persisted.revision).toBe(9);
       expect(persisted.providers[0].description).toBe('原说明');
       expect(persisted.providers[0].api_key[0].key).toBe(secrets.key);
@@ -216,7 +223,7 @@ describe('管理端敏感信息边界', () => {
 
   it('Token 通过独立接口轮换和移除，响应不回显新值', async () => {
     const secrets = writeSensitiveConfig('runtime_models.json');
-    const app = await createApp(secrets.configPath);
+    const app = await createMigratedApp(secrets.configPath);
     const replacement = 'proxy-token-replacement-unique';
     try {
       const rotated = await app.inject({
@@ -229,7 +236,7 @@ describe('管理端敏感信息边界', () => {
       expect(rotated.statusCode).toBe(200);
       expect(rotated.body).not.toContain(replacement);
       expect(rotated.json()).toMatchObject({ revision: 8, proxy_auth_token_configured: true });
-      expect(JSON.parse(readFileSync(secrets.configPath, 'utf-8')).proxy_auth_token).toBe(replacement);
+      expect(app.runtimeConfigManager.getConfig().proxy_auth_token).toBe(replacement);
 
       const cleared = await app.inject({
         method: 'PUT',
@@ -239,7 +246,7 @@ describe('管理端敏感信息边界', () => {
         payload: { token: null },
       });
       expect(cleared.statusCode).toBe(200);
-      expect(JSON.parse(readFileSync(secrets.configPath, 'utf-8')).proxy_auth_token).toBeNull();
+      expect(app.runtimeConfigManager.getConfig().proxy_auth_token).toBeNull();
     } finally {
       await closeApp(app);
     }
@@ -255,7 +262,7 @@ describe('管理端敏感信息边界', () => {
       models: [],
       default_client_model: null,
     }), 'utf-8');
-    const app = await createApp(configPath);
+    const app = await createMigratedApp(configPath);
     try {
       const createdProvider = await app.inject({
         method: 'POST',
@@ -285,7 +292,7 @@ describe('管理端敏感信息边界', () => {
       });
       expect(patchedProvider.statusCode).toBe(200);
       expect(patchedProvider.body).not.toContain(headerSecret);
-      expect(JSON.parse(readFileSync(configPath, 'utf-8')).providers[0].headers.Authorization).toBe(headerSecret);
+      expect(app.runtimeConfigManager.getConfig().providers[0].headers?.Authorization).toBe(headerSecret);
 
       const createdRoute = await app.inject({
         method: 'POST',
@@ -341,7 +348,7 @@ describe('管理端敏感信息边界', () => {
       expect(deletedProvider.statusCode).toBe(200);
       expect(deletedProvider.json().config.providers).toEqual([]);
 
-      const persisted = JSON.parse(readFileSync(configPath, 'utf-8'));
+      const persisted = app.runtimeConfigManager.getConfig();
       expect(persisted.revision).toBe(7);
       expect(JSON.stringify(persisted)).not.toContain(ignoredKey);
     } finally {
@@ -349,7 +356,7 @@ describe('管理端敏感信息边界', () => {
     }
   });
 
-  it('稳定 Key ID 在列表重排后仍操作原资源，并标记旧索引请求已弃用', async () => {
+  it('稳定 Key ID 始终操作原资源，数字索引不再解释为兼容 ID', async () => {
     const configPath = path.join(tempDir, 'runtime_models.json');
     writeFileSync(configPath, JSON.stringify({
       revision: 3,
@@ -367,20 +374,8 @@ describe('管理端敏感信息边界', () => {
       models: [],
       default_client_model: null,
     }), 'utf-8');
-    const app = await createApp(configPath);
+    const app = await createMigratedApp(configPath);
     try {
-      const loaded = await app.inject({ method: 'GET', url: '/api/config', cookies: authCookies });
-      const payload = loaded.json().config;
-      payload.providers[0].api_key.reverse();
-      const reordered = await app.inject({
-        method: 'PUT',
-        url: '/api/config',
-        cookies: authCookies,
-        headers: { 'if-match': '"3"' },
-        payload,
-      });
-      expect(reordered.statusCode).toBe(200);
-
       const disabled = await app.inject({
         method: 'PUT',
         url: '/api/keys/p1/KEYSTABLE1/disable',
@@ -397,9 +392,9 @@ describe('管理端敏感信息边界', () => {
         url: '/api/keys/p1/0/enable',
         cookies: authCookies,
       });
-      expect(legacy.statusCode).toBe(200);
-      expect(legacy.headers.deprecation).toBe('true');
-      expect(legacy.json().key_id).toBe('KEYSTABLE2');
+      expect(legacy.statusCode).toBe(400);
+      expect(legacy.headers.deprecation).toBeUndefined();
+      expect(legacy.json().message).toContain('未找到 Key');
     } finally {
       await closeApp(app);
     }
@@ -424,7 +419,7 @@ describe('管理端敏感信息边界', () => {
       models: [],
       default_client_model: null,
     }), 'utf-8');
-    const app = await createApp(configPath);
+    const app = await createMigratedApp(configPath);
     try {
       const loaded = await app.inject({ method: 'GET', url: '/api/config', cookies: authCookies });
       expect(loaded.body).not.toContain(envSecret);
@@ -436,11 +431,11 @@ describe('管理端敏感信息边界', () => {
       });
 
       const saved = await app.inject({
-        method: 'PUT',
-        url: '/api/config',
+        method: 'PATCH',
+        url: '/api/providers/env-provider',
         cookies: authCookies,
         headers: { 'if-match': '"2"' },
-        payload: loaded.json().config,
+        payload: { description: '已验证环境变量 Key' },
       });
       expect(saved.statusCode).toBe(200);
       expect(readFileSync(configPath, 'utf-8')).not.toContain(envSecret);

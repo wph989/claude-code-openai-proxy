@@ -32,7 +32,7 @@ describe('管理端 API Client', () => {
     })) as typeof fetch;
 
     try {
-      await AdminApi.saveConfig({ providers: [], models: [] }, 8);
+      await AdminApi.updateSettings({ default_client_model: null }, 8);
       throw new Error('预期请求失败');
     } catch (error) {
       expect(error).toBeInstanceOf(ApiClientError);

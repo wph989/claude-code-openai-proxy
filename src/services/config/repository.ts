@@ -1,32 +1,13 @@
 /**
  * 运行时配置仓库抽象。
  *
- * 把"配置 + 运行态 + 用量"三类数据的物理存储后端从 RuntimeConfigManager 中抽出来，
- * 让上层只关心数据语义、不关心数据是放在 JSON 文件、SQLite 还是远程 KV 里。
- *
- * 当前默认实现：JsonFileConfigRepository（见 json-file-repository.ts），
- * 三类数据分别落在 runtime_models.json / runtime_state.json / runtime_usage.json。
- *
- * 未来若引入 SQLite：新增 SqliteConfigRepository 实现本接口即可，RuntimeConfigManager
- * 与所有调用方均无需改动。
+ * 把配置、运行态和用量的语义从 SQLite 表结构中抽出来，
+ * 让应用服务不直接依赖 SQL 语句。生产运行时只有 SQLite 实现；旧 JSON 仅由迁移器读取。
  */
 
-import type { RuntimeConfig } from '../../types/runtime-config.js';
-import type { KeyRuntimeRecord } from '../key-state-store.js';
-import type { KeyUsage } from '../../types/runtime-config.js';
+import type { KeyRuntimeRecord, KeyUsage, RuntimeConfig } from '../../types/runtime-config.js';
 import type { KeyRuntimeCoordinator } from '../key-runtime-coordinator.js';
 import type { ProviderCircuitCoordinator } from '../provider-circuit-coordinator.js';
-
-export interface UsageStoreInitOptions {
-  every_n: number;
-  critical_threshold: number;
-  /**
-   * 用户在 anti_ban.quota.usage_file 中配置的文件名 / 路径。
-   * 当为相对路径时，仓库实现负责把它解析成实际位置（例如 JSON 实现会相对于
-   * 配置文件目录解析；SQLite 实现可以忽略这个字段）。
-   */
-  usageFileHint: string;
-}
 
 export interface ConfigHistoryRecord {
   revision: number;
@@ -34,7 +15,7 @@ export interface ConfigHistoryRecord {
   config: RuntimeConfig;
 }
 
-/** Key 状态的物理存储端口；JSON 与 SQLite 实现共享同一语义。 */
+/** SQLite key_states 表的应用端口。 */
 export interface KeyStateRepository {
   load(): Promise<Record<string, KeyRuntimeRecord>>;
   get(compositeKey: string): KeyRuntimeRecord | undefined;
@@ -47,7 +28,7 @@ export interface KeyStateRepository {
   forceFlush(): Promise<void>;
 }
 
-/** 用量存储端口；update 接收当前绝对值，跨 Worker 原子增量由共享协调器负责。 */
+/** SQLite key_usage 表的应用端口；跨 Worker 原子增量由共享协调器负责。 */
 export interface UsageRepository {
   load(): Promise<Record<string, KeyUsage>>;
   update(compositeKey: string, usage: KeyUsage, ratio: number): void;
@@ -56,43 +37,36 @@ export interface UsageRepository {
 }
 
 export interface ConfigRepository {
-  /** 用于启动安全判断；省略时按 json 兼容实现处理。 */
-  readonly storageKind?: 'json' | 'sqlite';
-  /** 只有具备跨进程事务 lease 的实现才能声明为 true。 */
-  readonly supportsSharedRuntime?: boolean;
   /**
-   * 加载主配置文件（runtime_models.json 等价物）。
-   * 文件不存在或解析失败时抛错，由调用方决定是否触发 ensureDefault。
+   * 加载 SQLite 中的当前配置。
+   * 配置行尚未初始化或内容无法解析时抛错，由调用方决定是否触发 ensureDefault。
    */
   loadConfig(): Promise<RuntimeConfig>;
 
-  /**
-   * 持久化主配置。已剥离运行态字段（由 stripRuntimeFromConfig 处理）。
-   */
+  /** 持久化主配置；运行态字段必须先剥离，避免混入配置历史。 */
   saveConfig(config: RuntimeConfig, expectedRevision?: number): Promise<void>;
 
   /** 低成本读取持久化 revision，用于多 Worker 请求前刷新配置。 */
   getConfigRevision?(): Promise<number | null>;
 
   /**
-   * 在主配置缺失时创建默认配置文件。返回写入的 RuntimeConfig 以便调用方继续 reload。
+   * 在 SQLite 中尚未初始化配置时创建默认配置。
    */
   ensureDefaultConfig(buildDefault: () => RuntimeConfig): Promise<RuntimeConfig>;
 
   /**
    * 创建 Key 运行态存储（error_count、disabled_at、last_error_* 等）。
-   * 多次调用应返回同一份后端数据；JSON 实现会每次 new 一个 store 但指向同一文件。
+   * 多次调用应访问同一份 SQLite 数据。
    */
   createKeyStateStore(): KeyStateRepository;
 
   /**
-   * 创建 Key 配额计数存储。usageFileHint 来自 anti_ban.quota.usage_file 配置。
+   * 创建 Key 配额计数存储。
    */
-  createUsageStore(options: UsageStoreInitOptions): UsageRepository;
+  createUsageStore(): UsageRepository;
 
   /**
-   * 创建跨 Worker Key 运行态协调器。JSON 后端不实现；SQLite 后端必须复用当前连接，
-   * 让 lease、错误计数和用量增量在同一事务边界内完成。
+   * 创建跨 Worker Key 运行态协调器，并复用当前 SQLite 连接。
    */
   createKeyRuntimeCoordinator?(): KeyRuntimeCoordinator;
 
@@ -103,6 +77,6 @@ export interface ConfigRepository {
   listConfigHistory?(limit: number): Promise<ConfigHistoryRecord[]>;
   loadConfigHistory?(revision: number): Promise<ConfigHistoryRecord | null>;
 
-  /** 释放数据库连接等仓储资源；JSON 实现无需提供。 */
+  /** 释放数据库连接。 */
   close?(): Promise<void> | void;
 }

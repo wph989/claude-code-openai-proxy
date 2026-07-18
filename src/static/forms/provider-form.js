@@ -3,6 +3,18 @@ import { parseJsonSafe, readQuotaInputs } from './shared.js';
 
 const $ = (selector) => document.querySelector(selector);
 
+function resolveCapabilityMatrix(provider) {
+  const isOpenAI = (provider?.provider_type || 'openai_compatible') === 'openai_compatible';
+  const configured = provider?.capabilities || {};
+  return {
+    messages: true,
+    count_tokens: true,
+    chat_completions: isOpenAI,
+    responses: isOpenAI && configured.responses === true,
+    models: configured.models !== false,
+  };
+}
+
 function getKeyArray(provider) {
   if (!provider?.api_key) return [];
   if (Array.isArray(provider.api_key)) return provider.api_key;
@@ -29,6 +41,8 @@ export function providerFormHtml(item) {
   const circuitBreaker = p.circuit_breaker || {};
   const failureThreshold = circuitBreaker.failure_threshold ?? 3;
   const recoverySeconds = circuitBreaker.recovery_seconds ?? 30;
+  const capabilities = resolveCapabilityMatrix(p);
+  const isOpenAI = (p.provider_type || 'openai_compatible') === 'openai_compatible';
   const keyDisplay = keys.length > 0
     ? `<div class="key-info-box"><div class="form-label-row"><span class="form-label">当前 API Keys</span><i class="info-tip" data-tip="在供应商列表的&quot;Keys&quot;面板中管理各 Key 的启用/禁用/重置。新增 Key 请在下方输入。">i</i></div><div class="key-list-preview">${keys.map((k, i) =>
         `<div class="key-list-item ${k.enabled ? '' : 'key-disabled'}">${i + 1}. ${esc(k.key_mask || '********')} <span class="badge ${k.enabled ? 'badge-on' : 'badge-off'}">${k.enabled ? '启用' : '禁用'}</span> <span class="text-dim">错误: ${k.error_count || 0}</span></div>`
@@ -55,6 +69,16 @@ export function providerFormHtml(item) {
       <div class="form-group">
         <div class="form-label-row"><span class="form-label">上游接入地址 *</span><span class="field-key">base_url</span></div>
         <input id="mf-base_url" type="text" value="${esc(p.base_url)}" placeholder="https://integrate.api.nvidia.com/v1" />
+      </div>
+      <div class="field-fieldset capability-fieldset">
+        <div class="field-fieldset-title">API 能力</div>
+        <div class="capability-grid">
+          <label class="checkbox-wrapper"><input type="checkbox" ${capabilities.messages?'checked':''} disabled /><span class="checkbox-label">Messages</span></label>
+          <label class="checkbox-wrapper"><input type="checkbox" ${capabilities.count_tokens?'checked':''} disabled /><span class="checkbox-label">Count Tokens</span></label>
+          <label class="checkbox-wrapper"><input type="checkbox" ${capabilities.chat_completions?'checked':''} disabled /><span class="checkbox-label">Chat Completions</span></label>
+          <label class="checkbox-wrapper"><input id="mf-cap-responses" type="checkbox" ${capabilities.responses?'checked':''} ${isOpenAI?'':'disabled'} /><span class="checkbox-label">Responses</span></label>
+          <label class="checkbox-wrapper"><input id="mf-cap-models" type="checkbox" ${capabilities.models?'checked':''} /><span class="checkbox-label">Models</span></label>
+        </div>
       </div>
       <div class="form-group">
         <div class="form-label-row"><span class="form-label">环境变量名</span><span class="field-key">api_key_env</span></div>
@@ -151,6 +175,7 @@ export function collectProviderForm() {
   if (!base_url) throw new Error('上游接入地址 不能为空');
 
   const quota = readQuotaInputs('mfq');
+  const providerType = $('#mf-provider_type').value || 'openai_compatible';
   const circuitBreakerEnabled = $('#mf-circuit_breaker_enabled').checked;
   const failureThreshold = Number($('#mf-circuit_failure_threshold').value);
   const recoverySeconds = Number($('#mf-circuit_recovery_seconds').value);
@@ -163,8 +188,12 @@ export function collectProviderForm() {
 
   return {
     provider_id,
-    provider_type: $('#mf-provider_type').value || 'openai_compatible',
+    provider_type: providerType,
     base_url,
+    capabilities: {
+      responses: providerType === 'openai_compatible' && ($('#mf-cap-responses')?.checked ?? false),
+      models: $('#mf-cap-models')?.checked ?? true,
+    },
     api_key: null,
     api_key_env: $('#mf-api_key_env').value.trim() || null,
     key_rotation_strategy: $('#mf-key_rotation_strategy').value || 'round_robin',

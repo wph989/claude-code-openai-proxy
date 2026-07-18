@@ -3,17 +3,58 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'no
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { RuntimeConfigManager } from '../src/services/runtime-config.js';
-import { JsonFileConfigRepository } from '../src/services/config/json-file-repository.js';
 import type { ConfigRepository } from '../src/services/config/repository.js';
-import { createApp } from '../src/server.js';
+import { SqliteConfigRepository } from '../src/services/config/sqlite-config-repository.js';
+import {
+  createMigratedApp,
+  createMigratedManager,
+  getManagerSqlitePath,
+} from './test-app.js';
 import { settings } from '../src/config.js';
 
 let tmp: string;
+const activeManagers: RuntimeConfigManager[] = [];
 beforeEach(() => { tmp = mkdtempSync(path.join(tmpdir(), 'rcm-')); });
-afterEach(() => { rmSync(tmp, { recursive: true, force: true }); });
+afterEach(async () => {
+  await Promise.allSettled(activeManagers.splice(0).map((manager) => manager.shutdown()));
+  rmSync(tmp, { recursive: true, force: true });
+});
 
 function writeConfig(p: string, body: unknown) {
   writeFileSync(p, JSON.stringify(body), 'utf-8');
+}
+
+async function createManager(configPath: string): Promise<RuntimeConfigManager> {
+  const manager = await createMigratedManager(configPath);
+  activeManagers.push(manager);
+  return manager;
+}
+
+async function loadSqliteConfig(configPath: string) {
+  const repository = new SqliteConfigRepository(getManagerSqlitePath(configPath));
+  try {
+    return await repository.loadConfig();
+  } finally {
+    repository.close();
+  }
+}
+
+async function loadSqliteState(configPath: string) {
+  const repository = new SqliteConfigRepository(getManagerSqlitePath(configPath));
+  try {
+    return await repository.createKeyStateStore().load();
+  } finally {
+    repository.close();
+  }
+}
+
+async function loadSqliteUsage(configPath: string) {
+  const repository = new SqliteConfigRepository(getManagerSqlitePath(configPath));
+  try {
+    return await repository.createUsageStore().load();
+  } finally {
+    repository.close();
+  }
 }
 
 describe('RuntimeConfigManager — id 化 + state 文件', () => {
@@ -22,17 +63,17 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
     const broken = '{ invalid-json';
     writeFileSync(cfgPath, broken, 'utf-8');
 
-    const mgr = new RuntimeConfigManager(cfgPath);
-    await expect(mgr.init()).rejects.toThrow();
+    await expect(createManager(cfgPath)).rejects.toThrow('主配置读取失败');
     expect(readFileSync(cfgPath, 'utf-8')).toBe(broken);
   });
 
-  it('配置文件不存在时才创建默认配置', async () => {
-    const cfgPath = path.join(tmp, 'runtime_models.json');
-    const mgr = new RuntimeConfigManager(cfgPath);
+  it('SQLite 尚未初始化时创建默认配置', async () => {
+    const dbPath = path.join(tmp, 'runtime.db');
+    const mgr = new RuntimeConfigManager(new SqliteConfigRepository(dbPath));
+    activeManagers.push(mgr);
 
     await mgr.init();
-    expect(existsSync(cfgPath)).toBe(true);
+    expect(existsSync(dbPath)).toBe(true);
     expect(mgr.getConfig().providers.length).toBeGreaterThan(0);
     await mgr.shutdown();
   });
@@ -44,19 +85,27 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       models: [],
       default_client_model: null
     });
-    const base = new JsonFileConfigRepository(cfgPath);
+    const base = new SqliteConfigRepository(path.join(tmp, 'runtime.db'));
+    await base.ensureDefaultConfig(() => ({
+      revision: 1,
+      providers: [],
+      models: [],
+      default_client_model: null,
+    }));
     let failSave = true;
     const repository: ConfigRepository = {
       loadConfig: () => base.loadConfig(),
-      saveConfig: async (config) => {
+      saveConfig: async (config, expectedRevision) => {
         if (failSave) throw new Error('disk full');
-        await base.saveConfig(config);
+        await base.saveConfig(config, expectedRevision);
       },
       ensureDefaultConfig: (builder) => base.ensureDefaultConfig(builder),
       createKeyStateStore: () => base.createKeyStateStore(),
-      createUsageStore: (options) => base.createUsageStore(options)
+      createUsageStore: () => base.createUsageStore(),
+      close: () => base.close(),
     };
     const mgr = new RuntimeConfigManager(repository);
+    activeManagers.push(mgr);
     await mgr.init();
 
     await expect(mgr.saveConfig(mgr.getConfig())).rejects.toThrow('disk full');
@@ -65,7 +114,7 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
     await mgr.shutdown();
   });
 
-  it('为缺失 id 的旧配置补 id 并重写 runtime_models.json', async () => {
+  it('迁移时为缺失 ID 的旧配置补稳定 ID，且不改写源 JSON', async () => {
     const cfgPath = path.join(tmp, 'runtime_models.json');
     writeConfig(cfgPath, {
       providers: [{
@@ -84,22 +133,26 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       default_client_model: null
     });
 
-    const mgr = new RuntimeConfigManager(cfgPath);
+    const mgr = await createManager(cfgPath);
     await mgr.init();
 
-    const cleaned = JSON.parse(readFileSync(cfgPath, 'utf-8'));
+    const original = JSON.parse(readFileSync(cfgPath, 'utf-8'));
+    const cleaned = await loadSqliteConfig(cfgPath);
     const persistedKeys = cleaned.providers[0].api_key;
+    expect(Array.isArray(persistedKeys)).toBe(true);
+    if (!Array.isArray(persistedKeys)) throw new Error('迁移后的 api_key 应为数组。');
     expect(persistedKeys[0].id).toMatch(/^[0-9A-Z]{10}$/);
     expect(persistedKeys[1].id).toMatch(/^[0-9A-Z]{10}$/);
     expect(persistedKeys[0].id).not.toBe(persistedKeys[1].id);
     expect(persistedKeys[0]).toEqual({ id: persistedKeys[0].id, key: 'sk-1' });
     expect(persistedKeys[0].error_count).toBeUndefined();
     expect(persistedKeys[0].last_error_message).toBeUndefined();
+    expect(original.providers[0].api_key[0].id).toBeUndefined();
 
     await mgr.shutdown();
   });
 
-  it('忽略 v1 旧 runtime_state.json，全部重置为空', async () => {
+  it('拒绝 v1 旧 runtime_state.json，不静默重置状态', async () => {
     const cfgPath = path.join(tmp, 'runtime_models.json');
     writeConfig(cfgPath, {
       providers: [{
@@ -124,14 +177,8 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       }
     }), 'utf-8');
 
-    const mgr = new RuntimeConfigManager(cfgPath);
-    await mgr.init();
-    const states = mgr.getKeyStates('p1');
-    expect(states[0].error_count).toBe(0);
-    expect(states[0].last_error_message).toBeNull();
-    expect(states[0].enabled).toBe(true);
-
-    await mgr.shutdown();
+    await expect(createManager(cfgPath)).rejects.toThrow('version=2');
+    expect(JSON.parse(readFileSync(statePath, 'utf-8')).version).toBe(1);
   });
 
   it('v2 state 文件按 providerId:id 索引可以正常 rehydrate', async () => {
@@ -159,7 +206,7 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       }
     }), 'utf-8');
 
-    const mgr = new RuntimeConfigManager(cfgPath);
+    const mgr = await createManager(cfgPath);
     await mgr.init();
     const states = mgr.getKeyStates('p1');
     const k = states[0];
@@ -187,7 +234,7 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       default_client_model: null
     });
 
-    const mgr = new RuntimeConfigManager(cfgPath);
+    const mgr = await createManager(cfgPath);
     await mgr.init();
 
     await mgr.saveConfig({
@@ -214,7 +261,8 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       default_client_model: null
     });
 
-    const cleaned = JSON.parse(readFileSync(cfgPath, 'utf-8'));
+    const cleaned = await loadSqliteConfig(cfgPath);
+    if (!Array.isArray(cleaned.providers[0].api_key)) throw new Error('api_key 应为数组。');
     const persisted = cleaned.providers[0].api_key[0];
     expect(persisted.id).toBe('CCCCCCCCCC');
     expect(persisted.key).toBe('sk-1');
@@ -252,24 +300,22 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       states: { 'p1:STALE00000': { error_count: 99 } }
     }), 'utf-8');
 
-    const mgr = new RuntimeConfigManager(cfgPath);
+    const mgr = await createManager(cfgPath);
     await mgr.init();
     await mgr.shutdown();
 
-    const stateAfter = JSON.parse(readFileSync(statePath, 'utf-8'));
-    expect(stateAfter.states['p1:STALE00000']).toBeUndefined();
-    expect(stateAfter.states['p1:NEW0000001']).toEqual({
+    const stateAfter = await loadSqliteState(cfgPath);
+    expect(stateAfter['p1:STALE00000']).toBeUndefined();
+    expect(stateAfter['p1:NEW0000001']).toEqual({
       error_count: 0, disabled_at: null, last_error_at: null, last_error_message: null, auto_disabled_at: null
     });
-    expect(stateAfter.states['p1:NEW0000002']).toEqual({
+    expect(stateAfter['p1:NEW0000002']).toEqual({
       error_count: 0, disabled_at: null, last_error_at: null, last_error_message: null, auto_disabled_at: null
     });
 
-    const usagePath = path.join(tmp, 'runtime_usage.json');
-    expect(existsSync(usagePath)).toBe(true);
-    const usageAfter = JSON.parse(readFileSync(usagePath, 'utf-8'));
-    expect(usageAfter.usage['p1:NEW0000001']).toEqual({ requests_used: 0, tokens_used: 0 });
-    expect(usageAfter.usage['p1:NEW0000002']).toEqual({ requests_used: 0, tokens_used: 0 });
+    const usageAfter = await loadSqliteUsage(cfgPath);
+    expect(usageAfter['p1:NEW0000001']).toEqual({ requests_used: 0, tokens_used: 0 });
+    expect(usageAfter['p1:NEW0000002']).toEqual({ requests_used: 0, tokens_used: 0 });
   });
 
   it('改 key 字面量但保留 id 可以保留历史', async () => {
@@ -297,7 +343,7 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       }
     }), 'utf-8');
 
-    const mgr = new RuntimeConfigManager(cfgPath);
+    const mgr = await createManager(cfgPath);
     await mgr.init();
 
     await mgr.saveConfig({
@@ -343,7 +389,7 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       default_client_model: null
     });
 
-    const mgr = new RuntimeConfigManager(cfgPath);
+    const mgr = await createManager(cfgPath);
     await mgr.init();
     const states = mgr.getKeyStates('p1');
 
@@ -370,19 +416,18 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       default_client_model: 'm'
     });
 
-    const mgr = new RuntimeConfigManager(cfgPath);
+    const mgr = await createManager(cfgPath);
     await mgr.init();
     const { rotator } = mgr.resolveModel('m');
     rotator.recordUsage('sk-1', 3, 12);
     // 此处只需要验证重置前已落盘，管理器后续仍要继续工作，不能用终止生命周期的 shutdown。
     await mgr.flushRuntimeStores();
 
-    await mgr.resetKey('p1', 0);
+    await mgr.resetKey('p1', 'RESET00001');
     await mgr.shutdown();
 
-    const usagePath = path.join(tmp, 'runtime_usage.json');
-    const usageAfter = JSON.parse(readFileSync(usagePath, 'utf-8'));
-    expect(usageAfter.usage['p1:RESET00001']).toEqual({ requests_used: 0, tokens_used: 0 });
+    const usageAfter = await loadSqliteUsage(cfgPath);
+    expect(usageAfter['p1:RESET00001']).toEqual({ requests_used: 0, tokens_used: 0 });
   });
 
   it('resetAllKeys 重建 rotator 后不会把旧配额用量重新显示出来', async () => {
@@ -408,7 +453,7 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       }
     }), 'utf-8');
 
-    const mgr = new RuntimeConfigManager(cfgPath);
+    const mgr = await createManager(cfgPath);
     await mgr.init();
     expect(mgr.getKeyStates('p1')[0].usage).toEqual({ requests_used: 4, tokens_used: 21 });
 
@@ -418,8 +463,8 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
     expect(state.usage).toEqual({ requests_used: 0, tokens_used: 0 });
 
     await mgr.shutdown();
-    const usageAfter = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
-    expect(usageAfter.usage['p1:RESETALL01']).toEqual({ requests_used: 0, tokens_used: 0 });
+    const usageAfter = await loadSqliteUsage(cfgPath);
+    expect(usageAfter['p1:RESETALL01']).toEqual({ requests_used: 0, tokens_used: 0 });
   });
 
   it('resetAllKeys 会覆盖旧 runtime_state，后续保存配置不会恢复禁用状态', async () => {
@@ -450,7 +495,7 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       }
     }), 'utf-8');
 
-    const mgr = new RuntimeConfigManager(cfgPath);
+    const mgr = await createManager(cfgPath);
     await mgr.init();
     expect(mgr.getKeyStates('p1')[0].enabled).toBe(false);
 
@@ -464,8 +509,9 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
     expect(state.last_error_message).toBeNull();
 
     await mgr.shutdown();
-    const stateAfter = JSON.parse(readFileSync(path.join(tmp, 'runtime_state.json'), 'utf-8'));
-    expect(stateAfter.states['p1:STATEALL01']).toEqual({
+    const stateAfter = await loadSqliteState(cfgPath);
+    expect(stateAfter['p1:STATEALL01']).toEqual({
+      enabled: true,
       error_count: 0,
       disabled_at: null,
       last_error_at: null,
@@ -500,7 +546,7 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       usage: { prompt_tokens: 7, completion_tokens: 11, total_tokens: 18 }
     }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
 
-    const app = await createApp(cfgPath);
+    const app = await createMigratedApp(cfgPath);
     try {
       const response = await app.inject({
         method: 'POST',
@@ -508,14 +554,14 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
         payload: { model: 'm', messages: [{ role: 'user', content: 'hi' }] }
       });
       expect(response.statusCode).toBe(200);
-      await app.runtimeConfigManager.shutdown();
+      expect(app.runtimeConfigManager.getKeyStates('p1')[0].usage).toEqual({
+        requests_used: 1,
+        tokens_used: 18,
+      });
     } finally {
       await app.close();
       globalThis.fetch = originalFetch;
     }
-
-    const usageAfter = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
-    expect(usageAfter.usage['p1:CHATUSE001']).toEqual({ requests_used: 1, tokens_used: 18 });
   });
 
   it('Anthropic 非流式透传成功后释放 key lease 并记录 usage', async () => {
@@ -546,7 +592,7 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       usage: { input_tokens: 5, output_tokens: 7 }
     }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
 
-    const app = await createApp(cfgPath);
+    const app = await createMigratedApp(cfgPath);
     try {
       const response = await app.inject({
         method: 'POST',
@@ -555,17 +601,17 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       });
       expect(response.statusCode).toBe(200);
       expect(app.runtimeConfigManager.getKeyStates('p1')[0].active_requests).toBe(0);
-      await app.runtimeConfigManager.shutdown();
+      expect(app.runtimeConfigManager.getKeyStates('p1')[0].usage).toEqual({
+        requests_used: 1,
+        tokens_used: 12,
+      });
     } finally {
       await app.close();
       globalThis.fetch = originalFetch;
     }
-
-    const usageAfter = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
-    expect(usageAfter.usage['p1:ANTHUSE001']).toEqual({ requests_used: 1, tokens_used: 12 });
   });
 
-  it('Admin 刷新 Key 状态前会把未达阈值的内存配额写入 usage 文件', async () => {
+  it('Admin 刷新 Key 状态会读取 SQLite 中已原子提交的用量', async () => {
     const cfgPath = path.join(tmp, 'runtime_models.json');
     writeConfig(cfgPath, {
       providers: [{
@@ -580,16 +626,18 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       }],
       models: [{ client_model: 'm', provider_id: 'p1', upstream_model: 'u', enabled: true }],
       default_client_model: 'm',
-      anti_ban: { quota: { persist_every_n_requests: 100, persist_critical_threshold: 1 } }
+      anti_ban: { mode: 'throughput' }
     });
 
-    const app = await createApp(cfgPath);
+    const app = await createMigratedApp(cfgPath);
     try {
       const { rotator } = app.runtimeConfigManager.resolveModel('m');
       rotator.recordUsage('sk-1', 3, 12);
 
-      const usageBefore = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
-      expect(usageBefore.usage['p1:REFRESH001']).toEqual({ requests_used: 0, tokens_used: 0 });
+      expect(app.runtimeConfigManager.getKeyStates('p1')[0].usage).toEqual({
+        requests_used: 3,
+        tokens_used: 12,
+      });
 
       const response = await app.inject({
         method: 'GET',
@@ -599,14 +647,12 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
 
       expect(response.statusCode).toBe(200);
       expect(response.json().keys[0].usage).toEqual({ requests_used: 3, tokens_used: 12 });
-      const usageAfter = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
-      expect(usageAfter.usage['p1:REFRESH001']).toEqual({ requests_used: 3, tokens_used: 12 });
     } finally {
       await app.close();
     }
   });
 
-  it('保存配置重建 rotator 前会先持久化内存配额，避免刷新后显示归零', async () => {
+  it('保存配置重建 rotator 时保留 SQLite 原子用量', async () => {
     const cfgPath = path.join(tmp, 'runtime_models.json');
     writeConfig(cfgPath, {
       providers: [{
@@ -621,22 +667,23 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       }],
       models: [{ client_model: 'm', provider_id: 'p1', upstream_model: 'u', enabled: true }],
       default_client_model: 'm',
-      anti_ban: { quota: { persist_every_n_requests: 100, persist_critical_threshold: 1 } }
+      anti_ban: { mode: 'throughput' }
     });
 
-    const mgr = new RuntimeConfigManager(cfgPath);
+    const mgr = await createManager(cfgPath);
     await mgr.init();
     const { rotator } = mgr.resolveModel('m');
     rotator.recordUsage('sk-1', 4, 21);
 
-    const usageBefore = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
-    expect(usageBefore.usage['p1:SAVEFLUSH1']).toEqual({ requests_used: 0, tokens_used: 0 });
+    expect((await loadSqliteUsage(cfgPath))['p1:SAVEFLUSH1']).toEqual({
+      requests_used: 4,
+      tokens_used: 21,
+    });
 
     await mgr.saveConfig(mgr.getConfig());
 
     expect(mgr.getKeyStates('p1')[0].usage).toEqual({ requests_used: 4, tokens_used: 21 });
-    const usageAfter = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
-    expect(usageAfter.usage['p1:SAVEFLUSH1']).toEqual({ requests_used: 4, tokens_used: 21 });
+    expect((await loadSqliteUsage(cfgPath))['p1:SAVEFLUSH1']).toEqual({ requests_used: 4, tokens_used: 21 });
     await mgr.shutdown();
   });
 
@@ -655,19 +702,19 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       default_client_model: 'm',
     });
 
-    const first = new RuntimeConfigManager(cfgPath);
+    const first = await createManager(cfgPath);
     await first.init();
-    const routeId = JSON.parse(readFileSync(cfgPath, 'utf-8')).models[0].route_id;
+    const routeId = (await loadSqliteConfig(cfgPath)).models[0].route_id;
     expect(routeId).toMatch(/^[0-9A-Z]{10}$/);
     await first.shutdown();
 
-    const restarted = new RuntimeConfigManager(cfgPath);
+    const restarted = await createManager(cfgPath);
     await restarted.init();
     expect(restarted.getConfig().models[0].route_id).toBe(routeId);
     await restarted.shutdown();
   });
 
-  it('启动时会按时间恢复昨天自动禁用的 Key 并清理持久化状态', async () => {
+  it('首次读取时会恢复过期自动禁用的 Key 并清理持久化状态', async () => {
     const cfgPath = path.join(tmp, 'runtime_models.json');
     writeConfig(cfgPath, {
       providers: [{
@@ -699,22 +746,23 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       }
     }), 'utf-8');
 
-    const mgr = new RuntimeConfigManager(cfgPath);
+    const mgr = await createManager(cfgPath);
     await mgr.init();
-
-    await vi.waitFor(() => {
-      const persisted = JSON.parse(readFileSync(statePath, 'utf-8'));
-      expect(persisted.states['p1:RECOVER001'].auto_disabled_at).toBeNull();
-      expect(persisted.states['p1:RECOVER001'].error_count).toBe(0);
-    });
+    // 共享协调器采用惰性恢复，首次状态读取在事务中完成检查和清理。
     expect(mgr.getKeyStates('p1')[0].enabled).toBe(true);
 
+    await vi.waitFor(async () => {
+      const persisted = await loadSqliteState(cfgPath);
+      expect(persisted['p1:RECOVER001'].auto_disabled_at).toBeNull();
+      expect(persisted['p1:RECOVER001'].error_count).toBe(0);
+    });
     await mgr.shutdown();
 
-    const persistedConfig = JSON.parse(readFileSync(cfgPath, 'utf-8'));
+    const persistedConfig = await loadSqliteConfig(cfgPath);
+    if (!Array.isArray(persistedConfig.providers[0].api_key)) throw new Error('api_key 应为数组。');
     expect(persistedConfig.providers[0].api_key[0].enabled).not.toBe(false);
 
-    const restarted = new RuntimeConfigManager(cfgPath);
+    const restarted = await createManager(cfgPath);
     await restarted.init();
     expect(restarted.getKeyStates('p1')[0].enabled).toBe(true);
     await restarted.shutdown();
@@ -739,7 +787,7 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
 
     const originalThreshold = settings.keyMaxErrors;
     settings.keyMaxErrors = 9;
-    const mgr = new RuntimeConfigManager(cfgPath);
+    const mgr = await createManager(cfgPath);
     try {
       await mgr.init();
       const { rotator } = mgr.resolveModel('m');
@@ -772,10 +820,10 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
 
     const originalAutoDisable = settings.keyAutoDisable;
     settings.keyAutoDisable = false;
-    const mgr = new RuntimeConfigManager(cfgPath);
+    const mgr = await createManager(cfgPath);
     try {
       await mgr.init();
-      expect(mgr.adminView().runtime_settings).toEqual({
+      expect(mgr.adminView().runtime_settings).toMatchObject({
         key_auto_disable: false,
         key_max_errors: 1
       });
@@ -807,7 +855,7 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       default_client_model: null
     });
 
-    const app = await createApp(cfgPath);
+    const app = await createMigratedApp(cfgPath);
     try {
       const cookies = { [settings.adminCookieName]: settings.adminAuthToken };
       const missingProvider = await app.inject({
@@ -824,14 +872,14 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
         cookies
       });
       expect(invalidIndex.statusCode).toBe(400);
-      expect(invalidIndex.json().message).toContain('无效的 key 索引');
+      expect(invalidIndex.json().message).toContain('未找到 Key');
     } finally {
       await app.runtimeConfigManager.shutdown();
       await app.close();
     }
   });
 
-  it('Admin 保存非法配置时返回 400，并保留可读错误信息', async () => {
+  it('Admin 创建引用不存在 Provider 的路由时返回 400', async () => {
     const cfgPath = path.join(tmp, 'runtime_models.json');
     writeConfig(cfgPath, {
       providers: [],
@@ -839,17 +887,17 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       default_client_model: null
     });
 
-    const app = await createApp(cfgPath);
+    const app = await createMigratedApp(cfgPath);
     try {
       const response = await app.inject({
-        method: 'PUT',
-        url: '/api/config',
+        method: 'POST',
+        url: '/api/routes',
         cookies: { [settings.adminCookieName]: settings.adminAuthToken },
         headers: { 'if-match': '"1"' },
         payload: {
-          providers: [],
-          models: [{ client_model: 'm', provider_id: 'missing', upstream_model: 'u' }],
-          default_client_model: 'm'
+          client_model: 'm',
+          provider_id: 'missing',
+          upstream_model: 'u'
         }
       });
       expect(response.statusCode).toBe(400);
@@ -860,7 +908,7 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
     }
   });
 
-  it('自动禁用 Key 时会把未达阈值的内存配额写入 usage 文件', async () => {
+  it('自动禁用 Key 不会丢失 SQLite 中已原子提交的用量', async () => {
     const cfgPath = path.join(tmp, 'runtime_models.json');
     writeConfig(cfgPath, {
       providers: [{
@@ -875,22 +923,21 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
       }],
       models: [{ client_model: 'm', provider_id: 'p1', upstream_model: 'u', enabled: true }],
       default_client_model: 'm',
-      anti_ban: { quota: { persist_every_n_requests: 100, persist_critical_threshold: 1 } }
+      anti_ban: { mode: 'throughput' }
     });
 
-    const mgr = new RuntimeConfigManager(cfgPath);
+    const mgr = await createManager(cfgPath);
     await mgr.init();
     const { rotator } = mgr.resolveModel('m');
     rotator.recordUsage('sk-1', 2, 9);
 
-    const usageBefore = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
-    expect(usageBefore.usage['p1:AUTOOFF001']).toEqual({ requests_used: 0, tokens_used: 0 });
+    expect((await loadSqliteUsage(cfgPath))['p1:AUTOOFF001']).toEqual({ requests_used: 2, tokens_used: 9 });
 
     rotator.markQuotaError('sk-1', 'quota exceeded');
 
-    await vi.waitFor(() => {
-      const usageAfter = JSON.parse(readFileSync(path.join(tmp, 'runtime_usage.json'), 'utf-8'));
-      expect(usageAfter.usage['p1:AUTOOFF001']).toEqual({ requests_used: 2, tokens_used: 9 });
+    await vi.waitFor(async () => {
+      const usageAfter = await loadSqliteUsage(cfgPath);
+      expect(usageAfter['p1:AUTOOFF001']).toEqual({ requests_used: 2, tokens_used: 9 });
     });
     await mgr.shutdown();
   });

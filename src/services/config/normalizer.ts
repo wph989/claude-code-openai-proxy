@@ -18,7 +18,7 @@ import {
   type CircuitBreakerConfig,
   type KeyQuotaConfig,
   type PersistedApiKey,
-  type QuotaPersistConfig,
+  type ProviderCapabilityOverrides,
   type RetryConfig,
   type RuntimeConfig,
   type RuntimeConfigSummary,
@@ -34,24 +34,28 @@ import {
  * 这里不抛错；validateRuntimeConfig 才会校验引用关系并抛错。
  */
 export function normalizeRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
-  const providers = (raw.providers || []).map((item) => ({
-    provider_id: String(item.provider_id || '').trim(),
-    provider_type: normalizeProviderType(item.provider_type),
-    base_url: String(item.base_url || '').trim(),
-    quota: normalizeKeyQuota(item.quota),
-    api_key: normalizeApiKeyField(item.api_key),
-    api_key_env: normalizeOptional(item.api_key_env),
-    key_rotation_strategy: normalizeRotationStrategy(item.key_rotation_strategy),
-    auto_disable_on_error: item.auto_disable_on_error !== false,
-    auto_recover_minutes: normalizeAutoRecoverMinutes(item.auto_recover_minutes),
-    timeout_seconds: Number(item.timeout_seconds || 300),
-    stream_idle_timeout_seconds: Number(item.stream_idle_timeout_seconds || 120),
-    enabled: item.enabled !== false,
-    headers: normalizeHeaders(item.headers || {}),
-    anti_ban: normalizeAntiBanConfig(item.anti_ban),
-    circuit_breaker: normalizeCircuitBreaker(item.circuit_breaker),
-    description: String(item.description || '').trim()
-  }));
+  const providers = (raw.providers || []).map((item) => {
+    const providerType = normalizeProviderType(item.provider_type);
+    return {
+      provider_id: String(item.provider_id || '').trim(),
+      provider_type: providerType,
+      base_url: String(item.base_url || '').trim(),
+      capabilities: normalizeProviderCapabilityOverrides(item.capabilities, providerType),
+      quota: normalizeKeyQuota(item.quota),
+      api_key: normalizeApiKeyField(item.api_key),
+      api_key_env: normalizeOptional(item.api_key_env),
+      key_rotation_strategy: normalizeRotationStrategy(item.key_rotation_strategy),
+      auto_disable_on_error: item.auto_disable_on_error !== false,
+      auto_recover_minutes: normalizeAutoRecoverMinutes(item.auto_recover_minutes),
+      timeout_seconds: Number(item.timeout_seconds || 300),
+      stream_idle_timeout_seconds: Number(item.stream_idle_timeout_seconds || 120),
+      enabled: item.enabled !== false,
+      headers: normalizeHeaders(item.headers || {}),
+      anti_ban: normalizeAntiBanConfig(item.anti_ban),
+      circuit_breaker: normalizeCircuitBreaker(item.circuit_breaker),
+      description: String(item.description || '').trim()
+    };
+  });
 
   const models = (raw.models || []).map((item) => ({
     route_id: typeof item.route_id === 'string' && item.route_id.trim() ? item.route_id.trim() : nanoid(),
@@ -144,8 +148,8 @@ export function validateRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
 /**
  * 序列化前剥离 api_key 数组中的运行时字段；保留用户配置字段。
  *
- * 同时返回剥离出来的运行态记录（按 id 索引），调用方可写入 KeyStateStore。
- * 这样 runtime_models.json 只承载用户编辑的字段，避免每次 429 都改写它。
+ * 同时返回剥离出来的运行态记录（按 id 索引），迁移器会把它们写入 SQLite。
+ * 这样配置快照只承载用户编辑字段，避免运行态变化污染配置历史。
  */
 export function stripRuntimeFromConfig(config: RuntimeConfig): {
   config: RuntimeConfig;
@@ -300,11 +304,9 @@ function normalizeAntiBanConfig(value: unknown): AntiBanConfig | undefined {
   if (value.sticky_on_cooldown === 'wait' || value.sticky_on_cooldown === 'fallthrough') {
     result.sticky_on_cooldown = value.sticky_on_cooldown;
   }
-  // 高级 anti-ban 配置需要白名单保留，否则 Admin 保存会意外清掉手写 JSON 调参。
+  // 高级 anti-ban 配置需要白名单保留，否则 Admin 保存会意外清掉重试策略。
   const retry = normalizeRetryConfig(value.retry);
   if (retry) result.retry = retry;
-  const quota = normalizeQuotaPersistConfig(value.quota);
-  if (quota) result.quota = quota;
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
@@ -317,18 +319,6 @@ function normalizeRetryConfig(value: unknown): RetryConfig | undefined {
   if (totalMs != null) result.max_total_ms = Math.trunc(totalMs);
   if (typeof value.retry_on_rate_limit === 'boolean') result.retry_on_rate_limit = value.retry_on_rate_limit;
   if (typeof value.retry_on_transient === 'boolean') result.retry_on_transient = value.retry_on_transient;
-  return Object.keys(result).length > 0 ? result : undefined;
-}
-
-function normalizeQuotaPersistConfig(value: unknown): QuotaPersistConfig | undefined {
-  if (!isPlainObject(value)) return undefined;
-  const result: QuotaPersistConfig = {};
-  const every = normalizeNonNegativeNumber(value.persist_every_n_requests);
-  if (every != null) result.persist_every_n_requests = Math.trunc(every);
-  const critical = normalizeRatio(value.persist_critical_threshold);
-  if (critical != null) result.persist_critical_threshold = critical;
-  const usageFile = typeof value.usage_file === 'string' ? value.usage_file.trim() : '';
-  if (usageFile) result.usage_file = usageFile;
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
@@ -364,6 +354,19 @@ function normalizeOptionalNumber(value: unknown): number | null {
   return Number.isFinite(num) && num > 0 ? num : null;
 }
 
+function normalizeProviderCapabilityOverrides(
+  value: unknown,
+  providerType: 'openai_compatible' | 'anthropic',
+): ProviderCapabilityOverrides | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const result: ProviderCapabilityOverrides = {};
+  if (typeof value.models === 'boolean') result.models = value.models;
+  if (providerType === 'openai_compatible' && typeof value.responses === 'boolean') {
+    result.responses = value.responses;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 function normalizeCircuitBreaker(value: unknown): CircuitBreakerConfig | null {
   if (value === null) return null;
   const source = isPlainObject(value) ? value : {};
@@ -388,10 +391,4 @@ function normalizeNonNegativeNumber(value: unknown): number | null {
   if (value == null) return null;
   const num = Number(value);
   return Number.isFinite(num) && num >= 0 ? num : null;
-}
-
-function normalizeRatio(value: unknown): number | null {
-  if (value == null) return null;
-  const num = Number(value);
-  return Number.isFinite(num) && num >= 0 && num <= 1 ? num : null;
 }

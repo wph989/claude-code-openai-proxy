@@ -8,7 +8,7 @@ import {
   type AdminEvent,
 } from '../src/services/admin-event-stream.js';
 import { RuntimeConfigManager } from '../src/services/runtime-config.js';
-import { createApp } from '../src/server.js';
+import { createMigratedApp, createMigratedManager } from './test-app.js';
 import { settings } from '../src/config.js';
 
 const tempDirs: string[] = [];
@@ -74,7 +74,7 @@ describe('AdminEventStream', () => {
       default_client_model: 'client-model',
     }), 'utf8');
     const events = new AdminEventStream();
-    const manager = new RuntimeConfigManager(configPath);
+    const manager = await createMigratedManager(configPath);
     manager.setObserver(events);
     await manager.init();
 
@@ -108,7 +108,7 @@ describe('AdminEventStream', () => {
       models: [],
       default_client_model: null,
     }), 'utf8');
-    const app = await createApp(configPath);
+    const app = await createMigratedApp(configPath);
     const abort = new AbortController();
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {

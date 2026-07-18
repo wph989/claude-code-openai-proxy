@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { ResolvedProvider } from '../src/types/runtime-config.js';
-import { getProviderAdapter } from '../src/services/providers/provider-adapter.js';
+import {
+  getProviderAdapter,
+  providerSupportsCapability,
+  resolveProviderCapabilities,
+} from '../src/services/providers/provider-adapter.js';
 
 describe('ProviderAdapter 显式注册', () => {
   it('OpenAI compatible 使用 Bearer 认证和 chat/completions URL', () => {
@@ -10,6 +14,7 @@ describe('ProviderAdapter 显式注册', () => {
     adapter.applyAuthentication(headers, 'secret');
 
     expect(adapter.buildChatCompletionsUrl(provider)).toBe('https://example.com/v1/chat/completions');
+    expect(adapter.buildResponsesUrl(provider)).toBe('https://example.com/v1/responses');
     expect(headers.get('authorization')).toBe('Bearer secret');
     expect(headers.has('x-api-key')).toBe(false);
   });
@@ -24,6 +29,24 @@ describe('ProviderAdapter 显式注册', () => {
     expect(adapter.buildCountTokensUrl(provider)).toBe('https://example.com/v1/messages/count_tokens');
     expect(headers.get('x-api-key')).toBe('secret');
     expect(headers.has('authorization')).toBe(false);
+  });
+
+  it('Responses 默认关闭且只能由 OpenAI compatible 显式启用', () => {
+    expect(resolveProviderCapabilities('openai_compatible')).toMatchObject({
+      messages: true,
+      count_tokens: true,
+      chat_completions: true,
+      responses: false,
+      models: true,
+    });
+    expect(providerSupportsCapability({
+      provider_type: 'openai_compatible',
+      capabilities: { responses: true, models: false },
+    }, 'responses')).toBe(true);
+    expect(providerSupportsCapability({
+      provider_type: 'anthropic',
+      capabilities: { responses: true, models: true },
+    }, 'responses')).toBe(false);
   });
 });
 

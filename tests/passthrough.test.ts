@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createApp } from '../src/server.js';
+import { createMigratedApp } from './test-app.js';
 
 let tmp: string;
 let originalFetch: typeof globalThis.fetch;
@@ -92,7 +92,7 @@ describe('API 透传流水线', () => {
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     }) as typeof fetch;
 
-    const app = await createApp(cfgPath);
+    const app = await createMigratedApp(cfgPath);
     try {
       const response = await app.inject({
         method: 'POST',
@@ -134,7 +134,7 @@ describe('API 透传流水线', () => {
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     }) as typeof fetch;
 
-    const app = await createApp(cfgPath);
+    const app = await createMigratedApp(cfgPath);
     try {
       const response = await app.inject({
         method: 'POST',
@@ -178,7 +178,7 @@ describe('API 透传流水线', () => {
       headers: { 'content-type': 'text/plain; charset=utf-8', 'x-request-id': 'upstream-req' },
     })) as typeof fetch;
 
-    const app = await createApp(cfgPath);
+    const app = await createMigratedApp(cfgPath);
     try {
       const response = await app.inject({
         method: 'POST',
@@ -220,7 +220,7 @@ describe('API 透传流水线', () => {
       headers: { 'content-type': 'text/event-stream; charset=utf-8' },
     })) as typeof fetch;
 
-    const app = await createApp(cfgPath);
+    const app = await createMigratedApp(cfgPath);
     try {
       const response = await app.inject({
         method: 'POST',
@@ -257,7 +257,7 @@ describe('API 透传流水线', () => {
       headers: { 'content-type': 'text/plain; charset=utf-8', 'x-ratelimit-remaining': '0' },
     })) as typeof fetch;
 
-    const app = await createApp(cfgPath);
+    const app = await createMigratedApp(cfgPath);
     try {
       const response = await app.inject({
         method: 'POST',
@@ -296,7 +296,7 @@ describe('API 透传流水线', () => {
       },
     })) as typeof fetch;
 
-    const app = await createApp(cfgPath);
+    const app = await createMigratedApp(cfgPath);
     try {
       const response = await app.inject({
         method: 'POST',
@@ -338,7 +338,7 @@ describe('API 透传流水线', () => {
       usage: { prompt_tokens: 5, completion_tokens: 6, total_tokens: 11 },
     }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
 
-    const app = await createApp(cfgPath);
+    const app = await createMigratedApp(cfgPath);
     try {
       const response = await app.inject({
         method: 'POST',
@@ -371,7 +371,7 @@ describe('API 透传流水线', () => {
       headers: { 'content-type': 'text/html; charset=utf-8' },
     })) as typeof fetch;
 
-    const app = await createApp(cfgPath);
+    const app = await createMigratedApp(cfgPath);
     try {
       const response = await app.inject({
         method: 'POST',
@@ -410,7 +410,7 @@ describe('API 透传流水线', () => {
       headers: { 'content-type': 'text/event-stream; charset=utf-8' },
     })) as typeof fetch;
 
-    const app = await createApp(cfgPath);
+    const app = await createMigratedApp(cfgPath);
     try {
       const response = await app.inject({
         method: 'POST',

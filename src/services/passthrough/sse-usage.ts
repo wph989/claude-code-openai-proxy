@@ -63,9 +63,12 @@ export class SseUsageTracker {
       return;
     }
     const message = isPlainObject(event.message) ? event.message : null;
+    const response = isPlainObject(event.response) ? event.response : null;
     const usage = isPlainObject(event.usage)
       ? event.usage
-      : message && isPlainObject(message.usage) ? message.usage : null;
+      : message && isPlainObject(message.usage) ? message.usage
+        : response && isPlainObject(response.usage) ? response.usage
+          : null;
     if (!usage) return;
     this.inputTokens = Math.max(
       this.inputTokens,

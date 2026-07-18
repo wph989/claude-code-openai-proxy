@@ -7,6 +7,7 @@ describe('QuotaGuard', () => {
     g.setQuota('k1', null);
     g.recordUsage('k1', 1, 100);
     expect(g.isBlocked('k1')).toBe(false);
+    expect(g.getUsage('k1')).toEqual({ requests_used: 1, tokens_used: 100 });
   });
 
   it('blocks when requests_used >= max_requests * threshold', () => {

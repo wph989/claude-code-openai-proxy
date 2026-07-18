@@ -2,27 +2,21 @@ import { RuntimeConfigError } from '../errors.js';
 import type { ApiKeyEntry, KeyQuotaConfig } from '../types/runtime-config.js';
 import type { AdminKeyView } from './admin-config.js';
 
-export interface KeyReference {
-  keyId: string;
-  legacyIndex: number | null;
-}
-
 export interface KeyAdminGateway {
   flushRuntimeStores(): Promise<void>;
   getAdminKeyStates(providerId: string): AdminKeyView[];
   exportKeys(providerId: string): string[];
-  resolveKeyReference(providerId: string, keyRef: string | number): KeyReference;
   resetAllKeys(providerId: string): Promise<number>;
   addKeys(providerId: string, keyValues: string[]): Promise<{ added: string[]; skipped: string[] }>;
-  enableKey(providerId: string, keyRef: string | number): Promise<void>;
-  disableKey(providerId: string, keyRef: string | number): Promise<void>;
-  resetKey(providerId: string, keyRef: string | number): Promise<void>;
-  updateKeyState(providerId: string, keyRef: string | number, patch: Partial<ApiKeyEntry>): Promise<void>;
-  deleteKey(providerId: string, keyRef: string | number): Promise<void>;
-  resetKeyQuota(providerId: string, keyRef: string | number): Promise<void>;
+  enableKey(providerId: string, keyId: string): Promise<void>;
+  disableKey(providerId: string, keyId: string): Promise<void>;
+  resetKey(providerId: string, keyId: string): Promise<void>;
+  updateKeyState(providerId: string, keyId: string, patch: Partial<ApiKeyEntry>): Promise<void>;
+  deleteKey(providerId: string, keyId: string): Promise<void>;
+  resetKeyQuota(providerId: string, keyId: string): Promise<void>;
   updateKeyQuota(
     providerId: string,
-    keyRef: string | number,
+    keyId: string,
     quota: KeyQuotaConfig | null | undefined,
   ): Promise<void>;
 }
@@ -48,10 +42,6 @@ export class KeyAdminService {
   async exportKeys(providerId: string): Promise<string[]> {
     await this.gateway.flushRuntimeStores();
     return this.gateway.exportKeys(providerId);
-  }
-
-  resolveReference(providerId: string, keyRef: string | number): KeyReference {
-    return this.gateway.resolveKeyReference(providerId, keyRef);
   }
 
   async resetAllKeys(providerId: string): Promise<number> {

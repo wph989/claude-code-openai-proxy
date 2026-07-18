@@ -1,13 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import path from 'node:path';
 import {
   ensureEnvTextHasAdminAuthToken,
   generateAdminAuthToken,
   hasExplicitDevMode,
   logGeneratedAdminAuthToken,
   resolveAdminAuthToken,
-  resolveStorageBackend,
-  resolveUserConfigFile
+  resolveAlertWebhookUrl
 } from '../src/config.js';
 
 describe('配置模式判断', () => {
@@ -20,16 +18,14 @@ describe('配置模式判断', () => {
     expect(hasExplicitDevMode(['node', 'dist/cli.js', 'start', '--dev'])).toBe(true);
   });
 
-  it('默认配置文件名与运行模式一致', () => {
-    const root = path.resolve('ccop-root');
-    expect(resolveUserConfigFile(root, true)).toBe(path.join(root, 'config.json'));
-    expect(resolveUserConfigFile(root, false)).toBe(path.join(root, 'runtime_models.json'));
-  });
-
-  it('存储后端只接受 json 或 sqlite', () => {
-    expect(resolveStorageBackend(undefined)).toBe('json');
-    expect(resolveStorageBackend(' SQLite ')).toBe('sqlite');
-    expect(() => resolveStorageBackend('redis')).toThrow('仅支持 json 或 sqlite');
+  it('Webhook 地址只接受 HTTP(S)，空值保持未配置', () => {
+    expect(resolveAlertWebhookUrl(undefined)).toBeNull();
+    expect(resolveAlertWebhookUrl('   ')).toBeNull();
+    expect(resolveAlertWebhookUrl(' https://hooks.example.test/path?signature=redacted '))
+      .toBe('https://hooks.example.test/path?signature=redacted');
+    expect(resolveAlertWebhookUrl('http://127.0.0.1:8080/alert')).toBe('http://127.0.0.1:8080/alert');
+    expect(() => resolveAlertWebhookUrl('file:///tmp/secret')).toThrow('仅支持 HTTP(S)');
+    expect(() => resolveAlertWebhookUrl('signed-webhook-secret')).toThrow('必须是有效的 HTTP(S) URL');
   });
 
   it('生产默认管理口令使用随机格式而不是固定弱口令', () => {

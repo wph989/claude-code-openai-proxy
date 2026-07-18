@@ -57,9 +57,6 @@ const antiBanRetryMaxAttemptsInput = $('#antiBanRetryMaxAttempts');
 const antiBanRetryMaxTotalMsInput = $('#antiBanRetryMaxTotalMs');
 const antiBanRetryOnRateLimitInput = $('#antiBanRetryOnRateLimit');
 const antiBanRetryOnTransientInput = $('#antiBanRetryOnTransient');
-const antiBanQuotaPersistEveryInput = $('#antiBanQuotaPersistEvery');
-const antiBanQuotaCriticalInput = $('#antiBanQuotaCritical');
-const antiBanQuotaUsageFileInput = $('#antiBanQuotaUsageFile');
 const tabProviders = $('#tab-providers');
 const tabModels = $('#tab-models');
 const tabActivity = $('#tab-activity');
@@ -168,12 +165,6 @@ function readNonNegativeInt(input) {
   return Number.isFinite(v) && v >= 0 ? v : null;
 }
 
-function readRatio(input) {
-  if (!input.value.trim()) return null;
-  const v = Number(input.value);
-  return Number.isFinite(v) && v >= 0 && v <= 1 ? v : null;
-}
-
 function readPositiveFloat(input) {
   if (!input.value.trim()) return null;
   const v = Number(input.value);
@@ -214,15 +205,6 @@ function readAntiBanConfig() {
   retry.retry_on_transient = antiBanRetryOnTransientInput.checked;
   result.retry = retry;
 
-  const quota = {};
-  const persistEvery = readNonNegativeInt(antiBanQuotaPersistEveryInput);
-  if (persistEvery != null) quota.persist_every_n_requests = persistEvery;
-  const critical = readRatio(antiBanQuotaCriticalInput);
-  if (critical != null) quota.persist_critical_threshold = critical;
-  const usageFile = antiBanQuotaUsageFileInput.value.trim();
-  if (usageFile) quota.usage_file = usageFile;
-  if (Object.keys(quota).length > 0) result.quota = quota;
-
   return result;
 }
 
@@ -244,10 +226,6 @@ function fillAntiBanConfig(config) {
   antiBanRetryOnRateLimitInput.checked = retry.retry_on_rate_limit !== false;
   antiBanRetryOnTransientInput.checked = retry.retry_on_transient !== false;
 
-  const quota = cfg.quota || {};
-  setNumberInput(antiBanQuotaPersistEveryInput, quota.persist_every_n_requests);
-  setNumberInput(antiBanQuotaCriticalInput, quota.persist_critical_threshold);
-  antiBanQuotaUsageFileInput.value = quota.usage_file || '';
 }
 
 // ── API ──
@@ -309,19 +287,19 @@ function buildPayload() {
   };
 }
 
-async function saveConfig() {
+async function saveSettings() {
   try {
-    setStatus('正在保存配置...');
+    setStatus('正在保存全局设置...');
     const payload = buildPayload();
-    const { data, revision } = await AdminApi.saveConfig(payload, state.revision);
-    state.applyServerView(data, revision);
-    renderSummary(summaryWrap, data.summary);
-    refreshDefaultModelSelect();
-    renderTable();
-    renderProxyTokenState();
+    const { data, revision } = await AdminApi.updateSettings({
+      default_client_model: payload.default_client_model,
+      key_max_errors: payload.key_max_errors,
+      anti_ban: payload.anti_ban,
+    }, state.revision);
+    applyServerMutation(data, revision);
     void updatePreviewNow();
-    setStatus(data.message || '保存成功');
-    Toast.success(data.message || '配置已保存并生效');
+    setStatus(data.message || '全局设置已保存');
+    Toast.success(data.message || '全局设置已保存并生效');
   } catch (error) {
     if (error instanceof ApiClientError && error.status === 409) {
       showConfigConflict(error.data);
@@ -376,6 +354,14 @@ let previewController = null;
 function updatePreview() {
   clearTimeout(updatePreviewTimer);
   updatePreviewTimer = setTimeout(() => void requestConfigPreview(), 300);
+}
+
+function applyServerMutation(data, revision) {
+  state.applyServerView(data, revision);
+  renderSummary(summaryWrap, data.summary);
+  refreshDefaultModelSelect();
+  renderTable();
+  renderProxyTokenState();
 }
 
 async function updatePreviewNow() {
@@ -574,13 +560,43 @@ function changePage(dir) {
   renderTable();
 }
 
-function moveItem(idx, dir) {
-  const arr = currentTab === 'providers' ? state.config.providers : state.config.models;
-  const newIdx = idx + dir;
-  if (newIdx < 0 || newIdx >= arr.length) return;
-  [arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]];
-  renderTable();
-  updatePreviewNow();
+async function updateResourceEnabled(type, index) {
+  const items = type === 'provider' ? state.config.providers : state.config.models;
+  const item = items[index];
+  if (!item) return;
+  const enabled = item.enabled === false;
+  try {
+    const result = type === 'provider'
+      ? await AdminApi.updateProvider(item.provider_id, { enabled }, state.revision)
+      : await AdminApi.updateRoute(item.route_id, { enabled }, state.revision);
+    applyServerMutation(result.data, result.revision);
+    Toast.success(enabled ? '资源已启用' : '资源已停用');
+  } catch (error) {
+    if (error instanceof ApiClientError && error.status === 409) {
+      showConfigConflict(error.data);
+      return;
+    }
+    Toast.error(`状态更新失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function deleteResource(type, index) {
+  const items = type === 'provider' ? state.config.providers : state.config.models;
+  const item = items[index];
+  if (!item) return;
+  try {
+    const result = type === 'provider'
+      ? await AdminApi.deleteProvider(item.provider_id, state.revision)
+      : await AdminApi.deleteRoute(item.route_id, state.revision);
+    applyServerMutation(result.data, result.revision);
+    Toast.success(type === 'provider' ? '供应商已删除' : '模型路由已删除');
+  } catch (error) {
+    if (error instanceof ApiClientError && error.status === 409) {
+      showConfigConflict(error.data);
+      return;
+    }
+    Toast.error(`删除失败：${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 async function toggleKeyPanel(providerId) {
@@ -704,9 +720,7 @@ tableContainer.addEventListener('click', (e) => {
     if (type === 'provider' || type === 'model') {
       const arr = type === 'provider' ? state.config.providers : state.config.models;
       if (idx >= 0 && idx < arr.length) {
-        arr[idx].enabled = arr[idx].enabled === false ? true : false;
-        renderTable();
-        updatePreviewNow();
+        void updateResourceEnabled(type, idx);
       }
     } else if (type === 'key') {
       const providerId = toggleTarget.dataset.provider;
@@ -841,28 +855,11 @@ tableContainer.addEventListener('click', (e) => {
     return;
   }
 
-  if (target.classList.contains('move-up-btn')) {
-    moveItem(parseInt(target.dataset.idx), -1);
-    return;
-  }
-
-  if (target.classList.contains('move-down-btn')) {
-    moveItem(parseInt(target.dataset.idx), 1);
-    return;
-  }
-
   if (target.classList.contains('delete-btn')) {
     const idx = parseInt(target.dataset.idx);
     const itemName = isProvider ? state.config.providers[idx]?.provider_id : state.config.models[idx]?.client_model;
     Dialog.confirm('确认删除', `确定要删除 "${itemName || '此项目'}" 吗？此操作不可撤销。`, () => {
-      if (isProvider) {
-        state.config.providers.splice(idx, 1);
-      } else {
-        state.config.models.splice(idx, 1);
-      }
-      refreshDefaultModelSelect();
-      renderTable();
-      updatePreviewNow();
+      void deleteResource(isProvider ? 'provider' : 'model', idx);
     }, '确认删除', '取消', 'btn-danger');
     return;
   }
@@ -899,35 +896,35 @@ function closeModal() {
   Dialog.hide();
 }
 
-function submitModal() {
+async function submitModal() {
   const isProvider = currentTab === 'providers';
   try {
     const item = isProvider ? collectProviderForm() : collectModelForm();
+    let result;
     if (editingIndex >= 0) {
       if (isProvider) {
         const existing = state.config.providers[editingIndex];
-        const existingKeys = getKeyArray(existing);
-        item.api_key = existingKeys.length > 0 ? existingKeys : null;
-        if (existing.anti_ban) item.anti_ban = existing.anti_ban;
-        state.config.providers[editingIndex] = item;
-      }
-      else {
-        // 路由 ID 是服务端资源身份，编辑表单只修改字段，不能因替换对象而丢失。
-        item.route_id = state.config.models[editingIndex].route_id;
-        state.config.models[editingIndex] = item;
+        result = await AdminApi.updateProvider(existing.provider_id, item, state.revision);
+      } else {
+        const existing = state.config.models[editingIndex];
+        result = await AdminApi.updateRoute(existing.route_id, item, state.revision);
       }
     } else {
       if (isProvider) {
-        state.config.providers.push(item);
+        result = await AdminApi.createProvider(item, state.revision);
+      } else {
+        result = await AdminApi.createRoute(item, state.revision);
       }
-      else state.config.models.push(item);
     }
+    applyServerMutation(result.data, result.revision);
     closeModal();
-    refreshDefaultModelSelect();
-    renderTable();
-    updatePreviewNow();
-  } catch (e) {
-    Toast.error(e.message);
+    Toast.success(isProvider ? '供应商已保存' : '模型路由已保存');
+  } catch (error) {
+    if (error instanceof ApiClientError && error.status === 409) {
+      showConfigConflict(error.data);
+      return false;
+    }
+    Toast.error(error instanceof Error ? error.message : String(error));
     return false;
   }
   return true;
@@ -1003,7 +1000,7 @@ configHistory.addEventListener('click', (event) => {
     'btn-danger',
   );
 });
-$('#saveBtn').addEventListener('click', saveConfig);
+$('#saveBtn').addEventListener('click', saveSettings);
 $('#logoutBtn').addEventListener('click', async () => {
   try {
     eventSource?.close();
@@ -1059,9 +1056,6 @@ antiBanRetryMaxAttemptsInput.addEventListener('input', updatePreview);
 antiBanRetryMaxTotalMsInput.addEventListener('input', updatePreview);
 antiBanRetryOnRateLimitInput.addEventListener('change', updatePreview);
 antiBanRetryOnTransientInput.addEventListener('change', updatePreview);
-antiBanQuotaPersistEveryInput.addEventListener('input', updatePreview);
-antiBanQuotaCriticalInput.addEventListener('input', updatePreview);
-antiBanQuotaUsageFileInput.addEventListener('input', updatePreview);
 
 // ── Init ──
 Theme.init();

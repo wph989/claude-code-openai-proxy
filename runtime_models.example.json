@@ -5,6 +5,10 @@
       "provider_id": "openai-compatible",
       "provider_type": "openai_compatible",
       "base_url": "https://api.example.com/v1",
+      "capabilities": {
+        "responses": false,
+        "models": true
+      },
       "api_key_env": "PROVIDER_API_KEY",
       "api_key": [
         {
@@ -15,6 +19,9 @@
           "quota": {
             "max_requests": 1000,
             "max_tokens": null,
+            "max_cost_usd": 5,
+            "input_cost_per_million": 2,
+            "output_cost_per_million": 8,
             "soft_stop_threshold": 0.95
           }
         },

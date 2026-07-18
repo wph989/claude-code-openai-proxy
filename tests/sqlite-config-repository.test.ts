@@ -12,6 +12,7 @@ import {
   SQLITE_SCHEMA_VERSION,
   SqliteConfigRepository,
 } from '../src/services/config/sqlite-config-repository.js';
+import { migrateJsonToSqlite } from '../src/services/config/json-to-sqlite-migration.js';
 
 const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
 
@@ -76,28 +77,28 @@ describe('SqliteConfigRepository', () => {
     });
     const originalConfig = readFileSync(configPath, 'utf8');
 
-    const repository = new SqliteConfigRepository(path.join(tempDir, 'runtime.db'), {
-      legacyConfigPath: configPath,
+    const dbPath = path.join(tempDir, 'runtime.db');
+    await migrateJsonToSqlite({
+      configPath,
+      sqlitePath: dbPath,
     });
-    const imported = await repository.ensureDefaultConfig(() => emptyConfig(1));
-
-    expect(imported.revision).toBe(7);
-    expect(imported.providers[0].api_key).toEqual([
-      { id: 'STABLE0001', key: 'placeholder-key', enabled: true },
-    ]);
-    expect(await repository.createKeyStateStore().load()).toMatchObject({
-      'provider-a:STABLE0001': { error_count: 2, last_error_at: 123 },
-    });
-    expect(await repository.createUsageStore({
-      every_n: 1,
-      critical_threshold: 0.9,
-      usageFileHint: 'ignored.json',
-    }).load()).toEqual({
-      'provider-a:STABLE0001': { requests_used: 11, tokens_used: 220 },
-    });
-    expect(readFileSync(configPath, 'utf8')).toBe(originalConfig);
-
-    repository.close();
+    const repository = new SqliteConfigRepository(dbPath);
+    try {
+      const imported = await repository.loadConfig();
+      expect(imported.revision).toBe(7);
+      expect(imported.providers[0].api_key).toEqual([
+        { id: 'STABLE0001', key: 'placeholder-key' },
+      ]);
+      expect(await repository.createKeyStateStore().load()).toMatchObject({
+        'provider-a:STABLE0001': { error_count: 2, last_error_at: 123 },
+      });
+      expect(await repository.createUsageStore().load()).toEqual({
+        'provider-a:STABLE0001': { requests_used: 11, tokens_used: 220 },
+      });
+      expect(readFileSync(configPath, 'utf8')).toBe(originalConfig);
+    } finally {
+      repository.close();
+    }
   });
 
   it('两个连接通过 revision CAS 阻止旧 Worker 覆盖新配置', async () => {
@@ -123,8 +124,8 @@ describe('SqliteConfigRepository', () => {
     await first.ensureDefaultConfig(() => emptyConfig(1));
     const firstState = first.createKeyStateStore();
     const secondState = second.createKeyStateStore();
-    const firstUsage = first.createUsageStore({ every_n: 50, critical_threshold: 0.8, usageFileHint: '' });
-    const secondUsage = second.createUsageStore({ every_n: 50, critical_threshold: 0.8, usageFileHint: '' });
+    const firstUsage = first.createUsageStore();
+    const secondUsage = second.createUsageStore();
 
     expect(firstState.reconcile(new Set(['p1:KEY0000001', 'p1:KEY0000002']), {
       error_count: 0,
@@ -161,9 +162,9 @@ describe('SqliteConfigRepository', () => {
       version: 2,
       usage: { 'provider-a:STABLE0001': { requests_used: 2, tokens_used: 40 } },
     });
-    const repository = new SqliteConfigRepository(path.join(tempDir, 'runtime.db'), {
-      legacyConfigPath: configPath,
-    });
+    const dbPath = path.join(tempDir, 'runtime.db');
+    await migrateJsonToSqlite({ configPath, sqlitePath: dbPath });
+    const repository = new SqliteConfigRepository(dbPath);
     const manager = new RuntimeConfigManager(repository);
 
     await manager.init();
@@ -392,14 +393,12 @@ describe('SqliteConfigRepository', () => {
     await second.shutdown();
   });
 
-  it('createApp 按显式存储选项创建 SQLite 仓储并导入 JSON', async () => {
+  it('createApp 只打开已迁移的 SQLite，不隐式读取 JSON', async () => {
     const configPath = path.join(tempDir, 'runtime_models.json');
     const dbPath = path.join(tempDir, 'runtime.db');
     writeJson(configPath, runtimeConfig(4));
-    const app = await createApp(configPath, {
-      storageBackend: 'sqlite',
-      sqlitePath: dbPath,
-    });
+    await migrateJsonToSqlite({ configPath, sqlitePath: dbPath });
+    const app = await createApp(dbPath);
     try {
       expect(existsSync(dbPath)).toBe(true);
       expect(app.runtimeConfigManager.getRevision()).toBe(4);
@@ -450,8 +449,8 @@ describe('SqliteConfigRepository', () => {
     const firstRepository = new SqliteConfigRepository(dbPath);
     const secondRepository = new SqliteConfigRepository(dbPath);
     await firstRepository.ensureDefaultConfig(() => runtimeConfig(1));
-    const firstApp = await createApp('unused.json', { configRepository: firstRepository });
-    const secondApp = await createApp('unused.json', { configRepository: secondRepository });
+    const firstApp = await createApp(dbPath, { configRepository: firstRepository });
+    const secondApp = await createApp(dbPath, { configRepository: secondRepository });
     try {
       const updated = firstApp.runtimeConfigManager.getConfig();
       updated.models[0].upstream_model = 'new-upstream-model';

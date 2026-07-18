@@ -34,7 +34,7 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
     }
 
     try {
-      const { route, provider, rotator } = app.runtimeConfigManager.resolveModel(modelName);
+      const { route, provider, rotator } = app.runtimeConfigManager.resolveModel(modelName, 'count_tokens');
       const anthropicVersion = readHeader(request.headers['anthropic-version']);
       const anthropicBeta = readHeader(request.headers['anthropic-beta']);
 
@@ -84,7 +84,7 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
 
     let resolved;
     try {
-      resolved = app.runtimeConfigManager.resolveModel(payload.model);
+      resolved = app.runtimeConfigManager.resolveModel(payload.model, 'messages');
     } catch (error) {
       return reply.code(400).send(buildAnthropicError(requestId, 'invalid_request_error', error instanceof Error ? error.message : '模型映射失败。'));
     }

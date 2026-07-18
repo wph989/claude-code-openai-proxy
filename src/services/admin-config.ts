@@ -9,6 +9,7 @@ import type {
 } from '../types/runtime-config.js';
 import type { KeyErrorCategory, KeyRuntimeStatus } from './api-key-rotator.js';
 import type { ProviderHealthRegistry } from './provider-health.js';
+import { resolveProviderCapabilities } from './providers/provider-adapter.js';
 
 export interface AdminKeyView {
   id: string;
@@ -34,6 +35,7 @@ export interface AdminKeyView {
 
 export type AdminProviderView = Omit<ProviderConfig, 'api_key' | 'headers'> & {
   api_key: AdminKeyView[];
+  capabilities: ReturnType<typeof resolveProviderCapabilities>;
   /** 敏感 Header 的值固定为 null，表示“已配置但不下发”。 */
   headers: Record<string, string | null>;
   /** 仅包含进程内低基数健康状态，不暴露请求或凭证。 */
@@ -117,6 +119,7 @@ export function buildAdminRuntimeConfigView(
     const circuit = providerHealth?.snapshot(provider.provider_id);
     return {
       ...provider,
+      capabilities: resolveProviderCapabilities(provider.provider_type, provider.capabilities),
       // 配置视图只列出可持久化 Key；环境变量 Key 只出现在 key_states，避免整体保存把环境变量秘密写回文件。
       api_key: (Array.isArray(provider.api_key) ? provider.api_key : []).map((entry) => {
         const status = (keyStates[provider.provider_id] || []).find((item) => item.id === entry.id);
@@ -194,7 +197,7 @@ export function buildConfigChangePreview(before: RuntimeConfig, after: RuntimeCo
     before.providers,
     after.providers,
     (provider) => provider.provider_id,
-    ['provider_type', 'base_url', 'quota', 'api_key', 'api_key_env', 'key_rotation_strategy', 'auto_disable_on_error', 'auto_recover_minutes', 'timeout_seconds', 'stream_idle_timeout_seconds', 'enabled', 'headers', 'anti_ban', 'circuit_breaker', 'description'],
+    ['provider_type', 'base_url', 'capabilities', 'quota', 'api_key', 'api_key_env', 'key_rotation_strategy', 'auto_disable_on_error', 'auto_recover_minutes', 'timeout_seconds', 'stream_idle_timeout_seconds', 'enabled', 'headers', 'anti_ban', 'circuit_breaker', 'description'],
     'provider',
     changes,
   );

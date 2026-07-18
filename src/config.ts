@@ -13,19 +13,6 @@ export function hasExplicitDevMode(argv: readonly string[]): boolean {
   return argv.includes('--dev');
 }
 
-export function resolveUserConfigFile(configRoot: string, isProdMode: boolean): string {
-  return join(configRoot, isProdMode ? 'config.json' : 'runtime_models.json');
-}
-
-export type StorageBackend = 'json' | 'sqlite';
-
-export function resolveStorageBackend(raw: string | undefined): StorageBackend {
-  const normalized = raw?.trim().toLowerCase();
-  if (!normalized || normalized === 'json') return 'json';
-  if (normalized === 'sqlite') return 'sqlite';
-  throw new Error(`STORAGE_BACKEND 仅支持 json 或 sqlite，当前值为：${raw}`);
-}
-
 export function resolveAlertWebhookUrl(raw: string | undefined): string | null {
   const value = raw?.trim();
   if (!value) return null;
@@ -104,13 +91,11 @@ export const CONFIG_ROOT = IS_PROD_MODE ? join(homedir(), '.ccop') : process.cwd
 
 // 动态路径配置
 export const USER_CONFIG_DIR = CONFIG_ROOT;
-export const USER_CONFIG_FILE = resolveUserConfigFile(CONFIG_ROOT, IS_PROD_MODE);
 export const USER_ENV_FILE = join(CONFIG_ROOT, '.env');
 export const USER_LOG_DIR = join(CONFIG_ROOT, 'logs');
 export const USER_PID_DIR = join(CONFIG_ROOT, 'pids');
 
-// 导出别名供其他模块使用
-export { USER_CONFIG_FILE as CONFIG_FILE, IS_PROD_MODE as isProduction };
+export { IS_PROD_MODE as isProduction };
 
 // 生产模式：初始化用户配置目录
 function ensureUserConfig(): void {
@@ -134,11 +119,7 @@ function ensureUserConfig(): void {
 HOST=0.0.0.0
 PORT=8765
 
-# 配置文件路径（指向运行时配置 JSON）
-CONFIG_FILE=${USER_CONFIG_FILE}
-
-# 持久化后端；多 Worker 必须使用 sqlite（要求 Node.js 22.5+）
-STORAGE_BACKEND=json
+# SQLite 是唯一运行时存储（要求 Node.js 22.5+）
 SQLITE_FILE=${join(USER_CONFIG_DIR, 'runtime.db')}
 
 # 管理后台密码（首次运行随机生成，修改后需重启生效）
@@ -155,7 +136,7 @@ ALERT_BUDGET_THRESHOLD=0.85
 ALERT_COOLDOWN_SECONDS=300
 
 # API Key 错误自动禁用（累计错误达到 KEY_MAX_ERRORS 次后自动禁用，true=启用，false=禁用此功能）
-# 部分供应商不稳定时可设为 false，或在 config.json 的 provider 中设置 auto_disable_on_error: false
+# 部分供应商不稳定时可设为 false，或在管理端 Provider 设置中关闭自动禁用
 KEY_AUTO_DISABLE=true
 KEY_MAX_ERRORS=5
 
@@ -167,7 +148,7 @@ KEEP_ALIVE_TIMEOUT=60000
 RATE_LIMIT_MAX=100
 RATE_LIMIT_TIME_WINDOW=60000
 
-# JSON 只支持单 Worker；SQLite 可配置多个 Worker
+# SQLite WAL 支持多个 Worker；按需设置 Worker 数量
 CLUSTER_WORKERS=1
 `;
     writeFileSync(USER_ENV_FILE, defaultEnv, 'utf-8');
@@ -203,8 +184,6 @@ export interface AppSettings {
   adminAuthToken: string;
   adminCookieName: string;
   adminCookieMaxAgeSeconds: number;
-  configFile: string;
-  storageBackend: StorageBackend;
   sqliteFile: string;
   requestTimeoutMs: number;
   streamIdleTimeoutMs: number;
@@ -259,17 +238,6 @@ const toRatio = (raw: string | undefined, fallback: number): number => {
   return Number.isFinite(value) && value > 0 && value <= 1 ? value : fallback;
 };
 
-// 配置文件路径（优先环境变量，否则按模式选择）
-// 相对路径会基于 CONFIG_ROOT 解析，确保无论从哪里启动都能找到配置文件
-const configFilePath = (() => {
-  const envPath = process.env.CONFIG_FILE?.trim();
-  if (!envPath) {
-    return IS_PROD_MODE ? USER_CONFIG_FILE : join(process.cwd(), 'runtime_models.json');
-  }
-  // 如果是绝对路径，直接使用；否则相对于 CONFIG_ROOT 解析
-  return isAbsolute(envPath) ? envPath : join(CONFIG_ROOT, envPath);
-})();
-
 const sqliteFilePath = (() => {
   const envPath = process.env.SQLITE_FILE?.trim();
   if (!envPath) return join(CONFIG_ROOT, 'runtime.db');
@@ -279,12 +247,10 @@ const sqliteFilePath = (() => {
 export const settings: AppSettings = {
   host: process.env.HOST?.trim() || '0.0.0.0',
   port: toNumber(process.env.PORT, 8765),
-  proxyAuthToken: '', // 从 config.json 的 proxy_auth_token 读取，不从这里配置
+  proxyAuthToken: '', // 从 SQLite 运行时配置读取，不从环境变量读取
   adminAuthToken: resolveAdminAuthToken(process.env.ADMIN_AUTH_TOKEN, IS_PROD_MODE),
   adminCookieName: 'ccgp_admin_session',
   adminCookieMaxAgeSeconds: 60 * 60 * 12,
-  configFile: configFilePath,
-  storageBackend: resolveStorageBackend(process.env.STORAGE_BACKEND),
   sqliteFile: sqliteFilePath,
   requestTimeoutMs: toNumber(process.env.REQUEST_TIMEOUT_MS, 300000),
   streamIdleTimeoutMs: toNumber(process.env.REQUEST_STREAM_IDLE_TIMEOUT_MS, 120000),

@@ -34,6 +34,7 @@
 | `POST /v1/messages` | Anthropic Messages 协议 | `routes/messages.ts` |
 | `POST /v1/messages/count_tokens` | Anthropic Token 统计 | `routes/messages.ts` |
 | `POST /v1/chat/completions` | OpenAI Chat Completions 协议 | `routes/chat-completions.ts` |
+| `POST /v1/responses` | OpenAI Responses 协议 | `routes/responses.ts` |
 | `GET /v1/models` | 模型列表 | `routes/messages.ts` |
 
 ### 1.2 透传策略
@@ -56,12 +57,18 @@
 
 根据 `provider.provider_type`：
 
-- `openai_compatible`：拼接 `{base_url}/chat/completions`
+- `openai_compatible`：按端点拼接 `{base_url}/chat/completions` 或 `{base_url}/responses`
 - `anthropic`：先规范化 `base_url`（如果用户已加 `/v1` 则保留），再拼 `/messages` 或 `/messages/count_tokens`
 
 > `base_url` 形如 `https://api.example.com/v1` 或 `https://api.example.com`，代码会自动判断是否需要补 `/v1`，避免拼成 `/v1/v1`。
 
-### 1.5 透传四种响应形态
+### 1.5 Provider 能力矩阵与 Responses
+
+`ProviderAdapter.defaultCapabilities` 明确声明 `messages`、`count_tokens`、`chat_completions`、`responses` 和 `models`。模型解析先按请求端点能力过滤候选，再执行健康、优先级和权重选择，禁止根据 URL、Key 或模型名推断能力。
+
+OpenAI-compatible 的 Responses 默认关闭，因为很多兼容网关只实现 Chat Completions。配置 `capabilities.responses=true` 后，`POST /v1/responses` 才会转发到该 Provider；非流式和流式响应都复用现有 Key lease、重试、熔断、usage 和费用链路。OpenAI SSE 中等于内部上游模型名的 `model` 字段会精确改写为客户端别名。
+
+### 1.6 透传四种响应形态
 
 `/v1/messages` 收到的上游响应可能有四种形态（`services/passthrough.ts::pipeAnthropicSseWithRepair`）：
 
@@ -291,7 +298,7 @@ else:
 ### 6.3 配置层级（从低到高覆盖）
 
 1. `ANTI_BAN_DEFAULTS`
-2. 全局 `runtime_models.json::anti_ban`
+2. SQLite 当前配置的全局 `anti_ban`
 3. provider 级 `anti_ban`
 4. 模式 preset（`conservative` / `throughput`）
 
@@ -330,7 +337,7 @@ if settings.keyAutoDisable               // 全局 env: KEY_AUTO_DISABLE
    entry.auto_disabled_at = now()
 ```
 
-阈值优先级：`runtime_models.json::key_max_errors` > 环境变量 `KEY_MAX_ERRORS`（默认 5）。
+阈值优先级：SQLite 当前配置的 `key_max_errors` > 环境变量 `KEY_MAX_ERRORS`（默认 5）。
 
 **硬限制立即禁用**（`markQuotaError`）：
 
@@ -434,11 +441,15 @@ if provider.auto_recover_minutes > 0
 {
   "max_requests": 1000,
   "max_tokens": 1000000,
+  "max_cost_usd": 5,
+  "input_cost_per_million": 2,
+  "output_cost_per_million": 8,
   "soft_stop_threshold": 0.95
 }
 ```
 
 - `max_requests` / `max_tokens` 任一为 null 表示该维度不限
+- `max_cost_usd` 为美元软预算；输入/输出单价单位均为 USD / 1M Token
 - `soft_stop_threshold` 默认 0.95：使用率达到 95% 就软停用
 
 ### 9.2 配额继承
@@ -447,28 +458,29 @@ if provider.auto_recover_minutes > 0
 
 ### 9.3 触发与展示
 
-当 `requests_used >= max_requests * threshold` 或 `tokens_used >= max_tokens * threshold`：
+请求数、Token 总量或费用任一使用率达到 `soft_stop_threshold` 时：
 
 - `isBlocked(key) === true`，选择器筛选时排除
-- `lastBlockReason(key)` 返回 `'本地请求配额接近上限'` 或 `'本地 token 配额接近上限'`
+- `lastBlockReason(key)` 返回请求、Token 或费用预算对应的稳定原因
 - Admin 接口可见 `quota_blocked: true`、`quota_reason`
 
 ### 9.4 计数来源
 
 `recordUsage(key, requests, tokens)` 在每次响应完成时被调用：
 
-- 非流式：`routes` 解析 `usage.total_tokens` 后调用
-- 流式：`stream-bridge` 累积 `usage.prompt_tokens + completion_tokens` 后调用
+- 非流式：`routes` 解析输入/输出 usage 后调用
+- 流式：跨 chunk usage 解析器累积 OpenAI、Anthropic 或 Responses 完成事件
 - Anthropic 透传：用 `input_tokens + output_tokens`
 
-### 9.5 持久化触发
+费用只使用上游真实返回的方向 Token 计算，不估算缺失 usage。未配置费用字段时，持久化仍保持旧的 `requests_used` / `tokens_used` 两字段形状。
 
-`UsageStore` 的双触发刷盘：
+### 9.5 事务持久化
 
-- **批次阈值**：累计 `persist_every_n_requests` 次更新就写盘（默认 50）
-- **临界值**：使用率 >= `persist_critical_threshold` 立刻写盘（默认 0.85）
+用量增量由 SQLite 共享协调器在事务内更新，并与配额判断使用同一份权威数据。多 Worker 不会通过本地快照相互覆盖；请求完成后计数已经提交，无需配置批次落盘阈值。
 
-> 这样平时积攒批量写、接近耗尽时立刻持久化，避免崩溃后丢失关键边界状态。
+### 9.6 Webhook 告警
+
+`ALERT_WEBHOOK_URL` 只从环境变量读取，管理 API 和日志仅返回“是否已配置”。预算比率达到 `ALERT_BUDGET_THRESHOLD` 或 Provider 熔断打开时发送脱敏摘要，并按 `ALERT_COOLDOWN_SECONDS` 去重。Payload 不含 Key、模型名、请求/会话 ID、Header 或正文。
 
 ---
 
@@ -530,15 +542,11 @@ Provider 的 `circuit_breaker` 默认开启：连续 3 次网络或 5xx 失败�
 
 ---
 
-## 11. 运行态持久化
+## 11. SQLite 运行态持久化
 
-### 11.1 三个文件分工
+### 11.1 数据职责
 
-| 文件 | 内容 | 写入方 |
-|---|---|---|
-| `runtime_models.json` | 用户配置、`revision`、Provider/路由/Key 稳定 ID | Admin 编辑 / 启动时补 ID |
-| `runtime_state.json` | Key 运行态（error_count / disabled_at / last_error_* / auto_disabled_at / 自动禁用后的 enabled） | `KeyStateStore` |
-| `runtime_usage.json` | Key 累计计数（requests_used / tokens_used） | `UsageStore` |
+`runtime.db` 统一保存当前配置、配置历史、Key 状态、用量、并发 lease 和 Provider 熔断。数据库启用 WAL、外键、`busy_timeout` 和显式 schema migration；配置与历史快照在同一事务中提交。
 
 ### 11.2 主键策略
 
@@ -547,48 +555,18 @@ Provider 的 `circuit_breaker` 默认开启：连续 3 次网络或 5xx 失败�
 - `keyId` 是 nanoid（Crockford base32，10 字符）
 - 一旦生成不变；用户改 key 字面量也保留历史
 - 模型映射使用独立 `route_id`；环境变量 Key 使用 `env:<变量名>`，秘密本身不进入任何持久化主键
-- v1 → v2 升级时（v2 改用 id 主键），旧格式直接当空对象处理，相当于一次"用户选择全部重置"
+- 配置与历史使用单调递增 `revision`
 
-### 11.3 atomic 写入
+### 11.3 多 Worker 协调
 
-`utils/atomic-write.ts::writeJsonAtomic`：
-- 写 `.tmp` → `rename` 到目标
-- rename 在 POSIX 是原子操作；Windows 也基本原子
-- 避免崩溃时半写
+- acquire/release、并发计数、冷却、错误状态和用量更新都使用 SQLite 事务。
+- 每个 lease 带唯一 ID 与过期时间；Worker 崩溃后由后续事务回收。
+- 配置写入使用 revision CAS，冲突时加载权威版本，避免内存分叉。
+- 启动和配置变更会 reconcile 当前 Key 集合，清理不再存在的状态与用量行。
 
-### 11.4 写盘节流
+### 11.4 一次性 JSON 迁移
 
-**KeyStateStore**：
-- debounce 500ms（写多读少场景的轻量化）
-- forceFlush：Admin 操作或关键状态变更时立即刷盘
-
-**UsageStore**：
-- 双触发：批次阈值 + 临界值
-- 串行化：所有写操作通过 promise 链排队，避免多 writer 抢同一个 `.tmp`
-
-### 11.5 reconcile（一致性对齐）
-
-启动 / `saveConfig` / `addKey` 时调用：
-- 当前 config 中没有的 key → 从 store 删除
-- 当前 config 中新增的 key → store 补默认零值
-- 保证 state/usage 文件总是反映当前 config 的全量 key 集合
-
-### 11.6 计划：ConfigRepository 抽象层
-
-未来若引入 SQLite：
-
-```
-interface ConfigRepository {
-  loadConfig(): Promise<RuntimeConfig>
-  saveConfig(config): Promise<void>
-  loadKeyStates(): Promise<Record<string, KeyRuntimeRecord>>
-  patchKeyState(compositeKey, patch): Promise<void>
-  loadUsages(): Promise<Record<string, KeyUsage>>
-  updateUsage(compositeKey, usage): Promise<void>
-}
-```
-
-当前 JSON 实现是默认实现；切 SQLite 只新增一份实现，其他模块不动。
+`ccop migrate` 显式读取旧配置、状态、用量和历史文件，只允许写入未初始化的目标库。迁移在单个事务内完成，支持 `--dry-run`，且不会修改源 JSON。生产启动路径不会自动读取旧文件。
 
 ---
 
@@ -600,8 +578,7 @@ interface ConfigRepository {
 
 `ccop start -c [workers]`：
 - workers 不指定时取 `CLUSTER_WORKERS`，默认 1
-- 当前本地 JSON 状态只允许 1 个 worker；请求大于 1 时启动会明确失败
-- 单 worker 兼容模式由主进程 fork 一个 worker 运行完整的 `startServer`
+- 每个 worker 打开独立 SQLite 连接，共享 WAL 数据与事务 lease
 
 ### 12.2 worker 回收
 
@@ -609,9 +586,9 @@ interface ConfigRepository {
 - 收到 SIGINT/SIGTERM → `disconnect` 所有 worker，10 秒后强制 kill
 - 关闭期间 worker 退出不会重新 fork
 
-### 12.3 已知限制
+### 12.3 一致性边界
 
-多 worker 需要共享 Rotator、错误计数、配额和写入锁；在迁移到 SQLite/集中式状态存储前，程序会拒绝这种不安全配置，而不是带风险运行。
+Worker 在请求入口比较持久化 revision，仅在版本前进时重建内存配置；Key 状态、用量和熔断不依赖该刷新，始终从共享协调器事务读取。
 
 ---
 
@@ -656,7 +633,7 @@ interface ConfigRepository {
 ### 14.1 代理鉴权（外部调用）
 
 - 读取 `Authorization: Bearer <token>` 或 `x-api-key`
-- 与 `runtime_models.json::proxy_auth_token` 对比
+- 与 SQLite 配置中的 `proxy_auth_token` 对比
 - 配置为空时**允许匿名访问**（私网部署常用）
 
 ### 14.2 管理后台鉴权
@@ -674,7 +651,7 @@ interface ConfigRepository {
 - `GET /api/config` 与普通 Key 查询只返回服务端脱敏 DTO，不返回完整 Key、代理 Token 或敏感 Header 值。
 - Token 通过独立端点轮换；配置预览由服务端生成字段名摘要，不返回原始 JSON。
 - 配置读取返回 `ETag`，写入要求 `If-Match`；revision 冲突返回 `409`，避免多个页面静默覆盖。
-- 全局设置、Provider 与模型路由提供资源级 `PATCH` / `POST` / `DELETE` 接口，旧整体配置写入仅作为兼容入口保留。
+- 全局设置、Provider 与模型路由只通过资源级 `PATCH` / `POST` / `DELETE` 接口写入；整体 `PUT /api/config` 已删除。
 - 完整 Key 仅在管理员主动导出时返回；导出沿用现有管理员登录态，并记录不含 Key 内容的审计事件。
 
 ### 14.3 限流
@@ -688,7 +665,7 @@ interface ConfigRepository {
 
 ## 15. 健康检查与指标
 
-`routes/health.ts` 提供三个健康入口：`/livez` 表示进程存活，`/readyz` 仅在运行时配置初始化完成后返回 200，`/healthz` 保留为兼容入口。`/metrics` 输出 Prometheus 文本格式。
+`routes/health.ts` 提供 `/livez` 和 `/readyz`：前者表示进程存活，后者仅在运行时配置初始化完成后返回 200。`/metrics` 输出 Prometheus 文本格式；旧 `/healthz` 已删除。
 
 `MetricsRegistry` 记录 HTTP 请求量、状态码、延迟、TTFB、活跃请求，以及上游错误、重试和 usage 中的输入/输出 Token。Anthropic 与 OpenAI 的流式 usage 通过跨 chunk 解析器统计；上游未返回 usage 时保持为 0，不做不可靠估算。
 

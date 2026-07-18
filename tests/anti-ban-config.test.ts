@@ -7,7 +7,6 @@ describe('resolveAntiBanConfig', () => {
     const cfg = resolveAntiBanConfig();
     expect(cfg.key_selection).toBe(ANTI_BAN_DEFAULTS.key_selection);
     expect(cfg.retry.max_attempts).toBe(ANTI_BAN_DEFAULTS.retry.max_attempts);
-    expect(cfg.quota.persist_every_n_requests).toBe(ANTI_BAN_DEFAULTS.quota.persist_every_n_requests);
   });
 
   it('deep-merges provider override on top of global', () => {
@@ -58,15 +57,13 @@ describe('resolveAntiBanConfig', () => {
       models: [],
       anti_ban: {
         mode: 'throughput',
-        sticky_on_cooldown: 'wait',
-        quota: { persist_every_n_requests: 10, usage_file: 'custom_usage.json' }
+        sticky_on_cooldown: 'wait'
       }
     });
 
     expect(cfg.anti_ban).toEqual({
       mode: 'throughput',
-      sticky_on_cooldown: 'wait',
-      quota: { persist_every_n_requests: 10, usage_file: 'custom_usage.json' }
+      sticky_on_cooldown: 'wait'
     });
     expect(cfg.providers[0].anti_ban).toEqual({
       key_selection: 'balanced',

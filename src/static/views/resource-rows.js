@@ -18,8 +18,6 @@ export function renderProviderRow(provider, index, expandedProviderId, runtimeSe
     <td class="col-actions">
       <button class="btn-icon keys-btn" data-provider="${esc(provider.provider_id)}" title="管理 API Keys">${isExpanded ? '收起 Keys' : 'Keys'} (${keys.length})</button>
       <button class="btn-icon provider-test-btn" data-provider="${esc(provider.provider_id)}" title="仅请求 GET /models，不调用生成模型">测试</button>
-      <button class="btn-icon move-up-btn" data-idx="${index}">上移</button>
-      <button class="btn-icon move-down-btn" data-idx="${index}">下移</button>
       <button class="btn-icon edit-btn" data-idx="${index}">编辑</button>
       <button class="btn-icon danger delete-btn" data-idx="${index}">删除</button>
     </td>
@@ -38,8 +36,6 @@ export function renderModelRow(model, index) {
     <td class="col-number">${esc(model.weight ?? 1)}</td>
     <td>${badge}</td>
     <td class="col-actions">
-      <button class="btn-icon move-up-btn" data-idx="${index}">上移</button>
-      <button class="btn-icon move-down-btn" data-idx="${index}">下移</button>
       <button class="btn-icon edit-btn" data-idx="${index}">编辑</button>
       <button class="btn-icon danger delete-btn" data-idx="${index}">删除</button>
     </td>

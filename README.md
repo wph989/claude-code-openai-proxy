@@ -2,7 +2,7 @@
 
 Claude Code 多供应商代理（TypeScript ESM）：
 
-- 对外暴露 Anthropic Messages 风格接口，供 Claude Code 使用
+- 对外暴露 Anthropic Messages、OpenAI Chat Completions 与 OpenAI Responses 接口
 - 对内转发到 OpenAI-compatible 上游，例如 Ollama、vLLM、NIM、各类兼容网关
 - 支持多供应商、多模型映射、Web UI 配置管理、配置热生效、JSON 日志
 - 全局安装后通过 `ccop` 命令快速启动
@@ -32,6 +32,8 @@ Claude Code 多供应商代理（TypeScript ESM）：
 - **便捷 CLI**：`ccop start/stop/status/ui` 命令
 - **日志**：结构化 JSON 日志，支持日志级别控制
 - **可观测性**：提供存活/就绪检查和 Prometheus 指标
+- **可靠持久化**：SQLite WAL、显式 schema migration、Key lease 与多 Worker 事务协调
+- **预算与告警**：按输入/输出 Token 估算费用，并可发送脱敏 Webhook 告警
 
 ## 目录结构
 
@@ -47,6 +49,7 @@ src/
     health.ts           # 存活、就绪与 Prometheus 指标
     messages.ts         # Anthropic Messages API
     chat-completions.ts # OpenAI Chat Completions 透传
+    responses.ts        # OpenAI Responses 透传
   services/
     runtime-config.ts   # 运行时配置
     transformers.ts     # 协议转换
@@ -57,15 +60,15 @@ src/
     anti-ban-config.ts  # anti-ban 字段归一化与 mode 预设
     key-selectors.ts    # Sticky（咬住可用 Key）/ Balanced（随机）选择器
     quota-guard.ts      # 本地配额软停
-    usage-store.ts      # 配额计数持久化（runtime_usage.json）
-    key-state-store.ts  # Key 运行态持久化（runtime_state.json，error_count / disabled_at 等）
+    usage-budget.ts     # Token/费用累计与预算判断
+    alerts.ts           # 脱敏 Webhook 告警
+    config/             # SQLite 仓储、schema migration 与共享运行态协调器
   static/
     login.html        # 登录页
     index.html        # 管理页
   utils/
     pid.ts            # 进程管理
     logger.ts         # 日志工具
-    atomic-write.ts   # 原子 JSON 写入（tmp + rename）
     nanoid.ts         # 短稳定 id 生成（api_key.id）
     id.ts             # 请求 id 生成
     time.ts           # 时间工具
@@ -73,16 +76,18 @@ src/
 
 ## 安装
 
+要求 Node.js 22.5+ 和 pnpm。
+
 ### 方式一：全局安装（推荐）
 
 ```bash
-npm install -g claude-code-openai-proxy
+pnpm add -g claude-code-openai-proxy
 ```
 
 ### 方式二：npx 直接运行（无需安装）
 
 ```bash
-npx claude-code-openai-proxy start
+pnpm dlx claude-code-openai-proxy start
 ```
 
 ## 快速开始
@@ -93,9 +98,13 @@ npx claude-code-openai-proxy start
 ccop init-config
 ```
 
-这会创建运行时配置文件。根据启动方式不同，文件位置不同：
-- **开发模式**（`--dev` 或 `NODE_ENV=development`）：当前目录 `runtime_models.json`
-- **生产模式**（npm 全局安装）：`~/.ccop/config.json`
+这会在 SQLite 中创建默认配置，默认数据库为开发目录 `runtime.db`，生产目录为 `~/.ccop/runtime.db`。
+旧版 JSON 配置必须显式迁移，不会被启动流程自动读取：
+
+```powershell
+pnpm exec ccop migrate --config .\runtime_models.json --sqlite-file .\runtime.db --dry-run
+pnpm exec ccop migrate --config .\runtime_models.json --sqlite-file .\runtime.db
+```
 
 ### 2. 编辑配置
 
@@ -162,15 +171,16 @@ ccop ui
 | `ccop stop` | 停止服务（自动读取端口） |
 | `ccop status` | 查看服务状态 |
 | `ccop ui` | 打开管理界面 |
-| `ccop init-config` | 初始化配置文件 |
+| `ccop init-config` | 初始化 SQLite 配置 |
+| `ccop migrate --config <path>` | 显式导入旧 JSON 配置、状态、用量和历史 |
 | `ccop --version` | 查看版本 |
 
 ### 开发模式 vs 生产模式
 
 | 模式 | 启动方式 | 配置位置 | 日志位置 | PID 位置 |
 |------|---------|---------|---------|---------|
-| **开发** | `ccop start --dev`<br>or `NODE_ENV=development ccop start`<br>or `pnpm run dev` | 项目目录 `.env`<br>项目目录 `runtime_models.json` | 项目目录 `logs/app.log` | 项目目录 `pids/` |
-| **生产** | `ccop start` (npm -g 安装后) | `~/.ccop/.env`<br>`~/.ccop/config.json` | `~/.ccop/logs/app.log` | `~/.ccop/pids/` |
+| **开发** | `ccop start --dev`<br>或 `NODE_ENV=development ccop start`<br>或 `pnpm dev` | 项目目录 `.env`<br>项目目录 `runtime.db` | 项目目录 `logs/app.log` | 项目目录 `pids/` |
+| **生产** | `ccop start` | `~/.ccop/.env`<br>`~/.ccop/runtime.db` | `~/.ccop/logs/app.log` | `~/.ccop/pids/` |
 
 生产模式下所有配置数据都在 `~/.ccop/`，方便备份和迁移；开发模式下配置与项目代码在一起。
 
@@ -193,9 +203,13 @@ PORT=8765
 # 认证令牌（生产首次运行会在 ~/.ccop/.env 中自动生成随机值）
 ADMIN_AUTH_TOKEN=change-me-random-admin-token
 
-# 配置文件（可选，覆盖默认位置）
-# CONFIG_FILE=./runtime_models.json  # 开发模式
-# CONFIG_FILE=/home/user/.ccop/config.json  # 生产模式
+# SQLite 数据库（Node.js 22.5+；相对路径以配置根目录为基准）
+SQLITE_FILE=./runtime.db
+
+# 可选脱敏告警；Webhook URL 不会在管理 API 或日志中回显
+ALERT_WEBHOOK_URL=
+ALERT_BUDGET_THRESHOLD=0.85
+ALERT_COOLDOWN_SECONDS=300
 
 # 日志配置
 LOG_LEVEL=info          # debug, info, warn, error
@@ -203,7 +217,9 @@ LOG_FORMAT=json         # json, text
 LOG_DETAILED=false      # 是否允许显式安全诊断事件；始终不记录正文或凭证
 ```
 
-## runtime_models.json 配置
+## 旧 JSON 配置示例
+
+`runtime_models.example.json` 仅用于理解字段或作为旧数据迁移源；生产运行时配置由管理端写入 SQLite，不读取该 JSON。
 
 ```json
 {
@@ -213,13 +229,21 @@ LOG_DETAILED=false      # 是否允许显式安全诊断事件；始终不记录
       "provider_id": "openai-compatible",
       "provider_type": "openai_compatible",
       "base_url": "https://api.example.com/v1",
+      "capabilities": { "responses": false, "models": true },
       "api_key_env": "PROVIDER_API_KEY",
       "api_key": [
         {
           "id": "EXAMPLE001",
           "key": "sk-example-key-1",
           "enabled": true,
-          "quota": { "max_requests": 1000, "max_tokens": null, "soft_stop_threshold": 0.95 }
+          "quota": {
+            "max_requests": 1000,
+            "max_tokens": null,
+            "max_cost_usd": 5,
+            "input_cost_per_million": 2,
+            "output_cost_per_million": 8,
+            "soft_stop_threshold": 0.95
+          }
         },
         { "id": "EXAMPLE002", "key": "sk-example-key-2", "enabled": true }
       ],
@@ -253,6 +277,16 @@ LOG_DETAILED=false      # 是否允许显式安全诊断事件；始终不记录
 ```
 
 `api_key` 支持单字符串或对象数组：数组项可单独配 `enabled`、`quota`、`note` 等字段。`id`、`route_id` 和 `revision` 缺失时会自动生成；管理端依靠这些稳定 ID 与版本号避免重排误操作和并发覆盖。多数场景只需要配置 `anti_ban.mode`，其他字段都有保守默认值。
+
+### Provider 能力与 Responses API
+
+能力由 `provider_type` 的固定矩阵决定，不根据 URL、Key 或模型名猜测。两类 Provider 都支持 `/v1/messages`、`count_tokens` 和模型列表；只有 `openai_compatible` 支持 `/v1/chat/completions`。由于兼容网关不一定实现 Responses，`/v1/responses` 默认关闭，确认上游支持后显式配置：
+
+```json
+"capabilities": { "responses": true, "models": true }
+```
+
+Responses 的非流式 JSON 和流式 SSE 均沿用现有 Key lease、重试、熔断、配额及指标链路；代理会把响应中的内部模型名改回客户端模型别名。若 `models` 设为 `false`，管理端连接测试不会请求上游 `/models`。
 
 ### 模型重名与负载均衡
 
@@ -288,17 +322,11 @@ Provider 默认连续 3 次网络异常或 5xx 后熔断 30 秒；冷却结束�
 - **地域优化**：配置多个地域的同款模型，自动选择可用节点
 
 
-## 配置文件分层
+## SQLite 持久化与迁移
 
-代理把"用户配置"与"程序运行时自动写入"分到不同文件，避免长跑期间反复改写用户配置：
+`runtime.db` 是唯一生产运行时存储，统一保存配置、最近 50 个历史快照、Key lease/状态/用量和 Provider 熔断状态。数据库启用 WAL、显式 schema migration、revision CAS、事务 lease 和 TTL 回收，可供多个 Worker 共享。
 
-| 文件 | 写入来源 | 内容 |
-|---|---|---|
-| `config.json` | **用户**（admin UI / 手编） | providers / models / anti_ban / 全局设置 / `api_key` 的用户字段（id、key、enabled、note、quota） |
-| `runtime_state.json` | **程序自动**（v2，按 `providerId:id` 索引） | Key 运行态：`error_count` / `disabled_at` / `last_error_at` / `last_error_message` / `auto_disabled_at` |
-| `runtime_usage.json` | **程序自动**（v2，按 `providerId:id` 索引） | per-Key 配额计数（requests_used / tokens_used） |
-
-每个 `api_key` 项有一个稳定的 10 字符 nanoid `id`。state / usage 用 `providerId:id` 而非 key 字面量做主键，好处有二：(1) 改 token 续期不丢历史；(2) 持久化文件不再出现 key 字面量。手编 `runtime_models.json` 时漏写 `id` 字段也无妨——首次加载时自动补完并回写一次干净版本。
+每个 Key 使用稳定 `id`，状态与用量以 `${providerId}:${keyId}` 为主键；Key 字面量不会进入运行态主键。迁移命令可原子导入旧 `runtime_models.json`、`runtime_state.json`、`runtime_usage.json` 和 `runtime_history.json`，要求目标库尚未初始化，且不会修改源文件。迁移成功后请备份并移除旧 JSON，避免误以为它仍会影响运行时。
 
 
 ## 防封策略（anti-ban）
@@ -307,7 +335,11 @@ Provider 默认连续 3 次网络异常或 5xx 后熔断 30 秒；冷却结束�
 
 1. **智能选择器**（`Sticky` / `Balanced`）：sticky 咬住当前可用 Key，仅在其失败或不可用时切换；balanced 在可用 Key 间随机分散流量。
 2. **代理内有预算重试**（`UpstreamService`）：遇到 429 / 5xx 等可恢复错误，以及单个 Key 配额耗尽、失效等 Key 级 hard limit 时，在 `max_attempts` 与 `max_total_ms` 双重限制下自动换 Key 重试，对路由层透明。
-3. **本地配额守护**（`QuotaGuard` + `UsageStore`）：每个 Key 可配 `max_requests` / `max_tokens` / `soft_stop_threshold`，接近上限自动软停用（不翻 `enabled`，admin 重置后立刻恢复）；usage 计数事件驱动落盘到 `runtime_usage.json`，进程重启不丢失。
+3. **本地配额守护**（`QuotaGuard` + SQLite 协调器）：每个 Key 可配请求、Token 或美元预算，接近上限自动软停用（不翻 `enabled`，admin 重置后立刻恢复）；用量与 lease 在同一共享存储中事务更新。
+
+费用按 `input_cost_per_million` 与 `output_cost_per_million` 乘以上游真实 usage 估算，`max_cost_usd` 参与同一 `soft_stop_threshold` 判断。未配置任何费用字段时继续使用旧的 `{ requests_used, tokens_used }` 持久化形状。
+
+配置 `ALERT_WEBHOOK_URL` 后，预算达到 `ALERT_BUDGET_THRESHOLD` 或 Provider 熔断打开时发送低基数摘要；按 `ALERT_COOLDOWN_SECONDS` 去重。Payload 不含 Key、模型名、请求/会话 ID 或正文，Webhook URL 本身也不会回显。
 
 `anti_ban.mode` 提供两套预设：`conservative`（默认，保守串行）与 `throughput`（更高并发与更短间隔）。建议优先只改这个字段；确实需要细调时，provider 级 `anti_ban` 会覆盖全局值。常用覆盖项：
 
@@ -315,8 +347,6 @@ Provider 默认连续 3 次网络异常或 5xx 后熔断 30 秒；冷却结束�
 - `sticky_on_cooldown: fallthrough | wait` —— sticky 命中冷却时是否降级到下一个候选。
 - `retry.max_attempts` / `retry.max_total_ms` —— 控制代理内自动重试的次数与总耗时预算。
 - `stream_idle_timeout_seconds`（provider 级）—— 流式响应超过该空闲时长视为僵死，记录当前 Key 故障并用兼容事件结束本次流；后续请求会自动避开故障 Key。
-
-`quota.persist_*` 属于高级调参项，默认值通常不需要改；完整字段见 `src/services/anti-ban-config.ts` 的 `ANTI_BAN_DEFAULTS`。admin 页面通过【高级调参】折叠面板暴露这些字段，保存即生效。
 
 ### 自动切换与流式边界
 
@@ -326,13 +356,15 @@ Provider 默认连续 3 次网络异常或 5xx 后熔断 30 秒；冷却结束�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/livez` | 进程存活检查；`/healthz` 保留为兼容别名 |
+| `GET` | `/livez` | 进程存活检查 |
 | `GET` | `/readyz` | 配置初始化完成后返回 revision，否则返回 503 |
 | `GET` | `/metrics` | Prometheus 文本格式指标 |
 
+对外协议端点还包括 `POST /v1/messages`、`POST /v1/messages/count_tokens`、`POST /v1/chat/completions` 和 `POST /v1/responses`。Responses 仅路由到显式启用 `capabilities.responses` 的 OpenAI-compatible Provider。
+
 指标覆盖请求量、状态码、延迟、TTFB、活跃请求、上游错误/重试及上游返回的输入/输出 Token。标签只使用路由模板、状态类别和 `provider_type` 等低基数字段，不包含 Key、模型名、查询参数或请求 ID。未返回 usage 的上游不会被估算 Token。
 
-管理端通过 `GET /api/admin/events` 建立带 Cookie 鉴权的 SSE 连接，活动日志会接收配置、Provider、Key、配额和请求摘要变化；服务端只保留最近 100 条脱敏事件，支持 `Last-Event-ID` 重连补发。供应商列表的“测试”操作只执行对应 Provider 的 `GET /models`，不会调用生成模型。
+管理端通过 `GET /api/admin/events` 建立带 Cookie 鉴权的 SSE 连接，活动日志会接收配置、Provider、Key、配额和请求摘要变化；服务端只保留最近 100 条脱敏事件，支持 `Last-Event-ID` 重连补发。供应商列表的“测试”操作只执行能力矩阵允许的 `GET /models`，不会调用生成模型。
 
 ### Admin 端点
 
@@ -342,7 +374,6 @@ Provider 默认连续 3 次网络异常或 5xx 后熔断 30 秒；冷却结束�
 |------|------|------|
 | `GET` | `/api/config` | 获取脱敏配置、运行态和当前 revision |
 | `POST` | `/api/config/preview` | 服务端生成不含秘密的字段级变更摘要 |
-| `PUT` | `/api/config` | 保存配置；要求 `If-Match` |
 | `PUT` | `/api/config/proxy-token` | 独立轮换或移除代理 Token |
 | `PATCH` | `/api/settings` | 更新全局代理与防封设置 |
 | `POST` | `/api/providers` | 创建 Provider |
@@ -367,7 +398,7 @@ Key 与配额管理（均在 `/api/keys/:providerId/...` 下）：
 | `POST`   | `/api/keys/:providerId/:keyId/quota/reset`     | 清零本地 usage 计数 |
 | `PUT`    | `/api/keys/:providerId/:keyId/quota`           | 更新或清除 `quota`（in-place 应用，保留运行态） |
 
-纯数字旧索引仍兼容一个周期，并通过 `Deprecation: true` 响应头提示迁移。Admin UI（`/admin`）只持有脱敏配置，原始 JSON 展示已替换为服务端变更预览；完整 Key 仅在主动导出响应中出现。
+Key 路由只接受稳定 ID，不再解释纯数字旧索引。Admin UI（`/admin`）只持有脱敏配置，原始 JSON 展示已替换为服务端变更预览；完整 Key 仅在管理员主动导出响应中出现。
 
 详细设计文档：`docs/superpowers/specs/2026-06-06-anti-ban-strategies-design.md`。
 
@@ -408,23 +439,23 @@ pnpm test:coverage # 覆盖率报告（@vitest/coverage-v8）
 ### 1. 登录 npm
 
 ```bash
-npm login
+pnpm login
 ```
 
 ### 2. 版本更新
 
 ```bash
 # 更新版本号（遵循 semver）
-npm version patch   # 修复版: 0.1.0 -> 0.1.1
-npm version minor   # 小版本: 0.1.0 -> 0.2.0
-npm version major   # 大版本: 0.1.0 -> 1.0.0
+pnpm version patch   # 修复版: 0.1.0 -> 0.1.1
+pnpm version minor   # 小版本: 0.1.0 -> 0.2.0
+pnpm version major   # 大版本: 0.1.0 -> 1.0.0
 ```
 
 ### 3. 构建并发布
 
 ```bash
-npm run build
-npm publish --access public --no-git-checks
+pnpm build
+pnpm publish --access public --no-git-checks
 ```
 
 #### 撤销发布
@@ -436,21 +467,21 @@ pnpm unpublish claude-code-openai-proxy@0.2.0 --force
 
 ```bash
 # 发布 beta 版
-npm version prerelease --preid=beta
-npm publish --tag beta
+pnpm version prerelease --preid=beta
+pnpm publish --tag beta
 
 # 发布 next 版
-npm publish --tag next
+pnpm publish --tag next
 ```
 
 ### 发布后验证
 
 ```bash
 # 等待 npm 同步（约 1-5 分钟）
-npm view claude-code-openai-proxy versions
+pnpm view claude-code-openai-proxy versions
 
 # 全局安装测试
-npm install -g claude-code-openai-proxy
+pnpm add -g claude-code-openai-proxy
 ccop --version
 ```
 

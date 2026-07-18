@@ -57,6 +57,10 @@ export class UpstreamService {
     return getProviderAdapter(provider.provider_type).buildChatCompletionsUrl(provider);
   }
 
+  buildResponsesUrl(provider: ResolvedProvider): string {
+    return getProviderAdapter(provider.provider_type).buildResponsesUrl(provider);
+  }
+
   private buildHeadersWithKey(params: {
     provider: ResolvedProvider;
     apiKey?: string;
@@ -126,6 +130,21 @@ export class UpstreamService {
     return this.postToUpstream({
       ...params,
       url: getProviderAdapter(params.provider.provider_type).buildChatCompletionsUrl(params.provider)
+    });
+  }
+
+  async postResponses(params: {
+    provider: ResolvedProvider;
+    route: ResolvedRoute;
+    rotator?: ApiKeyRotator;
+    payload: Record<string, unknown>;
+    requestId: string;
+    sessionId: string;
+    incomingHeaders?: Record<string, string | string[] | undefined>;
+  }): Promise<Response> {
+    return this.postToUpstream({
+      ...params,
+      url: getProviderAdapter(params.provider.provider_type).buildResponsesUrl(params.provider),
     });
   }
 

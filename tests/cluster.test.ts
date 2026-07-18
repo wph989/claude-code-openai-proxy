@@ -1,18 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { assertClusterWorkerCount, resolveClusterWorkerCount } from '../src/cluster.js';
+import { resolveClusterWorkerCount } from '../src/cluster.js';
 
-describe('集群安全限制', () => {
-  it('允许单 Worker 兼容模式', () => {
-    expect(() => assertClusterWorkerCount(1)).not.toThrow();
+describe('SQLite 集群 Worker 数量', () => {
+  it('保留显式正整数 Worker 数量', () => {
     expect(resolveClusterWorkerCount(1)).toBe(1);
+    expect(resolveClusterWorkerCount(2)).toBe(2);
+    expect(resolveClusterWorkerCount(8)).toBe(8);
+  });
+
+  it('无效或非正数回退到单 Worker', () => {
     expect(resolveClusterWorkerCount(0)).toBe(1);
-  });
-
-  it('拒绝会破坏本地状态一致性的多 Worker', () => {
-    expect(() => assertClusterWorkerCount(2)).toThrow('JSON 状态存储不支持多 Worker 集群');
-  });
-
-  it('SQLite 事务运行态允许多个 Worker', () => {
-    expect(() => assertClusterWorkerCount(2, 'sqlite')).not.toThrow();
+    expect(resolveClusterWorkerCount(-1)).toBe(1);
   });
 });

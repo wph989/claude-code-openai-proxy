@@ -11,12 +11,21 @@ describe('管理端表单模块', () => {
       base_url: 'https://example.com',
       api_key: [{ key: 'full-secret-key', key_mask: '********cret', enabled: true }],
       headers: {},
+      quota: {
+        max_cost_usd: 5,
+        input_cost_per_million: 2,
+        output_cost_per_million: 8,
+      },
     });
 
     expect(html).toContain('p1&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;');
     expect(html).toContain('********cret');
     expect(html).not.toContain('full-secret-key');
     expect(html).not.toContain('<script>alert(1)</script>');
+    expect(html).toContain('id="mfq-max-cost"');
+    expect(html).toContain('value="5"');
+    expect(html).toContain('value="2"');
+    expect(html).toContain('value="8"');
   });
 
   it('模型表单转义 Provider 选项和已有模型字段', () => {
@@ -53,6 +62,7 @@ describe('管理端表单模块', () => {
     expect(providerHtml).toContain('id="mf-circuit_failure_threshold"');
     expect(providerHtml).toContain('value="5"');
     expect(providerHtml).toContain('value="45"');
+    expect(providerHtml).toContain('id="mf-cap-responses"');
     expect(modelHtml).toContain('id="mf-priority"');
     expect(modelHtml).toContain('value="7"');
     expect(modelHtml).toContain('id="mf-weight"');
@@ -99,13 +109,27 @@ describe('管理端表单模块', () => {
       'mf-circuit_breaker_enabled': input('', false),
       'mf-circuit_failure_threshold': input('3'),
       'mf-circuit_recovery_seconds': input('30'),
+      'mf-cap-responses': input('', true),
+      'mf-cap-models': input('', false),
       'mfq-max-req': input(''),
       'mfq-max-tok': input(''),
+      'mfq-max-cost': input('1.5'),
+      'mfq-input-cost': input('2'),
+      'mfq-output-cost': input('8'),
       'mfq-threshold': input(''),
       'mf-headers': input('{}'),
       'mf-description': input('provider'),
     }, () => {
-      expect(collectProviderForm().circuit_breaker).toBeNull();
+      const provider = collectProviderForm();
+      expect(provider.circuit_breaker).toBeNull();
+      expect(provider.capabilities).toEqual({ responses: true, models: false });
+      expect(provider.quota).toEqual({
+        max_requests: null,
+        max_tokens: null,
+        max_cost_usd: 1.5,
+        input_cost_per_million: 2,
+        output_cost_per_million: 8,
+      });
     });
   });
 

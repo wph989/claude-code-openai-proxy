@@ -48,21 +48,6 @@ export async function registerAdminConfigRoutes(app: FastifyInstance): Promise<v
     return { revision: app.runtimeConfigManager.getRevision(), ...preview };
   });
 
-  app.put('/api/config', api, async (request, reply) => {
-    const expectedRevision = parseConfigRevision(request.headers['if-match']);
-    await app.runtimeConfigManager.saveAdminConfig(request.body || {}, expectedRevision);
-    app.adminEventStream.configChanged({
-      scope: 'config',
-      action: 'updated',
-      revision: app.runtimeConfigManager.getRevision(),
-    });
-    setRevisionHeaders(app, reply);
-    return {
-      message: '配置已保存，并已立即生效。',
-      ...app.runtimeConfigManager.adminView(),
-    };
-  });
-
   app.put('/api/config/proxy-token', api, async (request, reply) => {
     const expectedRevision = parseConfigRevision(request.headers['if-match']);
     const body = (request.body || {}) as { token?: unknown };

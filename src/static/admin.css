@@ -422,6 +422,11 @@ body {
   font-size: 12px; font-weight: 600; color: var(--text-muted);
   letter-spacing: 0; margin-bottom: 14px;
 }
+.capability-fieldset { grid-column: 1 / -1; margin-bottom: 0; }
+.capability-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px 16px; }
+.capability-grid .checkbox-wrapper { min-width: 0; padding: 4px 0; }
+.capability-grid .checkbox-label { font-size: 13px; overflow-wrap: anywhere; }
+.capability-grid input:disabled + .checkbox-label { color: var(--text-dim); }
 .model-filter-bar input { flex: 1; min-width: 0; max-width: 340px; }
 .model-filter-bar select { width: 200px; }
 

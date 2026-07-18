@@ -2,6 +2,9 @@ import { describe, it, expect, vi } from 'vitest';
 import { validateRuntimeConfig } from '../src/models.js';
 import { ProviderHealthRegistry } from '../src/services/provider-health.js';
 import { RuntimeConfigManager } from '../src/services/runtime-config.js';
+import type { ConfigRepository } from '../src/services/config/repository.js';
+
+const unusedRepository = {} as ConfigRepository;
 
 describe('允许模型重名', () => {
   it('validateRuntimeConfig 不再拒绝重复的 client_model', () => {
@@ -62,7 +65,7 @@ describe('允许模型重名', () => {
 
     const randomValues = [0.1, 0.4, 0.8];
     let randomIndex = 0;
-    const manager = new RuntimeConfigManager('unused.json', () => randomValues[randomIndex++ % randomValues.length]);
+    const manager = new RuntimeConfigManager(unusedRepository, () => randomValues[randomIndex++ % randomValues.length]);
     manager['config'] = config as any;  // 直接设置 config 绕过文件读取
 
     // 三个默认权重候选分别命中一次，验证选择逻辑而不是依赖概率。
@@ -102,7 +105,7 @@ describe('允许模型重名', () => {
       ]
     };
 
-    const manager = new RuntimeConfigManager();
+    const manager = new RuntimeConfigManager(unusedRepository);
     manager['config'] = config as any;
 
     // 只有 p2 的路由 enabled，应该始终选中 p2
@@ -127,7 +130,7 @@ describe('允许模型重名', () => {
       ]
     };
 
-    const manager = new RuntimeConfigManager();
+    const manager = new RuntimeConfigManager(unusedRepository);
     manager['config'] = config as any;
 
     expect(() => manager.resolveModel('disabled-model')).toThrow('未找到可用的模型映射：disabled-model');
@@ -135,7 +138,7 @@ describe('允许模型重名', () => {
 
   it('随机选择前排除停用 Provider，始终回退到健康候选', () => {
     const random = vi.fn(() => 0);
-    const manager = new RuntimeConfigManager('unused.json', random);
+    const manager = new RuntimeConfigManager(unusedRepository, random);
     manager['config'] = {
       providers: [
         {
@@ -167,7 +170,7 @@ describe('允许模型重名', () => {
   });
 
   it('同名路由均无启用 Key 时返回稳定错误', () => {
-    const manager = new RuntimeConfigManager('unused.json', () => Number.NaN);
+    const manager = new RuntimeConfigManager(unusedRepository, () => Number.NaN);
     manager['config'] = {
       providers: [{
         provider_id: 'p1',
@@ -192,8 +195,41 @@ describe('允许模型重名', () => {
     expect(() => manager.resolveModel('shared')).toThrow('模型 shared 没有启用且具备可用 Key 的供应商。');
   });
 
+  it('按请求端点能力筛选同名路由，不会先选中不兼容 Provider', () => {
+    const manager = new RuntimeConfigManager(unusedRepository, () => 0);
+    manager['config'] = {
+      providers: [
+        {
+          provider_id: 'anthropic-only',
+          provider_type: 'anthropic',
+          base_url: 'https://anthropic.example.com',
+          api_key: 'anthropic-key',
+          enabled: true,
+        },
+        {
+          provider_id: 'responses-provider',
+          provider_type: 'openai_compatible',
+          base_url: 'https://openai.example.com/v1',
+          capabilities: { responses: true },
+          api_key: 'openai-key',
+          enabled: true,
+        },
+      ],
+      models: [
+        { client_model: 'shared', provider_id: 'anthropic-only', upstream_model: 'a' },
+        { client_model: 'shared', provider_id: 'responses-provider', upstream_model: 'b' },
+      ],
+      default_client_model: 'shared',
+    };
+
+    expect(manager.resolveModel('shared', 'chat_completions').provider.provider_id).toBe('responses-provider');
+    expect(manager.resolveModel('shared', 'responses').provider.provider_id).toBe('responses-provider');
+    manager['config'].providers[1].capabilities = { responses: false };
+    expect(() => manager.resolveModel('shared', 'responses')).toThrow('没有启用支持 OpenAI Responses');
+  });
+
   it('优先级高于权重，并在高优先级 Provider 熔断时故障转移', () => {
-    const manager = new RuntimeConfigManager('unused.json', () => 0.99);
+    const manager = new RuntimeConfigManager(unusedRepository, () => 0.99);
     const health = new ProviderHealthRegistry();
     manager.setProviderHealth(health);
     manager['config'] = {
@@ -217,7 +253,7 @@ describe('允许模型重名', () => {
   });
 
   it('只有全部启用候选都熔断时才返回熔断错误', () => {
-    const manager = new RuntimeConfigManager('unused.json', () => 0);
+    const manager = new RuntimeConfigManager(unusedRepository, () => 0);
     const health = new ProviderHealthRegistry();
     manager.setProviderHealth(health);
     manager['config'] = {

@@ -1,12 +1,10 @@
 import { mkdirSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { DatabaseSync as NodeDatabaseSync } from 'node:sqlite';
 import { ConfigConflictError } from '../../errors.js';
-import type { KeyUsage, RuntimeConfig } from '../../types/runtime-config.js';
-import type { KeyRuntimeRecord } from '../key-state-store.js';
+import type { KeyRuntimeRecord, KeyUsage, RuntimeConfig } from '../../types/runtime-config.js';
 import type { KeyRuntimeCoordinator } from '../key-runtime-coordinator.js';
 import type { ProviderCircuitCoordinator } from '../provider-circuit-coordinator.js';
 import { SqliteKeyRuntimeCoordinator } from './sqlite-key-runtime-coordinator.js';
@@ -16,7 +14,6 @@ import type {
   ConfigRepository,
   KeyStateRepository,
   UsageRepository,
-  UsageStoreInitOptions,
 } from './repository.js';
 
 const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
@@ -24,8 +21,6 @@ const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof
 export const SQLITE_SCHEMA_VERSION = 4;
 
 export interface SqliteConfigRepositoryOptions {
-  /** 首次建库时导入的现有 JSON 配置；导入成功后原文件保持不动。 */
-  legacyConfigPath?: string;
   busyTimeoutMs?: number;
 }
 
@@ -34,11 +29,11 @@ interface ConfigRow {
   config_json: string;
 }
 
-interface LegacyBundle {
+export interface SqliteImportBundle {
   config: RuntimeConfig;
   states: Record<string, KeyRuntimeRecord>;
   usage: Record<string, KeyUsage>;
-  imported: boolean;
+  history?: ConfigHistoryRecord[];
 }
 
 const MIGRATIONS: Array<{ version: number; sql: string }> = [{
@@ -120,24 +115,18 @@ const MIGRATIONS: Array<{ version: number; sql: string }> = [{
 }];
 
 /**
- * SQLite WAL 仓储。模块仅在选择 sqlite 后动态加载，因此默认 JSON 模式仍可运行在
- * 不提供 node:sqlite 的旧 Node 20；SQLite/多 Worker 模式要求 Node 22.5+。
+ * SQLite WAL 是唯一生产运行时仓储。旧 JSON 数据只允许通过显式迁移命令导入，
+ * 启动过程不会探测或混合旧文件，避免部署时悄悄进入双轨状态。
  */
 export class SqliteConfigRepository implements ConfigRepository {
-  readonly storageKind = 'sqlite' as const;
-  readonly supportsSharedRuntime = true;
   readonly dbPath: string;
   private readonly db: NodeDatabaseSync;
-  private readonly legacyConfigPath?: string;
   private keyRuntimeCoordinator: KeyRuntimeCoordinator | null = null;
   private providerCircuitCoordinator: ProviderCircuitCoordinator | null = null;
   private closed = false;
 
   constructor(dbPath: string, options: SqliteConfigRepositoryOptions = {}) {
     this.dbPath = path.resolve(dbPath);
-    this.legacyConfigPath = options.legacyConfigPath
-      ? path.resolve(options.legacyConfigPath)
-      : undefined;
     mkdirSync(path.dirname(this.dbPath), { recursive: true });
     this.db = new DatabaseSync(this.dbPath);
     try {
@@ -208,30 +197,34 @@ export class SqliteConfigRepository implements ConfigRepository {
     const existing = await this.tryLoadConfig();
     if (existing) return existing;
 
-    const bundle = await this.readLegacyBundle(buildDefault);
+    const config = buildDefault();
     return withImmediateTransaction(this.db, () => {
       const raced = this.db.prepare(
         'SELECT config_json FROM app_config WHERE singleton_id = 1',
       ).get() as { config_json: string } | undefined;
       if (raced) return JSON.parse(raced.config_json) as RuntimeConfig;
 
-      const revision = normalizeRevision(bundle.config.revision);
-      const config = { ...bundle.config, revision };
-      this.db.prepare(`
-        INSERT INTO app_config(singleton_id, revision, config_json, updated_at)
-        VALUES(1, ?, ?, ?)
-      `).run(revision, JSON.stringify(config), Date.now());
-      writeConfigHistory(this.db, revision, JSON.stringify(config), Date.now());
-      for (const [compositeKey, state] of Object.entries(bundle.states)) {
-        writeStatePatch(this.db, compositeKey, state);
+      const normalized = { ...config, revision: normalizeRevision(config.revision) };
+      writeImportBundle(this.db, { config: normalized, states: {}, usage: {} });
+      console.log(`[init] SQLite 配置已创建: ${this.dbPath}`);
+      return normalized;
+    });
+  }
+
+  /**
+   * 一次性迁移入口：目标库必须尚未初始化，整个 bundle 在单个 IMMEDIATE 事务中写入。
+   * 不提供覆盖参数，是为了让迁移失败时旧文件和已存在数据库都保持原状。
+   */
+  importBundle(bundle: SqliteImportBundle): void {
+    this.assertOpen();
+    withImmediateTransaction(this.db, () => {
+      const existing = this.db.prepare(
+        'SELECT revision FROM app_config WHERE singleton_id = 1',
+      ).get() as { revision: number } | undefined;
+      if (existing) {
+        throw new Error(`SQLite 目标库已初始化（revision=${existing.revision}），拒绝合并迁移。`);
       }
-      for (const [compositeKey, usage] of Object.entries(bundle.usage)) {
-        writeUsage(this.db, compositeKey, usage);
-      }
-      console.log(bundle.imported
-        ? `[init] 已将 JSON 配置导入 SQLite: ${this.dbPath}`
-        : `[init] SQLite 配置已创建: ${this.dbPath}`);
-      return config;
+      writeImportBundle(this.db, bundle);
     });
   }
 
@@ -240,7 +233,7 @@ export class SqliteConfigRepository implements ConfigRepository {
     return new SqliteKeyStateStore(this.db);
   }
 
-  createUsageStore(_options: UsageStoreInitOptions): UsageRepository {
+  createUsageStore(): UsageRepository {
     this.assertOpen();
     return new SqliteUsageStore(this.db);
   }
@@ -339,31 +332,6 @@ export class SqliteConfigRepository implements ConfigRepository {
     }
   }
 
-  private async readLegacyBundle(buildDefault: () => RuntimeConfig): Promise<LegacyBundle> {
-    if (!this.legacyConfigPath) {
-      return { config: buildDefault(), states: {}, usage: {}, imported: false };
-    }
-    const config = await readOptionalJson<RuntimeConfig>(this.legacyConfigPath);
-    if (!config) return { config: buildDefault(), states: {}, usage: {}, imported: false };
-
-    const dir = path.dirname(this.legacyConfigPath);
-    const stateShape = await readOptionalJson<{
-      version?: number;
-      states?: Record<string, KeyRuntimeRecord>;
-    }>(path.join(dir, 'runtime_state.json'));
-    const usageHint = readUsageFileHint(config);
-    const usageShape = await readOptionalJson<{
-      version?: number;
-      usage?: Record<string, KeyUsage>;
-    }>(path.isAbsolute(usageHint) ? usageHint : path.join(dir, usageHint));
-    return {
-      config,
-      states: stateShape?.version === 2 && stateShape.states ? stateShape.states : {},
-      usage: usageShape?.version === 2 && usageShape.usage ? usageShape.usage : {},
-      imported: true,
-    };
-  }
-
   private assertOpen(): void {
     if (this.closed) throw new Error('SQLite 仓储已关闭。');
   }
@@ -433,7 +401,7 @@ class SqliteKeyStateStore implements KeyStateRepository {
   }
 
   async forceFlush(): Promise<void> {
-    // DatabaseSync 的每条写入在返回前已经提交；保留接口用于兼容 JSON 调用方。
+    // DatabaseSync 的每条写入在返回前已经提交；该方法只用于统一仓储生命周期边界。
   }
 }
 
@@ -579,20 +547,6 @@ function withImmediateTransaction<T>(db: NodeDatabaseSync, callback: () => T): T
   }
 }
 
-async function readOptionalJson<T>(filePath: string): Promise<T | null> {
-  try {
-    return JSON.parse(await readFile(filePath, 'utf-8')) as T;
-  } catch (error) {
-    if (isMissingFileError(error)) return null;
-    throw error;
-  }
-}
-
-function readUsageFileHint(config: RuntimeConfig): string {
-  const hint = config.anti_ban?.quota?.usage_file;
-  return typeof hint === 'string' && hint.trim() ? hint.trim() : 'runtime_usage.json';
-}
-
 function missingConfigError(dbPath: string): Error & { code: string } {
   return Object.assign(new Error(`SQLite 中尚未初始化配置：${dbPath}`), { code: 'ENOENT' });
 }
@@ -654,6 +608,47 @@ function writeConfigHistory(
       config_json = excluded.config_json,
       created_at = excluded.created_at
   `).run(revision, configJson, createdAt);
+  db.exec(`
+    DELETE FROM config_history
+    WHERE revision NOT IN (
+      SELECT revision FROM config_history ORDER BY revision DESC LIMIT 50
+    )
+  `);
+}
+
+function writeImportBundle(db: NodeDatabaseSync, bundle: SqliteImportBundle): void {
+  const revision = normalizeRevision(bundle.config.revision);
+  const config = { ...bundle.config, revision };
+  const now = Date.now();
+  const configJson = JSON.stringify(config);
+
+  db.prepare(`
+    INSERT INTO app_config(singleton_id, revision, config_json, updated_at)
+    VALUES(1, ?, ?, ?)
+  `).run(revision, configJson, now);
+
+  for (const [compositeKey, state] of Object.entries(bundle.states)) {
+    writeStatePatch(db, compositeKey, state);
+  }
+  for (const [compositeKey, usage] of Object.entries(bundle.usage)) {
+    writeUsage(db, compositeKey, usage);
+  }
+
+  // 历史快照可能不含当前版本；始终补齐当前配置，保证首次回滚有可靠基线。
+  const historyByRevision = new Map<number, ConfigHistoryRecord>();
+  for (const entry of bundle.history ?? []) {
+    historyByRevision.set(entry.revision, entry);
+  }
+  if (!historyByRevision.has(revision)) {
+    historyByRevision.set(revision, { revision, createdAt: now, config });
+  }
+  const insertHistory = db.prepare(`
+    INSERT INTO config_history(revision, config_json, created_at)
+    VALUES(?, ?, ?)
+  `);
+  for (const entry of [...historyByRevision.values()].sort((left, right) => left.revision - right.revision)) {
+    insertHistory.run(entry.revision, JSON.stringify(entry.config), entry.createdAt);
+  }
   db.exec(`
     DELETE FROM config_history
     WHERE revision NOT IN (

@@ -42,7 +42,7 @@
             <polyline points="17 21 17 13 7 13 7 21"></polyline>
             <polyline points="7 3 7 8 15 8"></polyline>
           </svg>
-          保存并生效
+          保存全局设置
         </button>
         <button class="btn btn-danger" id="logoutBtn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -205,26 +205,6 @@
             </div>
           </div>
 
-          <div class="config-section">
-            <div class="config-section-title">
-              <span class="ssec-title">配额持久化</span>
-              <span class="ssec-meta">quota.* — runtime_usage.json 的写入策略</span>
-            </div>
-            <div class="field-grid">
-              <div class="field">
-                <div class="field-head"><span class="field-name">每 N 次请求落盘</span><span class="field-key">persist_every_n_requests</span><i class="info-tip" data-tip="用量计数每累计 N 次请求写一次 runtime_usage.json。值越大磁盘写入越少，但进程崩溃时丢失的计数越多。">i</i></div>
-                <input id="antiBanQuotaPersistEvery" type="number" min="0" placeholder="50" />
-              </div>
-              <div class="field">
-                <div class="field-head"><span class="field-name">临界阈值强制落盘</span><span class="field-key">persist_critical_threshold</span><i class="info-tip" data-tip="当某个 Key 的用量占配额比例超过此阈值（0~1）时，无视上面的 N 次间隔立即落盘，避免临界时刻丢计数导致超配额。">i</i></div>
-                <input id="antiBanQuotaCritical" type="number" min="0" max="1" step="0.01" placeholder="0.85" />
-              </div>
-              <div class="field">
-                <div class="field-head"><span class="field-name">用量文件名</span><span class="field-key">usage_file</span><i class="info-tip" data-tip="配额用量的持久化文件名（相对数据目录）。记录各 Key 已用的请求数 / Token 数，重启后不清零。">i</i></div>
-                <input id="antiBanQuotaUsageFile" type="text" placeholder="runtime_usage.json" />
-              </div>
-            </div>
-          </div>
         </details>
       </div>
     </div>

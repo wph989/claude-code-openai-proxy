@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import { adminAuthHook } from '../../auth.js';
 import { KeyAdminService } from '../../services/key-admin-service.js';
 import { safeKeyExportFilename, setRevisionHeaders } from './shared.js';
@@ -74,30 +74,26 @@ function registerSingleKeyRoutes(
   api: { preHandler: Array<typeof adminAuthHook> },
   service: KeyAdminService,
 ): void {
-  app.put('/api/keys/:providerId/:keyRef/enable', api, async (request, reply) => {
-    const { providerId, keyRef } = request.params as { providerId: string; keyRef: string };
-    const keyId = resolveKeyId(service, providerId, keyRef, reply);
+  app.put('/api/keys/:providerId/:keyId/enable', api, async (request, reply) => {
+    const { providerId, keyId } = request.params as { providerId: string; keyId: string };
     await service.enableKey(providerId, keyId);
     setRevisionHeaders(app, reply);
     return { message: 'Key 已启用。', provider_id: providerId, key_id: keyId };
   });
-  app.put('/api/keys/:providerId/:keyRef/disable', api, async (request, reply) => {
-    const { providerId, keyRef } = request.params as { providerId: string; keyRef: string };
-    const keyId = resolveKeyId(service, providerId, keyRef, reply);
+  app.put('/api/keys/:providerId/:keyId/disable', api, async (request, reply) => {
+    const { providerId, keyId } = request.params as { providerId: string; keyId: string };
     await service.disableKey(providerId, keyId);
     setRevisionHeaders(app, reply);
     return { message: 'Key 已禁用。', provider_id: providerId, key_id: keyId };
   });
-  app.put('/api/keys/:providerId/:keyRef/reset', api, async (request, reply) => {
-    const { providerId, keyRef } = request.params as { providerId: string; keyRef: string };
-    const keyId = resolveKeyId(service, providerId, keyRef, reply);
+  app.put('/api/keys/:providerId/:keyId/reset', api, async (request, reply) => {
+    const { providerId, keyId } = request.params as { providerId: string; keyId: string };
     await service.resetKey(providerId, keyId);
     setRevisionHeaders(app, reply);
     return { message: 'Key 已重置并启用。', provider_id: providerId, key_id: keyId };
   });
-  app.put('/api/keys/:providerId/:keyRef/note', api, async (request, reply) => {
-    const { providerId, keyRef } = request.params as { providerId: string; keyRef: string };
-    const keyId = resolveKeyId(service, providerId, keyRef, reply);
+  app.put('/api/keys/:providerId/:keyId/note', api, async (request, reply) => {
+    const { providerId, keyId } = request.params as { providerId: string; keyId: string };
     await service.updateNote(providerId, keyId, request.body);
     app.adminEventStream.keyChanged({
       providerId,
@@ -108,9 +104,8 @@ function registerSingleKeyRoutes(
     setRevisionHeaders(app, reply);
     return { message: '备注已更新。', provider_id: providerId, key_id: keyId };
   });
-  app.delete('/api/keys/:providerId/:keyRef', api, async (request, reply) => {
-    const { providerId, keyRef } = request.params as { providerId: string; keyRef: string };
-    const keyId = resolveKeyId(service, providerId, keyRef, reply);
+  app.delete('/api/keys/:providerId/:keyId', api, async (request, reply) => {
+    const { providerId, keyId } = request.params as { providerId: string; keyId: string };
     await service.deleteKey(providerId, keyId);
     app.adminEventStream.keyChanged({
       providerId,
@@ -121,31 +116,15 @@ function registerSingleKeyRoutes(
     setRevisionHeaders(app, reply);
     return { message: 'Key 已删除。', provider_id: providerId, key_id: keyId };
   });
-  app.post('/api/keys/:providerId/:keyRef/quota/reset', api, async (request, reply) => {
-    const { providerId, keyRef } = request.params as { providerId: string; keyRef: string };
-    const keyId = resolveKeyId(service, providerId, keyRef, reply);
+  app.post('/api/keys/:providerId/:keyId/quota/reset', api, async (request) => {
+    const { providerId, keyId } = request.params as { providerId: string; keyId: string };
     await service.resetQuota(providerId, keyId);
     return { message: '配额计数已清零。', provider_id: providerId, key_id: keyId };
   });
-  app.put('/api/keys/:providerId/:keyRef/quota', api, async (request, reply) => {
-    const { providerId, keyRef } = request.params as { providerId: string; keyRef: string };
-    const keyId = resolveKeyId(service, providerId, keyRef, reply);
+  app.put('/api/keys/:providerId/:keyId/quota', api, async (request, reply) => {
+    const { providerId, keyId } = request.params as { providerId: string; keyId: string };
     const quota = await service.updateQuota(providerId, keyId, request.body);
     setRevisionHeaders(app, reply);
     return { message: '配额配置已更新。', provider_id: providerId, key_id: keyId, quota };
   });
-}
-
-function resolveKeyId(
-  service: KeyAdminService,
-  providerId: string,
-  keyRef: string,
-  reply: FastifyReply,
-): string {
-  const resolved = service.resolveReference(providerId, keyRef);
-  if (resolved.legacyIndex !== null) {
-    // 弃用提示属于 HTTP 兼容契约，因此留在路由层而不是污染应用服务。
-    void reply.header('deprecation', 'true');
-  }
-  return resolved.keyId;
 }

@@ -2,7 +2,6 @@ import type { FastifyInstance } from 'fastify';
 
 export async function registerHealthRoutes(app: FastifyInstance): Promise<void> {
   app.get('/livez', async () => ({ status: 'ok' }));
-  app.get('/healthz', async () => ({ status: 'ok' }));
   app.get('/readyz', async (_request, reply) => {
     if (!app.runtimeConfigManager.isReady()) {
       return reply.code(503).send({ status: 'not_ready' });

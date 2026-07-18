@@ -24,6 +24,10 @@ export function buildChatCompletionsUrl(provider: ResolvedProvider): string {
   return `${provider.base_url.replace(/\/$/, '')}/chat/completions`;
 }
 
+export function buildResponsesUrl(provider: ResolvedProvider): string {
+  return `${provider.base_url.replace(/\/$/, '')}/responses`;
+}
+
 export function buildMessagesUrl(provider: ResolvedProvider): string {
   return `${normalizeAnthropicBaseUrl(provider.base_url)}/messages`;
 }

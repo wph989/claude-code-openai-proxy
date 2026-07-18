@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
-import { settings, type StorageBackend } from './config.js';
+import { settings } from './config.js';
 import { RuntimeConfigManager } from './services/runtime-config.js';
 import { createConfigRepository } from './services/config/repository-factory.js';
 import type { ConfigRepository } from './services/config/repository.js';
@@ -13,6 +13,7 @@ import { ProviderHealthRegistry } from './services/provider-health.js';
 import { registerAdminRoutes } from './routes/admin.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerChatCompletionsRoutes } from './routes/chat-completions.js';
+import { registerResponsesRoutes } from './routes/responses.js';
 import { registerMessageRoutes } from './routes/messages.js';
 import { createId } from './utils/id.js';
 import { getDefaultLogger, type Logger } from './utils/logger.js';
@@ -47,13 +48,11 @@ export interface CreateAppDependencies {
   providerConnectivity?: ProviderConnectivityService;
   providerHealth?: ProviderHealthRegistry;
   configRepository?: ConfigRepository;
-  storageBackend?: StorageBackend;
-  sqlitePath?: string;
   alertSink?: AlertSink & { flush?: () => Promise<void> };
 }
 
 export async function createApp(
-  configPath = settings.configFile,
+  sqlitePath = settings.sqliteFile,
   dependencies: CreateAppDependencies = {},
 ): Promise<FastifyInstance> {
   const appLogger = dependencies.logger ?? getDefaultLogger();
@@ -81,9 +80,7 @@ export async function createApp(
   });
 
   const configRepository = dependencies.configRepository ?? await createConfigRepository({
-    storage: dependencies.storageBackend ?? settings.storageBackend,
-    configPath,
-    sqlitePath: dependencies.sqlitePath ?? settings.sqliteFile,
+    sqlitePath,
   });
   const alertSink = dependencies.alertSink ?? new WebhookAlertService({
     url: settings.alertWebhookUrl,
@@ -110,7 +107,16 @@ export async function createApp(
   app.decorate('alertSink', alertSink);
   app.decorate('upstreamService', new UpstreamService(appLogger, metricsRegistry, providerHealth));
 
-  await app.runtimeConfigManager.init();
+  // Fastify close 是测试、嵌入式调用和信号关闭的共同出口，仓储连接必须在这里统一释放。
+  app.addHook('onClose', async () => {
+    await app.runtimeConfigManager.shutdown();
+  });
+  try {
+    await app.runtimeConfigManager.init();
+  } catch (error) {
+    await app.close();
+    throw error;
+  }
 
   app.addHook('onRequest', async (request) => {
     request.metricsStartedAt = process.hrtime.bigint();
@@ -119,8 +125,10 @@ export async function createApp(
     request.requestId = createId('req');
     const sessionHeader = request.headers['x-claude-code-session-id'];
     request.sessionId = typeof sessionHeader === 'string' && sessionHeader.trim() ? sessionHeader.trim() : createId('session');
-    // SQLite Worker 只读取 revision，检测到前进后才重载，保证请求不会长期使用旧路由配置。
-    await app.runtimeConfigManager.refreshIfStale();
+    // 关闭阶段仓储已经释放；就绪探针仍应得到 503，而不是因刷新已关闭连接变成 500。
+    if (app.runtimeConfigManager.isReady()) {
+      await app.runtimeConfigManager.refreshIfStale();
+    }
   });
 
   app.addHook('onSend', async (request, _reply, payload) => {
@@ -186,6 +194,7 @@ export async function createApp(
   await registerHealthRoutes(app);
   await registerAdminRoutes(app);
   await registerChatCompletionsRoutes(app);
+  await registerResponsesRoutes(app);
   await registerMessageRoutes(app);
 
   return app;
@@ -194,22 +203,16 @@ export async function createApp(
 export interface StartServerOptions {
   host: string;
   port: number;
-  configPath?: string;
-  storageBackend?: StorageBackend;
   sqlitePath?: string;
 }
 
 export async function startServer(options: StartServerOptions): Promise<void> {
-  const app = await createApp(options.configPath || settings.configFile, {
-    storageBackend: options.storageBackend,
-    sqlitePath: options.sqlitePath,
-  });
+  const app = await createApp(options.sqlitePath || settings.sqliteFile);
   await app.listen({ host: options.host, port: options.port });
   app.appLogger.log('info', '服务启动成功', {
     host: options.host,
     port: options.port,
-    config_file: options.configPath || settings.configFile,
-    storage_backend: options.storageBackend ?? settings.storageBackend,
+    sqlite_file: options.sqlitePath || settings.sqliteFile,
   });
 
   // 使用同步退出防止日志丢失：先 close server，再 flush 日志，再 exit

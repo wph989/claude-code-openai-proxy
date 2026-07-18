@@ -5,10 +5,10 @@
 本路线图用于提升代理服务的正确性、安全性、可维护性与运维效率，并为后续协议和集群能力留出稳定扩展边界。
 
 - 优先修复可复现的正确性与管理面风险，再进行结构拆分和视觉改造。
-- 保留现有 HTTP 行为、配置字段层级和协议语义，采用兼容门面渐进迁移，避免一次性重写。
+- 对外协议语义保持稳定；存储和管理端内部契约采用直接迁移，旧 JSON 与旧管理入口不作为运行时兼容层继续维护。
 - Provider 协议必须继续由显式 `provider_type` 区分，不根据 URL、Key 或模型名推断。
 - 只在 I/O、协议和存储边界引入接口，不建设通用 DI 容器或事件总线。
-- 关键状态机、并发边界和兼容策略必须用中文注释解释设计原因。
+- 关键状态机、并发边界和迁移策略必须用中文注释解释设计原因。
 
 ### 已确认决策：密钥导出
 
@@ -16,27 +16,28 @@
 
 ## 2. 当前基线
 
-- TypeScript 已启用严格模式，Vitest 当前 31 个测试文件、233 项测试通过。
-- 当前统计范围内行覆盖率为 88.80%、分支为 85.17%、函数为 91.00%；`runtime-config.ts` 为 79.47%、`upstream.ts` 为 82.52%。
+- TypeScript 已启用严格模式，Vitest 当前 35 个测试文件、268 项测试通过。
+- 当前统计范围内行覆盖率为 87.84%、分支为 84.17%、函数为 90.27%；`runtime-config.ts` 为 80.69%、`upstream.ts` 为 84.43%。
 - `vitest.config.ts` 尚未纳入多数路由、`server.ts`、`response-fix.ts` 和管理端主流程，因此总百分比不能代表完整风险覆盖。
 - 当前剩余复杂度主要集中在 `src/services/runtime-config.ts`、`src/services/api-key-rotator.ts` 与智能路由/多 Worker 状态协调；管理路由、响应修复和前端主流程已完成首轮拆分。
 
-### 实施进度（2026-07-18）
+### 实施进度（2026-07-19）
 
 - [x] 路由选择先排除停用 Provider、无 Key 与配额阻断候选，并注入可测试随机源。
-- [x] Key API 改用稳定 ID，旧数字索引响应带 `Deprecation: true`；模型映射自动补 `route_id`。
+- [x] Key API 改用稳定 ID；模型映射自动补 `route_id`，旧数字索引不再解释。
 - [x] 普通管理查询改用服务端脱敏 DTO；Token 独立轮换，完整 Key 仅主动导出。
 - [x] 配置加入 revision、`ETag` / `If-Match`、409 冲突和 428 前置条件检查。
 - [x] 删除原始 JSON 展示，替换为服务端字段级变更预览。
-- [x] 新增全局设置、Provider 和模型路由资源级接口，旧整体配置接口保留为兼容门面。
+- [x] 新增全局设置、Provider 和模型路由资源级接口，并删除旧整体配置写入入口。
 - [x] 管理路由按 session/config/keys 拆分；自动恢复调度与显式 `ProviderAdapter` 注册表完成拆出。
 - [x] 管理前端集中 API、ETag、401/409 与状态处理，并移除外部字体和装饰性视觉元素。
 - [x] 抽出 Key 管理服务，并拆分 `response-fix.ts`、logger 与前端 views/forms/components。
 - [x] 合并弹窗、补齐焦点循环与 ARIA；桌面 Chromium 验收通过，Playwright 本身不调用模型或外部 API。
 - [x] 新增 `/metrics`、`/livez`、`/readyz`，覆盖 HTTP 延迟/TTFB、活跃请求、上游错误/重试和非流式/流式 Token 用量。
 - [x] 实现脱敏管理事件 SSE、桌面活动日志和 Provider `GET /models` 主动连接测试。
-- [ ] 实现优先级/权重/熔断/半开路由策略。
-- [ ] 实现 SQLite WAL、多 Worker 事务 lease 与阶段六产品扩展。
+- [x] 实现优先级/权重/熔断/半开路由策略。
+- [x] 实现 SQLite WAL、多 Worker 事务 lease、显式 schema migration 和旧 JSON 一次性导入。
+- [x] 完成 Provider 连接测试、配置历史/回滚、费用预算、Webhook 告警、capability 矩阵和 Responses API。
 
 ## 3. 阶段一：正确性与管理面安全
 
@@ -53,7 +54,7 @@
 
 ### 3.2 使用稳定资源 ID
 
-将 Key 管理接口从 `:keyIndex` 迁移为已有的 `:keyId`；为模型映射增加稳定 `route_id`。旧索引接口保留一个兼容周期并标记弃用，内部实现统一按 ID 查找。
+将 Key 管理接口统一为 `:keyId`；为模型映射增加稳定 `route_id`。旧数字索引直接删除，内部只按稳定 ID 查找。
 
 验收标准：Key 或路由重排后，编辑、删除、启停和配额操作仍作用于原资源；不存在因页面数据过期而修改错误对象的情况。
 
@@ -69,7 +70,7 @@
 
 ### 3.4 防止并发覆盖配置
 
-为配置增加单调递增 `revision`，读取时返回 `ETag`，写入时使用 `If-Match`。版本不一致返回 `409 Conflict` 和最新 revision。逐步把整体 `PUT /api/config` 拆为全局设置、Provider、模型路由和策略的资源级 `PATCH/POST/DELETE`；旧 PUT 在兼容期内保留。
+为配置增加单调递增 `revision`，读取时返回 `ETag`，写入时使用 `If-Match`。版本不一致返回 `409 Conflict` 和最新 revision。整体 `PUT /api/config` 已直接删除，配置统一通过全局设置、Provider、模型路由和策略的资源级 `PATCH/POST/DELETE` 写入。
 
 验收标准：两个管理页面同时编辑时，后提交的旧版本不会静默覆盖新版本；UI 能展示冲突并让用户重新加载或查看差异。
 
@@ -93,19 +94,19 @@ Fastify Routes
   -> Ports
      ConfigRepository / RuntimeStateRepository / MetricsSink / ProviderAdapter
   -> Adapters
-     JSON / SQLite / Anthropic / OpenAI / Prometheus
+     SQLite / Anthropic / OpenAI / Prometheus
 ```
 
 具体拆分：
 
-- 保留 `RuntimeConfigManager` 作为兼容门面，抽出配置加载保存、模型路由、Rotator 注册、运行态协调和 Key 管理。
+- 保留 `RuntimeConfigManager` 作为应用协调器，内部使用 SQLite 仓储和共享运行态协调器。
 - 将 `api-key-rotator.ts` 中的 lease 调度、健康状态转换、自动恢复和用量处理分成可独立测试的协作对象。
 - 将 `response-fix.ts` 拆为 SSE 解析、Anthropic 修复状态机和 OpenAI 转换模块，并保留现有导出入口。
 - 将 `routes/admin.ts` 按 session、config、providers、routes 和 keys 分组，路由层只负责参数解析与响应映射。
 - 把全局 logger 改为实例化依赖，使测试和多 Worker 环境互不污染。
 - 引入按显式 `provider_type` 注册的 `ProviderAdapter`，统一 URL、认证头、计数能力和协议转换入口。
 
-重构顺序必须遵循“先补特征测试，再移动职责，最后删除兼容层”。每次只迁移一个边界，并运行 `pnpm check`、`pnpm test` 和 `pnpm test:coverage`。
+重构顺序遵循“先补特征测试，再移动职责，最后删除无效兼容层”。每次只迁移一个边界，并运行 `pnpm check`、`pnpm test` 和 `pnpm test:coverage`。
 
 ## 5. 阶段三：管理端 UI
 
@@ -133,7 +134,7 @@ Fastify Routes
 
 - 增加 Prometheus `/metrics`，记录请求量、成功率、延迟、TTFB、活跃请求、重试次数、错误类别和 Token 用量。
 - 增加管理端事件 SSE，实时推送 Provider、Key、配额和请求摘要变化，避免频繁轮询。（已完成首版）
-- 将 `/healthz` 拆为存活检查与就绪检查，并增加主动 Provider 连接测试。（已完成）
+- 删除 `/healthz`，新增 `/livez`、`/readyz`，并增加主动 Provider 连接测试。（已完成）
 - 新增优先级、权重、熔断和半开探测策略；同名模型路由可在健康 Provider 间故障转移。
 - 指标 label、事件和日志禁止包含完整 Key、Token、请求正文或其他高基数字段。
 
@@ -141,18 +142,18 @@ Fastify Routes
 
 ## 7. 阶段五：SQLite 与多 Worker
 
-新增 SQLite WAL 实现与显式 schema migration。多 Worker 的前提不是简单把 JSON 换成 SQLite，而是让 Key acquire/release、并发计数、冷却、错误状态和配额更新具备事务语义，并为异常 Worker 的 lease 提供 TTL 回收。
+SQLite WAL、显式 schema migration 和多 Worker 事务协调已完成。Key acquire/release、并发计数、冷却、错误状态和配额更新均具备事务语义，异常 Worker 的 lease 通过 TTL 回收。
 
 验收标准：
 
 - 两个 Worker 并发获取 Key 时不会超过 `max_concurrent`。
 - Worker 崩溃后过期 lease 可恢复，Key 不会永久占满。
-- 配置、状态和用量迁移可回滚，旧 JSON 可导入且不会丢失稳定 ID。
-- 完成压力与故障注入测试后，才解除当前多 Worker 限制。
+- 配置、状态和用量可在目标库未初始化时原子导入，源 JSON 保持不变且稳定 ID 不丢失。
+- SQLite 目标库已解除单 Worker 限制；迁移失败不会修改源文件或已初始化目标。
 
 ## 8. 阶段六：功能扩展
 
-按产品价值依次推进：Provider 配置预演与连接测试、配置历史及回滚、Token/费用预算、Webhook 告警、显式 capability 矩阵、OpenAI Responses API。多租户、RBAC 和通用插件系统保持为按需能力，在出现明确用户场景前不提前建设。
+首轮产品扩展已完成：Provider 配置连接测试、配置历史及回滚、Token/费用预算、Webhook 告警、显式 capability 矩阵和 OpenAI Responses API。后续只按明确场景评估多租户、RBAC、插件系统、幂等键透传和更细粒度费用统计，不提前引入通用平台能力。
 
 ## 9. 完成定义
 
@@ -160,6 +161,6 @@ Fastify Routes
 
 - 新增或修改行为具有回归测试，关键边界具有中文原因注释。
 - `pnpm check`、`pnpm test` 和相关覆盖率门槛通过。
-- 配置格式、HTTP 兼容性与迁移策略已记录，破坏性变更具有弃用周期。
+- 配置格式、HTTP 契约与迁移策略已记录；明确的破坏性迁移删除旧入口，不保留无效兼容层。
 - 管理端变更通过桌面布局、键盘操作、文本溢出和敏感信息检查。
 - 文档同步更新 `README.md`、`ARCHITECTURE.md` 或 `FEATURES.md` 中受影响的契约。

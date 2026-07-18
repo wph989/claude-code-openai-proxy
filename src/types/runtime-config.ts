@@ -53,12 +53,6 @@ export interface RetryConfig {
   retry_on_transient?: boolean;
 }
 
-export interface QuotaPersistConfig {
-  persist_every_n_requests?: number;
-  persist_critical_threshold?: number;
-  usage_file?: string;
-}
-
 export interface KeyQuotaConfig {
   max_requests: number | null;
   max_tokens: number | null;
@@ -77,6 +71,16 @@ export interface KeyUsage {
   cost_usd?: number;
 }
 
+/** SQLite key_states 表中的运行态补丁；与用户配置分离，保证多 Worker 事务一致。 */
+export interface KeyRuntimeRecord {
+  enabled?: boolean;
+  error_count?: number;
+  disabled_at?: number | null;
+  last_error_at?: number | null;
+  last_error_message?: string | null;
+  auto_disabled_at?: number | null;
+}
+
 export interface AntiBanConfig {
   mode?: AntiBanMode;
   max_concurrent?: number;
@@ -86,7 +90,6 @@ export interface AntiBanConfig {
   key_selection?: KeySelectionMode;
   sticky_on_cooldown?: StickyOnCooldown;
   retry?: RetryConfig;
-  quota?: QuotaPersistConfig;
 }
 
 export interface ApiKeyEntry {
@@ -103,11 +106,8 @@ export interface ApiKeyEntry {
 }
 
 /**
- * runtime_models.json 中实际持久化的 Key 形状：只保留用户配置字段。
- *
- * 运行态字段（error_count / disabled_at / last_error_* / auto_disabled_at /
- * 自动禁用后的 enabled）由 KeyStateStore 写入 runtime_state.json，按 id 索引；
- * id 一旦生成不再变更，用户改 key 字面量也能保留历史。
+ * 迁移/配置 JSON 中实际持久化的 Key 形状：只保留用户配置字段。
+ * 运行态字段由 SQLite key_states 表按稳定 ID 管理，用户修改 Key 字面量也能保留历史状态。
  */
 export interface PersistedApiKey {
   id: string;
@@ -117,10 +117,30 @@ export interface PersistedApiKey {
   quota?: KeyQuotaConfig | null;
 }
 
+export type ProviderCapability =
+  | 'messages'
+  | 'count_tokens'
+  | 'chat_completions'
+  | 'responses'
+  | 'models';
+
+/**
+ * Provider 类型决定协议固有能力；这里只允许声明无法从类型可靠推断的可选端点。
+ * Responses 在 OpenAI-compatible 生态中并非普遍实现，因此必须显式启用。
+ */
+export interface ProviderCapabilityOverrides {
+  responses?: boolean;
+  models?: boolean;
+}
+
+/** 运行时展开后的完整能力矩阵，路由选择不得再根据 URL 或模型名猜测能力。 */
+export type ProviderCapabilities = Record<ProviderCapability, boolean>;
+
 export interface ProviderConfig {
   provider_id: string;
   provider_type: 'openai_compatible' | 'anthropic';
   base_url: string;
+  capabilities?: ProviderCapabilityOverrides;
   quota?: KeyQuotaConfig | null;
   api_key?: string | ApiKeyEntry[] | null;
   api_key_env?: string | null;
@@ -187,6 +207,8 @@ export interface ResolvedProvider {
   provider_id: string;
   provider_type: 'openai_compatible' | 'anthropic';
   base_url: string;
+  /** 兼容直接构造 ResolvedProvider 的旧调用方；RuntimeConfigManager 会始终补齐。 */
+  capabilities?: ProviderCapabilities;
   quota?: KeyQuotaConfig | null;
   api_keys: ApiKeyEntry[];
   key_rotation_strategy: KeyRotationStrategy;
@@ -216,8 +238,8 @@ export interface ResolvedRoute {
 }
 
 /**
- * 从 runtime_models.json 剥离运行态时返回的 patch 集合。
- * 由调用方写入 KeyStateStore，避免每次状态变更都重写 config 文件。
+ * 从迁移源配置剥离运行态时返回的 patch 集合。
+ * 由迁移器写入 SQLite key_states，避免运行态变化污染配置快照。
  */
 export interface ApiKeyRuntimeFields {
   error_count?: number;

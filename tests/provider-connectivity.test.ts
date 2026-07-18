@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { settings } from '../src/config.js';
-import { createApp } from '../src/server.js';
+import { createMigratedApp } from './test-app.js';
 import { ProviderConnectivityService } from '../src/services/provider-connectivity.js';
 import type { ResolvedProvider } from '../src/types/runtime-config.js';
 
@@ -85,6 +85,22 @@ describe('ProviderConnectivityService', () => {
     expect(result).toMatchObject({ ok: false, statusCode: null, category: 'network' });
     expect(result.message).not.toContain(secret);
   });
+
+  it('显式关闭 Models 能力时不发起探测请求', async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const service = new ProviderConnectivityService({ fetchImpl });
+
+    await expect(service.test(provider({
+      capabilities: {
+        messages: true,
+        count_tokens: true,
+        chat_completions: true,
+        responses: false,
+        models: false,
+      },
+    }))).resolves.toMatchObject({ ok: false, category: 'unsupported', latencyMs: 0 });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
 });
 
 describe('Provider test admin route', () => {
@@ -107,7 +123,7 @@ describe('Provider test admin route', () => {
     const connectivity = new ProviderConnectivityService({
       fetchImpl: vi.fn(async () => new Response(null, { status: 204 })),
     });
-    const app = await createApp(configPath, { providerConnectivity: connectivity });
+    const app = await createMigratedApp(configPath, { providerConnectivity: connectivity });
     try {
       const denied = await app.inject({ method: 'POST', url: '/api/providers/provider-a/test' });
       expect(denied.statusCode).toBe(401);

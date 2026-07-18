@@ -41,6 +41,20 @@ describe('SseUsageTracker', () => {
     expect(tracker.finish()).toEqual({ inputTokens: 21, outputTokens: 8 });
     expect(tracker.finish()).toEqual({ inputTokens: 21, outputTokens: 8 });
   });
+
+  it('从 Responses 完成事件的嵌套 response.usage 读取 Token', () => {
+    const source = Buffer.from(
+      'event: response.completed\n' +
+      'data: {"type":"response.completed","response":{"usage":{"input_tokens":34,"output_tokens":12,"total_tokens":46}}}\n\n',
+      'utf8',
+    );
+    for (let split = 0; split <= source.length; split += 1) {
+      const tracker = new SseUsageTracker();
+      tracker.push(source.subarray(0, split));
+      tracker.push(source.subarray(split));
+      expect(tracker.finish(), `split=${split}`).toEqual({ inputTokens: 34, outputTokens: 12 });
+    }
+  });
 });
 
 describe('pipeOpenAISse usage', () => {

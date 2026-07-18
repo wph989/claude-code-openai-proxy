@@ -1,8 +1,8 @@
 import type { ResolvedProvider } from '../types/runtime-config.js';
-import { getProviderAdapter } from './providers/provider-adapter.js';
+import { getProviderAdapter, providerSupportsCapability } from './providers/provider-adapter.js';
 import { normalizeAnthropicBaseUrl } from './upstream/url-builder.js';
 
-export type ProviderTestCategory = 'ok' | 'auth' | 'rate_limit' | 'server' | 'http_error' | 'network';
+export type ProviderTestCategory = 'ok' | 'auth' | 'rate_limit' | 'server' | 'http_error' | 'network' | 'unsupported';
 
 export interface ProviderTestResult {
   ok: boolean;
@@ -34,6 +34,15 @@ export class ProviderConnectivityService {
   }
 
   async test(provider: ResolvedProvider): Promise<ProviderTestResult> {
+    if (!providerSupportsCapability(provider, 'models')) {
+      return {
+        ok: false,
+        statusCode: null,
+        latencyMs: 0,
+        category: 'unsupported',
+        message: '当前 Provider 未启用模型列表能力。',
+      };
+    }
     const url = buildModelsUrl(provider);
     const headers = new Headers(provider.headers);
     const key = provider.api_keys.find((entry) => entry.enabled !== false && !entry.disabled_at)?.key;
