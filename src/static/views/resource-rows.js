@@ -51,6 +51,7 @@ function quotaSummary(quota) {
   const parts = [];
   if (quota.max_requests != null) parts.push(`请求 ${quota.max_requests}`);
   if (quota.max_tokens != null) parts.push(`Token ${quota.max_tokens}`);
+  if (quota.max_cost_usd != null) parts.push(`费用 $${quota.max_cost_usd}`);
   if (quota.soft_stop_threshold != null) parts.push(`阈值 ${quota.soft_stop_threshold}`);
   return parts.length ? `默认配额：${parts.join(' / ')}` : '默认配额：未配置';
 }

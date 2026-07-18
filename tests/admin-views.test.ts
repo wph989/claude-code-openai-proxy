@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { renderPagination, renderTableHead } from '../src/static/components/data-table.js';
 import { renderKeyPanelHtml } from '../src/static/views/key-panel.js';
 import { renderModelRow, renderProviderRow } from '../src/static/views/resource-rows.js';
-import { renderChangePreview, renderSummary } from '../src/static/views/summary-view.js';
+import { renderChangePreview, renderConfigHistory, renderSummary } from '../src/static/views/summary-view.js';
 import { renderActivityView } from '../src/static/views/activity-view.js';
 
 describe('管理端视图模块', () => {
@@ -65,6 +65,22 @@ describe('管理端视图模块', () => {
 
     expect(renderTableHead(['provider_id'], { field: 'provider_id', asc: true }, ['ID'])).toContain('▲');
     expect(renderPagination(2, 3, 25)).toContain('第 2/3 页');
+  });
+
+  it('配置历史只渲染元数据并转义变更目标', () => {
+    const container = { innerHTML: '' };
+    renderConfigHistory(container, [{
+      revision: 7,
+      created_at: Date.now(),
+      current: false,
+      summary: { provider_count: 1, model_count: 2 },
+      rollback_changes: [{ target: '<script>bad()</script>', fields: ['description'] }],
+    }]);
+
+    expect(container.innerHTML).toContain('1 个供应商 / 2 条路由');
+    expect(container.innerHTML).toContain('&lt;script&gt;bad()&lt;/script&gt;');
+    expect(container.innerHTML).not.toContain('<script>bad()</script>');
+    expect(container.innerHTML).toContain('data-revision="7"');
   });
 
   it('活动日志只渲染结构化摘要并转义资源字段', () => {

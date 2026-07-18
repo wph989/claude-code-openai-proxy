@@ -55,7 +55,12 @@ export async function fixAnthropicSseAndPipe(params: {
     }
     const usage = usageTracker.finish();
     onUsage?.(usage);
-    releaseUpstreamResponse(releaseResponse, { requests: 1, tokens: usage.inputTokens + usage.outputTokens });
+    releaseUpstreamResponse(releaseResponse, {
+      requests: 1,
+      tokens: usage.inputTokens + usage.outputTokens,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+    });
     const logLevel = upstreamReadError ? 'warn' : 'info';
     log(logLevel, upstreamReadError ? 'Anthropic SSE 修复遇到上游流异常，已补齐收尾' : 'Anthropic 流式透传响应完成', {
       ...buildLogContext(metrics),
@@ -134,7 +139,12 @@ export async function bufferTransformAndPipeSse(params: {
     output.write(fixed);
     const usage = usageTracker.finish();
     onUsage?.(usage);
-    releaseUpstreamResponse(releaseResponse, { requests: 1, tokens: usage.inputTokens + usage.outputTokens });
+    releaseUpstreamResponse(releaseResponse, {
+      requests: 1,
+      tokens: usage.inputTokens + usage.outputTokens,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+    });
     log('info', 'Anthropic 流式透传响应完成', {
       ...buildLogContext(metrics),
       upstream_status: upstreamResponse.status,
@@ -187,7 +197,12 @@ export async function pipeRawSse(params: {
     }
     const usage = usageTracker.finish();
     onUsage?.(usage);
-    releaseUpstreamResponse(releaseResponse, { requests: 1, tokens: usage.inputTokens + usage.outputTokens });
+    releaseUpstreamResponse(releaseResponse, {
+      requests: 1,
+      tokens: usage.inputTokens + usage.outputTokens,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+    });
     log('info', 'Anthropic 流式透传响应完成', {
       ...buildLogContext(metrics),
       upstream_status: upstreamResponse.status,

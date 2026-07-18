@@ -250,6 +250,14 @@
       <h2 id="changePreviewTitle">配置变更</h2>
       <div class="change-preview" id="configChangePreview" aria-live="polite">正在生成预览...</div>
     </section>
+
+    <section class="history-section" aria-labelledby="configHistoryTitle">
+      <div class="section-heading-row">
+        <h2 id="configHistoryTitle">配置历史</h2>
+        <button class="btn btn-small" id="refreshHistoryBtn" type="button">刷新</button>
+      </div>
+      <div id="configHistory" aria-live="polite"><div class="empty-state">正在加载...</div></div>
+    </section>
   </main>
 
   <script type="module" src="/admin.js"></script>

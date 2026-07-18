@@ -166,6 +166,54 @@ describe('管理端敏感信息边界', () => {
     }
   });
 
+  it('配置历史仅返回字段摘要，回滚不暴露历史秘密', async () => {
+    const secrets = writeSensitiveConfig('runtime_models.json');
+    const app = await createApp(secrets.configPath);
+    try {
+      const loaded = await app.inject({ method: 'GET', url: '/api/config', cookies: authCookies });
+      const payload = loaded.json().config;
+      payload.providers[0].description = '历史测试变更';
+      const saved = await app.inject({
+        method: 'PUT',
+        url: '/api/config',
+        cookies: authCookies,
+        headers: { 'if-match': '"7"' },
+        payload,
+      });
+      expect(saved.statusCode).toBe(200);
+
+      const history = await app.inject({
+        method: 'GET',
+        url: '/api/config/history',
+        cookies: authCookies,
+      });
+      expect(history.statusCode).toBe(200);
+      expect(history.json().history.map((entry: { revision: number }) => entry.revision)).toEqual([8, 7]);
+      expect(history.json().history[1].rollback_changes).toContainEqual(expect.objectContaining({
+        scope: 'provider',
+        fields: expect.arrayContaining(['description']),
+      }));
+      for (const secret of secrets.values) expect(history.body).not.toContain(secret);
+      expect(history.body).not.toContain('config_json');
+
+      const rolledBack = await app.inject({
+        method: 'POST',
+        url: '/api/config/history/7/rollback',
+        cookies: authCookies,
+        headers: { 'if-match': '"8"' },
+      });
+      expect(rolledBack.statusCode).toBe(200);
+      expect(rolledBack.headers.etag).toBe('"9"');
+      for (const secret of secrets.values) expect(rolledBack.body).not.toContain(secret);
+      const persisted = JSON.parse(readFileSync(secrets.configPath, 'utf-8'));
+      expect(persisted.revision).toBe(9);
+      expect(persisted.providers[0].description).toBe('原说明');
+      expect(persisted.providers[0].api_key[0].key).toBe(secrets.key);
+    } finally {
+      await closeApp(app);
+    }
+  });
+
   it('Token 通过独立接口轮换和移除，响应不回显新值', async () => {
     const secrets = writeSensitiveConfig('runtime_models.json');
     const app = await createApp(secrets.configPath);

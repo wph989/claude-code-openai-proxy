@@ -14,6 +14,8 @@
 import type { RuntimeConfig } from '../../types/runtime-config.js';
 import type { KeyRuntimeRecord } from '../key-state-store.js';
 import type { KeyUsage } from '../../types/runtime-config.js';
+import type { KeyRuntimeCoordinator } from '../key-runtime-coordinator.js';
+import type { ProviderCircuitCoordinator } from '../provider-circuit-coordinator.js';
 
 export interface UsageStoreInitOptions {
   every_n: number;
@@ -24,6 +26,12 @@ export interface UsageStoreInitOptions {
    * 配置文件目录解析；SQLite 实现可以忽略这个字段）。
    */
   usageFileHint: string;
+}
+
+export interface ConfigHistoryRecord {
+  revision: number;
+  createdAt: number;
+  config: RuntimeConfig;
 }
 
 /** Key 状态的物理存储端口；JSON 与 SQLite 实现共享同一语义。 */
@@ -81,6 +89,19 @@ export interface ConfigRepository {
    * 创建 Key 配额计数存储。usageFileHint 来自 anti_ban.quota.usage_file 配置。
    */
   createUsageStore(options: UsageStoreInitOptions): UsageRepository;
+
+  /**
+   * 创建跨 Worker Key 运行态协调器。JSON 后端不实现；SQLite 后端必须复用当前连接，
+   * 让 lease、错误计数和用量增量在同一事务边界内完成。
+   */
+  createKeyRuntimeCoordinator?(): KeyRuntimeCoordinator;
+
+  /** 创建跨 Worker Provider 熔断协调器；只有事务后端应实现。 */
+  createProviderCircuitCoordinator?(): ProviderCircuitCoordinator;
+
+  /** 历史快照只供服务端回滚使用，路由层不得直接序列化其中的 config。 */
+  listConfigHistory?(limit: number): Promise<ConfigHistoryRecord[]>;
+  loadConfigHistory?(revision: number): Promise<ConfigHistoryRecord | null>;
 
   /** 释放数据库连接等仓储资源；JSON 实现无需提供。 */
   close?(): Promise<void> | void;

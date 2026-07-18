@@ -140,4 +140,10 @@ function validateQuota(quota: KeyQuotaConfig | null | undefined): void {
   if (quota.max_tokens != null && (typeof quota.max_tokens !== 'number' || quota.max_tokens <= 0)) {
     throw new RuntimeConfigError('max_tokens 必须为正数或 null。');
   }
+  for (const field of ['max_cost_usd', 'input_cost_per_million', 'output_cost_per_million'] as const) {
+    const value = quota[field];
+    if (value != null && (typeof value !== 'number' || !Number.isFinite(value) || value <= 0)) {
+      throw new RuntimeConfigError(`${field} 必须为正数或 null。`);
+    }
+  }
 }

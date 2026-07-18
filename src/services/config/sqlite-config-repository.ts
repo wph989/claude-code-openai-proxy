@@ -1,12 +1,18 @@
 import { mkdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { DatabaseSync as NodeDatabaseSync } from 'node:sqlite';
 import { ConfigConflictError } from '../../errors.js';
 import type { KeyUsage, RuntimeConfig } from '../../types/runtime-config.js';
 import type { KeyRuntimeRecord } from '../key-state-store.js';
+import type { KeyRuntimeCoordinator } from '../key-runtime-coordinator.js';
+import type { ProviderCircuitCoordinator } from '../provider-circuit-coordinator.js';
+import { SqliteKeyRuntimeCoordinator } from './sqlite-key-runtime-coordinator.js';
+import { SqliteProviderCircuitCoordinator } from './sqlite-provider-circuit-coordinator.js';
 import type {
+  ConfigHistoryRecord,
   ConfigRepository,
   KeyStateRepository,
   UsageRepository,
@@ -15,7 +21,7 @@ import type {
 
 const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
 
-export const SQLITE_SCHEMA_VERSION = 1;
+export const SQLITE_SCHEMA_VERSION = 4;
 
 export interface SqliteConfigRepositoryOptions {
   /** 首次建库时导入的现有 JSON 配置；导入成功后原文件保持不动。 */
@@ -88,6 +94,29 @@ const MIGRATIONS: Array<{ version: number; sql: string }> = [{
       updated_at INTEGER NOT NULL
     );
   `,
+}, {
+  version: 2,
+  sql: `
+    ALTER TABLE provider_circuits ADD COLUMN probe_expires_at INTEGER;
+  `,
+}, {
+  version: 3,
+  sql: `
+    CREATE TABLE config_history (
+      revision INTEGER PRIMARY KEY,
+      config_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    INSERT OR IGNORE INTO config_history(revision, config_json, created_at)
+      SELECT revision, config_json, updated_at FROM app_config WHERE singleton_id = 1;
+  `,
+}, {
+  version: 4,
+  sql: `
+    ALTER TABLE key_usage ADD COLUMN input_tokens_used INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens_used >= 0);
+    ALTER TABLE key_usage ADD COLUMN output_tokens_used INTEGER NOT NULL DEFAULT 0 CHECK (output_tokens_used >= 0);
+    ALTER TABLE key_usage ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0 CHECK (cost_usd >= 0);
+  `,
 }];
 
 /**
@@ -96,11 +125,12 @@ const MIGRATIONS: Array<{ version: number; sql: string }> = [{
  */
 export class SqliteConfigRepository implements ConfigRepository {
   readonly storageKind = 'sqlite' as const;
-  // lease 表已经建好，但在 Key 协调器接入前不能宣称具备共享运行态语义。
-  readonly supportsSharedRuntime = false;
+  readonly supportsSharedRuntime = true;
   readonly dbPath: string;
   private readonly db: NodeDatabaseSync;
   private readonly legacyConfigPath?: string;
+  private keyRuntimeCoordinator: KeyRuntimeCoordinator | null = null;
+  private providerCircuitCoordinator: ProviderCircuitCoordinator | null = null;
   private closed = false;
 
   constructor(dbPath: string, options: SqliteConfigRepositoryOptions = {}) {
@@ -161,6 +191,7 @@ export class SqliteConfigRepository implements ConfigRepository {
           config_json = excluded.config_json,
           updated_at = excluded.updated_at
       `).run(revision, json, Date.now());
+      writeConfigHistory(this.db, revision, json, Date.now());
     });
   }
 
@@ -190,6 +221,7 @@ export class SqliteConfigRepository implements ConfigRepository {
         INSERT INTO app_config(singleton_id, revision, config_json, updated_at)
         VALUES(1, ?, ?, ?)
       `).run(revision, JSON.stringify(config), Date.now());
+      writeConfigHistory(this.db, revision, JSON.stringify(config), Date.now());
       for (const [compositeKey, state] of Object.entries(bundle.states)) {
         writeStatePatch(this.db, compositeKey, state);
       }
@@ -211,6 +243,53 @@ export class SqliteConfigRepository implements ConfigRepository {
   createUsageStore(_options: UsageStoreInitOptions): UsageRepository {
     this.assertOpen();
     return new SqliteUsageStore(this.db);
+  }
+
+  createKeyRuntimeCoordinator(): KeyRuntimeCoordinator {
+    this.assertOpen();
+    if (!this.keyRuntimeCoordinator) {
+      // PID 不能区分同进程内的多个仓储连接，追加 UUID 才能准确定位 lease 所属实例。
+      this.keyRuntimeCoordinator = new SqliteKeyRuntimeCoordinator(
+        this.db,
+        `${process.pid}:${randomUUID()}`,
+      );
+    }
+    return this.keyRuntimeCoordinator;
+  }
+
+  createProviderCircuitCoordinator(): ProviderCircuitCoordinator {
+    this.assertOpen();
+    this.providerCircuitCoordinator ??= new SqliteProviderCircuitCoordinator(this.db);
+    return this.providerCircuitCoordinator;
+  }
+
+  async listConfigHistory(limit: number): Promise<ConfigHistoryRecord[]> {
+    this.assertOpen();
+    const rows = this.db.prepare(`
+      SELECT revision, config_json, created_at
+      FROM config_history ORDER BY revision DESC LIMIT ?
+    `).all(normalizeHistoryLimit(limit)) as Array<{
+      revision: number;
+      config_json: string;
+      created_at: number;
+    }>;
+    return rows.map((row) => ({
+      revision: row.revision,
+      createdAt: row.created_at,
+      config: JSON.parse(row.config_json) as RuntimeConfig,
+    }));
+  }
+
+  async loadConfigHistory(revision: number): Promise<ConfigHistoryRecord | null> {
+    this.assertOpen();
+    const row = this.db.prepare(`
+      SELECT revision, config_json, created_at FROM config_history WHERE revision = ?
+    `).get(revision) as { revision: number; config_json: string; created_at: number } | undefined;
+    return row ? {
+      revision: row.revision,
+      createdAt: row.created_at,
+      config: JSON.parse(row.config_json) as RuntimeConfig,
+    } : null;
   }
 
   close(): void {
@@ -363,12 +442,17 @@ class SqliteUsageStore implements UsageRepository {
 
   async load(): Promise<Record<string, KeyUsage>> {
     const rows = this.db.prepare(
-      'SELECT composite_key, requests_used, tokens_used FROM key_usage ORDER BY composite_key',
-    ).all() as Array<{ composite_key: string; requests_used: number; tokens_used: number }>;
-    return Object.fromEntries(rows.map((row) => [row.composite_key, {
-      requests_used: row.requests_used,
-      tokens_used: row.tokens_used,
-    }]));
+      `SELECT composite_key, requests_used, tokens_used, input_tokens_used, output_tokens_used, cost_usd
+       FROM key_usage ORDER BY composite_key`,
+    ).all() as Array<{
+      composite_key: string;
+      requests_used: number;
+      tokens_used: number;
+      input_tokens_used: number;
+      output_tokens_used: number;
+      cost_usd: number;
+    }>;
+    return Object.fromEntries(rows.map((row) => [row.composite_key, usageFromStorage(row)]));
   }
 
   update(compositeKey: string, usage: KeyUsage, _ratio: number): void {
@@ -440,16 +524,23 @@ function writeStatePatch(db: NodeDatabaseSync, compositeKey: string, patch: KeyR
 
 function writeUsage(db: NodeDatabaseSync, compositeKey: string, usage: KeyUsage): void {
   db.prepare(`
-    INSERT INTO key_usage(composite_key, requests_used, tokens_used, updated_at)
-    VALUES(?, ?, ?, ?)
+    INSERT INTO key_usage(
+      composite_key, requests_used, tokens_used, input_tokens_used, output_tokens_used, cost_usd, updated_at
+    ) VALUES(?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(composite_key) DO UPDATE SET
       requests_used = excluded.requests_used,
       tokens_used = excluded.tokens_used,
+      input_tokens_used = excluded.input_tokens_used,
+      output_tokens_used = excluded.output_tokens_used,
+      cost_usd = excluded.cost_usd,
       updated_at = excluded.updated_at
   `).run(
     compositeKey,
     normalizeCounter(usage.requests_used),
     normalizeCounter(usage.tokens_used),
+    normalizeCounter(usage.input_tokens_used),
+    normalizeCounter(usage.output_tokens_used),
+    normalizeMoney(usage.cost_usd),
     Date.now(),
   );
 }
@@ -521,7 +612,56 @@ function normalizeCounter(value: unknown): number {
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
 }
 
+function normalizeMoney(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function usageFromStorage(row: {
+  requests_used: number;
+  tokens_used: number;
+  input_tokens_used: number;
+  output_tokens_used: number;
+  cost_usd: number;
+}): KeyUsage {
+  const usage: KeyUsage = {
+    requests_used: row.requests_used,
+    tokens_used: row.tokens_used,
+  };
+  if (row.input_tokens_used > 0 || row.output_tokens_used > 0 || row.cost_usd > 0) {
+    usage.input_tokens_used = row.input_tokens_used;
+    usage.output_tokens_used = row.output_tokens_used;
+    usage.cost_usd = row.cost_usd;
+  }
+  return usage;
+}
+
 function normalizeBusyTimeout(value: unknown): number {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 100 ? Math.min(parsed, 60_000) : 5_000;
+}
+
+function writeConfigHistory(
+  db: NodeDatabaseSync,
+  revision: number,
+  configJson: string,
+  createdAt: number,
+): void {
+  db.prepare(`
+    INSERT INTO config_history(revision, config_json, created_at)
+    VALUES(?, ?, ?)
+    ON CONFLICT(revision) DO UPDATE SET
+      config_json = excluded.config_json,
+      created_at = excluded.created_at
+  `).run(revision, configJson, createdAt);
+  db.exec(`
+    DELETE FROM config_history
+    WHERE revision NOT IN (
+      SELECT revision FROM config_history ORDER BY revision DESC LIMIT 50
+    )
+  `);
+}
+
+function normalizeHistoryLimit(value: number): number {
+  return Number.isSafeInteger(value) && value > 0 ? Math.min(value, 50) : 20;
 }

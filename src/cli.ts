@@ -3,7 +3,7 @@ import { writeFile } from 'node:fs/promises';
 import path, { join, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { Command } from 'commander';
-import { settings } from './config.js';
+import { resolveStorageBackend, settings } from './config.js';
 import { startServer } from './server.js';
 import { buildDefaultRuntimeConfig } from './services/runtime-config.js';
 import { log } from './utils/logger.js';
@@ -31,12 +31,16 @@ program
   .option('--host <host>', '监听地址', settings.host)
   .option('--port <port>', '监听端口', String(settings.port))
   .option('--config <path>', '运行时模型配置文件路径', settings.configFile)
+  .option('--storage <backend>', '持久化后端：json 或 sqlite', settings.storageBackend)
+  .option('--sqlite-file <path>', 'SQLite 数据库路径', settings.sqliteFile)
   .option('--dev', '强制开发模式（使用本地目录配置）', false)
   .option('-d, --daemon', '后台运行（守护进程模式）', false)
-  .option('-c, --cluster [workers]', '启用单 Worker 集群兼容模式；本地状态暂不支持多 Worker', false)
+  .option('-c, --cluster [workers]', '启用集群模式；多 Worker 要求 SQLite', false)
   .action(async (options) => {
     const port = Number(options.port || settings.port);
     const host = options.host || settings.host;
+    const storageBackend = resolveStorageBackend(options.storage);
+    const sqlitePath = path.resolve(options.sqliteFile || settings.sqliteFile);
 
     // check if already running
     const existingInfo = await checkExistingProcess();
@@ -66,17 +70,20 @@ program
         Number.isFinite(workers) && workers > 0 ? workers : settings.clusterWorkers
       );
       // 在写 PID 文件和 fork 前失败，避免不安全配置留下看似仍在运行的进程记录。
-      assertClusterWorkerCount(workerCount);
+      assertClusterWorkerCount(workerCount, storageBackend);
       await writeProcessInfo({ pid: process.pid, port, host });
       process.on('exit', () => { void removeProcessInfo(); });
 
       await startCluster({
         workers: workerCount,
+        storageKind: storageBackend,
         startWorker: async () => {
           await startServer({
             host,
             port: Number.isFinite(port) ? port : settings.port,
-            configPath: options.config || settings.configFile
+            configPath: options.config || settings.configFile,
+            storageBackend,
+            sqlitePath,
           });
         }
       });
@@ -89,7 +96,9 @@ program
       await startServer({
         host,
         port: Number.isFinite(port) ? port : settings.port,
-        configPath: options.config || settings.configFile
+        configPath: options.config || settings.configFile,
+        storageBackend,
+        sqlitePath,
       });
     }
   });

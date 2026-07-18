@@ -209,7 +209,12 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
     });
 
     const totalTokens = (state.usageInputTokens ?? 0) + (state.usageOutputTokens ?? 0);
-    releaseUpstreamResponse(upstreamResponse, { requests: 1, tokens: totalTokens });
+    releaseUpstreamResponse(upstreamResponse, {
+      requests: 1,
+      tokens: totalTokens,
+      inputTokens: state.usageInputTokens ?? 0,
+      outputTokens: state.usageOutputTokens ?? 0,
+    });
     output.end();
     return;
   } catch (error) {

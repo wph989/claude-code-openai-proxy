@@ -49,4 +49,18 @@ describe('管理端 API Client', () => {
     await expect(AdminApi.loadKeys('p1')).rejects.toMatchObject({ status: 401 });
     expect((globalThis as { window: { location: { href: string } } }).window.location.href).toBe('/login');
   });
+
+  it('配置回滚携带当前 revision，不请求历史原始 JSON', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ message: 'ok' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json', etag: '"9"' },
+    }));
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    await AdminApi.rollbackConfig(7, 8);
+    expect(fetchMock).toHaveBeenCalledWith('/api/config/history/7/rollback', expect.objectContaining({
+      method: 'POST',
+      headers: expect.objectContaining({ 'If-Match': '"8"' }),
+    }));
+  });
 });

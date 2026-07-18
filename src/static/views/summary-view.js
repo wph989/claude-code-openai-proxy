@@ -24,3 +24,38 @@ export function renderChangePreview(container, data) {
     return `<li>${esc(scopeLabels[change.scope] || change.scope)} · ${esc(actionLabels[change.action] || change.action)} ${esc(change.target)}${esc(fields)}</li>`;
   }).join('')}</ul>`;
 }
+
+export function renderConfigHistory(container, entries) {
+  if (!entries.length) {
+    container.innerHTML = '<div class="empty-state">暂无配置历史</div>';
+    return;
+  }
+  container.innerHTML = `<div class="table-scroll history-table-wrap"><table class="data-table history-table">
+    <thead><tr><th>Revision</th><th>保存时间</th><th>资源</th><th>回滚影响</th><th class="col-actions">操作</th></tr></thead>
+    <tbody>${entries.map((entry) => {
+      const summary = entry.summary || {};
+      const changes = (entry.rollback_changes || []).slice(0, 3).map((change) => {
+        const fields = change.fields?.length ? ` (${change.fields.join('、')})` : '';
+        return `${change.target}${fields}`;
+      });
+      const more = (entry.rollback_changes || []).length > 3
+        ? ` 等 ${entry.rollback_changes.length} 项`
+        : '';
+      const impact = entry.current
+        ? '当前版本'
+        : changes.length ? `${changes.join('；')}${more}` : '配置内容一致';
+      return `<tr>
+        <td class="col-number">${esc(entry.revision)}</td>
+        <td>${esc(formatHistoryTime(entry.created_at))}</td>
+        <td>${esc(summary.provider_count || 0)} 个供应商 / ${esc(summary.model_count || 0)} 条路由</td>
+        <td class="history-impact" title="${esc(impact)}">${esc(impact)}</td>
+        <td class="col-actions"><button class="btn btn-small history-rollback-btn" data-revision="${esc(entry.revision)}" ${entry.current ? 'disabled' : ''}>回滚</button></td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div>`;
+}
+
+function formatHistoryTime(value) {
+  const date = new Date(Number(value));
+  return Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { hour12: false }) : '-';
+}

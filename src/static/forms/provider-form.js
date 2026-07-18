@@ -21,6 +21,9 @@ export function providerFormHtml(item) {
   const quota = p.quota || {};
   const quotaReqVal = quota.max_requests != null ? quota.max_requests : '';
   const quotaTokVal = quota.max_tokens != null ? quota.max_tokens : '';
+  const quotaCostVal = quota.max_cost_usd != null ? quota.max_cost_usd : '';
+  const quotaInputCostVal = quota.input_cost_per_million != null ? quota.input_cost_per_million : '';
+  const quotaOutputCostVal = quota.output_cost_per_million != null ? quota.output_cost_per_million : '';
   const quotaThrVal = quota.soft_stop_threshold != null ? quota.soft_stop_threshold : '';
   const circuitBreakerEnabled = p.circuit_breaker !== null;
   const circuitBreaker = p.circuit_breaker || {};
@@ -111,6 +114,18 @@ export function providerFormHtml(item) {
       <div class="form-group">
         <div class="form-label-row"><span class="form-label">默认 Token 配额</span><span class="field-key">quota.max_tokens</span></div>
         <input id="mfq-max-tok" type="number" min="1" value="${esc(quotaTokVal)}" placeholder="留空 = 不限" />
+      </div>
+      <div class="form-group">
+        <div class="form-label-row"><span class="form-label">默认费用上限</span><span class="field-key">quota.max_cost_usd</span><span class="form-label-unit">USD</span></div>
+        <input id="mfq-max-cost" type="number" min="0" step="0.000001" value="${esc(quotaCostVal)}" placeholder="留空 = 不限" />
+      </div>
+      <div class="form-group">
+        <div class="form-label-row"><span class="form-label">输入 Token 单价</span><span class="field-key">quota.input_cost_per_million</span><span class="form-label-unit">USD / 1M</span></div>
+        <input id="mfq-input-cost" type="number" min="0" step="0.000001" value="${esc(quotaInputCostVal)}" placeholder="例如 3" />
+      </div>
+      <div class="form-group">
+        <div class="form-label-row"><span class="form-label">输出 Token 单价</span><span class="field-key">quota.output_cost_per_million</span><span class="form-label-unit">USD / 1M</span></div>
+        <input id="mfq-output-cost" type="number" min="0" step="0.000001" value="${esc(quotaOutputCostVal)}" placeholder="例如 15" />
       </div>
       <div class="form-group">
         <div class="form-label-row"><span class="form-label">默认软停阈值</span><span class="field-key">quota.soft_stop_threshold</span><i class="info-tip" data-tip="供应商配额会作为所有 Key 的默认值；单个 Key 设置了 quota 字段时优先使用 Key 自己的配额。软停阈值表示用量达到该比例（0~1）后停止该供应商。">i</i></div>

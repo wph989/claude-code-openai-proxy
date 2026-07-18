@@ -32,10 +32,20 @@ export function attachResponseMeta(response: Response, meta: ResponseMeta): void
  * 标记响应已处理完毕：归还 lease、记录用量。
  * 调用应是幂等的：路由层和 SSE 修复器都可能在不同时机触发 release。
  */
-export function releaseUpstreamResponse(response: Response, usage?: { requests: number; tokens: number }): void {
+export function releaseUpstreamResponse(response: Response, usage?: {
+  requests: number;
+  tokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
+}): void {
   const meta = responseMeta.get(response);
   if (!meta) return;
-  if (usage && meta.rotator && meta.key) meta.rotator.recordUsage(meta.key, usage.requests, usage.tokens);
+  if (usage && meta.rotator && meta.key) {
+    meta.rotator.recordUsage(meta.key, usage.requests, usage.tokens, {
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+    });
+  }
   if (meta.lease && meta.rotator) meta.rotator.release(meta.lease);
   if (meta.providerHealth && meta.providerId && !meta.providerOutcomeRecorded) {
     meta.providerHealth.recordSuccess(meta.providerId, meta.providerCircuitLease);

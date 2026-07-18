@@ -1,8 +1,10 @@
 import cluster from 'node:cluster';
 import { log } from './utils/logger.js';
+import type { StorageBackend } from './config.js';
 
 export interface ClusterOptions {
   workers: number;
+  storageKind?: StorageBackend;
   startWorker: () => Promise<void>;
 }
 
@@ -10,15 +12,16 @@ export function resolveClusterWorkerCount(workers: number): number {
   return workers > 0 ? workers : 1;
 }
 
-export function assertClusterWorkerCount(workers: number): void {
+export function assertClusterWorkerCount(workers: number, storageKind: StorageBackend = 'json'): void {
   if (workers <= 1) return;
-  // Rotator、错误计数和本地配额当前都保存在进程内，多 Worker 会突破全局并发限制并互相覆盖 JSON 状态。
-  throw new Error('当前本地状态存储不支持多 Worker 集群；请使用 --cluster 1，或等待接入集中式状态存储。');
+  if (storageKind === 'sqlite') return;
+  // JSON 没有跨进程事务，放开后会突破全局并发限制并互相覆盖状态。
+  throw new Error('JSON 状态存储不支持多 Worker 集群；请使用 --cluster 1，或设置 STORAGE_BACKEND=sqlite。');
 }
 
 export async function startCluster(options: ClusterOptions): Promise<void> {
   const numWorkers = resolveClusterWorkerCount(options.workers);
-  assertClusterWorkerCount(numWorkers);
+  assertClusterWorkerCount(numWorkers, options.storageKind);
 
   if (cluster.isPrimary) {
     log('info', '集群主进程启动', {

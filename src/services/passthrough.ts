@@ -171,6 +171,8 @@ export async function sendAnthropicPassthroughResponse(params: {
   releaseUpstreamResponse(upstreamResponse, {
     requests: 1,
     tokens: inputTokens + outputTokens,
+    inputTokens,
+    outputTokens,
   });
   setForwardResponseHeaders(reply, upstreamResponse);
   log('info', 'Anthropic 透传响应完成', {

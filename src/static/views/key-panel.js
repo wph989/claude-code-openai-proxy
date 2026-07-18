@@ -59,8 +59,10 @@ export function renderKeyPanelHtml(providerId, keys) {
       const usage = k.usage || { requests_used: 0, tokens_used: 0 };
       const reqMax = k.quota.max_requests;
       const tokMax = k.quota.max_tokens;
+      const costMax = k.quota.max_cost_usd;
       const reqPct = reqMax ? Math.min(100, Math.round(usage.requests_used / reqMax * 100)) : 0;
       const tokPct = tokMax ? Math.min(100, Math.round(usage.tokens_used / tokMax * 100)) : 0;
+      const costPct = costMax ? Math.min(100, Math.round((usage.cost_usd || 0) / costMax * 100)) : 0;
       const blocked = k.quota_blocked
         ? `<span class="badge health-bad" title="${esc(k.quota_reason || '配额接近上限')}">软停用</span>`
         : '';
@@ -70,7 +72,10 @@ export function renderKeyPanelHtml(providerId, keys) {
       const tokRow = tokMax
         ? `<div class="quota-line">Token ${usage.tokens_used}/${tokMax}<div class="quota-bar"><span style="width:${tokPct}%"></span></div></div>`
         : '';
-      return `<div class="quota-row">${reqRow}${tokRow}${blocked}</div>`;
+      const costRow = costMax
+        ? `<div class="quota-line">费用 $${Number(usage.cost_usd || 0).toFixed(6)}/$${costMax}<div class="quota-bar"><span style="width:${costPct}%"></span></div></div>`
+        : '';
+      return `<div class="quota-row">${reqRow}${tokRow}${costRow}${blocked}</div>`;
     })();
 
     let actions = `<button class="btn-icon key-action-btn" data-provider="${esc(providerId)}" data-key-id="${esc(k.id)}" data-action="reset">重置</button>`;

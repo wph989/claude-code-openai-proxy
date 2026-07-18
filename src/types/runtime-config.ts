@@ -62,12 +62,19 @@ export interface QuotaPersistConfig {
 export interface KeyQuotaConfig {
   max_requests: number | null;
   max_tokens: number | null;
+  /** 美元预算与每百万 Token 单价；仅配置费用字段时启用方向 Token/费用统计。 */
+  max_cost_usd?: number | null;
+  input_cost_per_million?: number | null;
+  output_cost_per_million?: number | null;
   soft_stop_threshold?: number;
 }
 
 export interface KeyUsage {
   requests_used: number;
   tokens_used: number;
+  input_tokens_used?: number;
+  output_tokens_used?: number;
+  cost_usd?: number;
 }
 
 export interface AntiBanConfig {

@@ -4,11 +4,19 @@ import { StickySelector, BalancedSelector, type KeySelector } from './key-select
 import type { ResolvedAntiBan } from './anti-ban-config.js';
 import { QuotaGuard } from './quota-guard.js';
 import { KeyAutoRecoveryScheduler } from './key-auto-recovery.js';
+import type {
+  KeyRuntimeCoordinator,
+  SharedKeyCandidate,
+  SharedKeySnapshot,
+} from './key-runtime-coordinator.js';
+import type { KeyUsageDelta } from './usage-budget.js';
 
 export type KeyErrorCategory = 'hard_limit' | 'rate_limit' | 'transient' | 'network' | null;
 
 export type KeyLease = {
   key: string;
+  /** SQLite 共享运行态使用稳定 lease ID，release 可跨 Worker 幂等执行。 */
+  sharedLeaseId?: string;
 };
 
 export type AcquireOptions = {
@@ -45,6 +53,13 @@ interface RuntimeState {
   lastErrorCategory: KeyErrorCategory;
 }
 
+export interface SharedKeyRuntimeOptions {
+  coordinator: KeyRuntimeCoordinator;
+  providerId: string;
+  /** 测试可缩短 TTL；生产默认值与本地泄漏回收窗口一致。 */
+  leaseTtlMs?: number;
+}
+
 // 单个 lease 最长存活时间：超过此值认为是 release 调用泄漏，强制释放。
 // 默认 10 分钟，覆盖最长正常流式请求；设过短会误杀慢请求，设过长会让泄漏 lease 卡住更久。
 const LEASE_MAX_AGE_MS = 10 * 60 * 1000;
@@ -57,6 +72,7 @@ export class ApiKeyRotator {
   private _antiBan: ResolvedAntiBan;
   private _providerQuota: KeyQuotaConfig | null;
   private _keyMaxErrors: number;
+  private _autoRecoverMs: number;
   private autoRecovery: KeyAutoRecoveryScheduler;
   private selector: KeySelector;
   private runtime = new Map<string, RuntimeState>();
@@ -64,8 +80,10 @@ export class ApiKeyRotator {
   private availabilityWaiters = new Set<() => void>();
   private quotaGuard = new QuotaGuard();
   private usageListener: ((key: string, usage: KeyUsage, ratio: number) => void) | null = null;
+  private readonly sharedRuntime: SharedKeyRuntimeOptions | null;
+  private readonly sharedLeaseTtlMs: number;
 
-  constructor(keys: ApiKeyEntry[], strategy: KeyRotationStrategy, autoDisable: boolean = true, antiBan: ResolvedAntiBan, providerQuota: KeyQuotaConfig | null = null, keyMaxErrors: number = 5, autoRecoverMinutes: number = 0) {
+  constructor(keys: ApiKeyEntry[], strategy: KeyRotationStrategy, autoDisable: boolean = true, antiBan: ResolvedAntiBan, providerQuota: KeyQuotaConfig | null = null, keyMaxErrors: number = 5, autoRecoverMinutes: number = 0, sharedRuntime: SharedKeyRuntimeOptions | null = null) {
     this._keys = keys;
     this._keyIndex = new Map(keys.map((k, i) => [k.key, i]));
     this._strategy = strategy;
@@ -73,6 +91,9 @@ export class ApiKeyRotator {
     this._antiBan = antiBan;
     this._providerQuota = providerQuota;
     this._keyMaxErrors = keyMaxErrors;
+    this._autoRecoverMs = autoRecoverMinutes > 0 ? autoRecoverMinutes * 60_000 : 0;
+    this.sharedRuntime = sharedRuntime;
+    this.sharedLeaseTtlMs = normalizeLeaseTtl(sharedRuntime?.leaseTtlMs);
     const selectionMode = this.resolveSelectionMode();
     this.selector = selectionMode === 'balanced' ? new BalancedSelector() : new StickySelector();
     for (const k of this._keys) {
@@ -80,8 +101,9 @@ export class ApiKeyRotator {
       const effectiveQuota = k.quota !== undefined ? k.quota : this._providerQuota;
       this.quotaGuard.setQuota(k.key, effectiveQuota);
     }
-    const autoRecoverMs = autoRecoverMinutes > 0 ? autoRecoverMinutes * 60_000 : 0;
-    this.autoRecovery = new KeyAutoRecoveryScheduler(this._keys, autoRecoverMs, (key) => this.enableKey(key));
+    // 共享模式由事务访问顺带恢复，避免每个 Worker 都启动一份相同的恢复定时器。
+    const localAutoRecoverMs = sharedRuntime ? 0 : this._autoRecoverMs;
+    this.autoRecovery = new KeyAutoRecoveryScheduler(this._keys, localAutoRecoverMs, (key) => this.enableKey(key));
     this.autoRecovery.schedule();
   }
 
@@ -150,6 +172,7 @@ export class ApiKeyRotator {
   }
 
   async acquire(options: AcquireOptions = {}): Promise<KeyLease> {
+    if (this.sharedRuntime) return this.acquireShared(options);
     while (true) {
       const now = Date.now();
       this.autoRecovery.recoverExpired(now);
@@ -175,10 +198,37 @@ export class ApiKeyRotator {
     }
   }
 
-  private async waitForAvailability(now: number, deadline?: number): Promise<void> {
-    const nextAt = this.nextTemporaryAvailableAt(now);
+  private async acquireShared(options: AcquireOptions): Promise<KeyLease> {
+    while (true) {
+      const now = Date.now();
+      if (options.deadline != null && now >= options.deadline) {
+        throw new Error('等待可用 API Key 超时');
+      }
+      const result = this.sharedRuntime!.coordinator.tryAcquire(
+        this.orderedSharedCandidates(),
+        now,
+        this.sharedLeaseTtlMs,
+      );
+      if (result.lease) {
+        const entry = this.entryForCompositeKey(result.lease.compositeKey);
+        if (!entry) {
+          // 配置热更新与 acquire 交错时不能遗留数据库 lease。
+          this.sharedRuntime!.coordinator.release(result.lease.leaseId);
+          throw new Error('已获取的 API Key 不再存在于当前配置');
+        }
+        if (result.snapshot) this.applySharedSnapshot(entry, result.snapshot, true, false);
+        return { key: entry.key, sharedLeaseId: result.lease.leaseId };
+      }
+      if (!result.hasPotentialCandidate) throw new Error('没有可用的 API Key');
+      await this.waitForAvailability(now, options.deadline, result.nextAvailableAt);
+    }
+  }
+
+  private async waitForAvailability(now: number, deadline?: number, sharedNextAt?: number | null): Promise<void> {
+    const nextAt = sharedNextAt ?? this.nextTemporaryAvailableAt(now);
     // 正常情况下由 release / enable 等状态变化主动唤醒；兜底定时器用于冷却到期、lease 泄漏回收和 deadline。
-    const fallbackAt = now + 1000;
+    // 其他 Worker release 无法触发本进程 waiter；共享模式短轮询保证名额及时可见。
+    const fallbackAt = now + (this.sharedRuntime ? 100 : 1000);
     const deadlineAt = deadline ?? Number.POSITIVE_INFINITY;
     const wakeAt = Math.max(now + 1, Math.min(nextAt ?? fallbackAt, deadlineAt));
     const waitMs = Math.max(1, wakeAt - now);
@@ -223,6 +273,11 @@ export class ApiKeyRotator {
   }
 
   release(lease: KeyLease | string | undefined): void {
+    if (typeof lease !== 'string' && lease?.sharedLeaseId && this.sharedRuntime) {
+      this.sharedRuntime.coordinator.release(lease.sharedLeaseId);
+      this.signalAvailabilityChange();
+      return;
+    }
     const key = typeof lease === 'string' ? lease : lease?.key;
     if (!key) return;
     const state = this.getRuntimeState(key);
@@ -246,6 +301,20 @@ export class ApiKeyRotator {
     const entry = this.entryFor(key);
     if (!entry) return;
 
+    if (this.sharedRuntime) {
+      const snapshot = this.sharedRuntime.coordinator.markError(this.sharedCandidate(entry), {
+        now: Date.now(),
+        message: errorMessage,
+        category: category ?? 'transient',
+        autoDisable: this._autoDisable,
+        maxErrors: this._keyMaxErrors,
+      });
+      this.applySharedSnapshot(entry, snapshot, true, false);
+      this.selector.notifyKeyUnavailable(key);
+      this.signalAvailabilityChange();
+      return;
+    }
+
     const patch: KeyStateChange = {
       error_count: entry.error_count + 1,
       last_error_at: Date.now(),
@@ -266,6 +335,20 @@ export class ApiKeyRotator {
   markQuotaError(key: string, errorMessage: string): void {
     const entry = this.entryFor(key);
     if (!entry) return;
+
+    if (this.sharedRuntime) {
+      const snapshot = this.sharedRuntime.coordinator.markQuotaError(this.sharedCandidate(entry), {
+        now: Date.now(),
+        message: errorMessage,
+        category: 'hard_limit',
+        autoDisable: true,
+        maxErrors: this._keyMaxErrors,
+      });
+      this.applySharedSnapshot(entry, snapshot, true, false);
+      this.selector.notifyKeyUnavailable(key);
+      this.signalAvailabilityChange();
+      return;
+    }
 
     const now = Date.now();
     const patch: KeyStateChange = {
@@ -288,6 +371,23 @@ export class ApiKeyRotator {
     if (!entry) return;
 
     const now = Date.now();
+    if (this.sharedRuntime) {
+      const delay = randomBetween(this._antiBan.rate_limit_delay_min_ms, this._antiBan.rate_limit_delay_max_ms);
+      const snapshot = this.sharedRuntime.coordinator.markRateLimited(this.sharedCandidate(entry), {
+        now,
+        message: errorMessage,
+        category: 'rate_limit',
+        autoDisable: this._autoDisable,
+        maxErrors: this._keyMaxErrors,
+        delayMs: delay,
+      });
+      this.applySharedSnapshot(entry, snapshot, true, false);
+      if (this._antiBan.sticky_on_cooldown === 'fallthrough') {
+        this.selector.notifyKeyUnavailable(key);
+      }
+      this.signalAvailabilityChange();
+      return;
+    }
     const state = this.getRuntimeState(key);
     // 冷却期内重复 429 不续命：只在已到期（或首次）时重新设定 nextAvailableAt，
     // 否则连续重试可以把冷却结束时间无限推后，肉眼看就是「永远不恢复」。
@@ -315,6 +415,11 @@ export class ApiKeyRotator {
   markSuccess(key: string): void {
     const entry = this.entryFor(key);
     if (!entry) return;
+    if (this.sharedRuntime) {
+      const snapshot = this.sharedRuntime.coordinator.markSuccess(this.sharedCandidate(entry), Date.now());
+      this.applySharedSnapshot(entry, snapshot, true, false);
+      return;
+    }
     if (entry.error_count === 0 && entry.last_error_at === null) return;
     const patch: KeyStateChange = {
       error_count: 0,
@@ -326,8 +431,25 @@ export class ApiKeyRotator {
     this._onChange?.(key, patch);
   }
 
-  recordUsage(key: string, requests: number, tokens: number): void {
-    this.quotaGuard.recordUsage(key, requests, tokens);
+  recordUsage(
+    key: string,
+    requests: number,
+    tokens: number,
+    detail: Pick<KeyUsageDelta, 'inputTokens' | 'outputTokens'> = {},
+  ): void {
+    const entry = this.entryFor(key);
+    const delta: KeyUsageDelta = { requests, tokens, ...detail };
+    if (entry && this.sharedRuntime) {
+      const snapshot = this.sharedRuntime.coordinator.recordUsage(
+        this.sharedCandidate(entry),
+        delta,
+        Date.now(),
+      );
+      this.applySharedSnapshot(entry, snapshot, false, true);
+      this.signalAvailabilityChange();
+      return;
+    }
+    this.quotaGuard.recordUsage(key, delta);
     this.notifyUsage(key);
     this.signalAvailabilityChange();
   }
@@ -341,6 +463,13 @@ export class ApiKeyRotator {
   }
 
   resetUsage(key: string): void {
+    const entry = this.entryFor(key);
+    if (entry && this.sharedRuntime) {
+      const snapshot = this.sharedRuntime.coordinator.resetUsage(this.sharedCandidate(entry), Date.now());
+      this.applySharedSnapshot(entry, snapshot, false, true);
+      this.signalAvailabilityChange();
+      return;
+    }
     this.quotaGuard.reset(key);
     this.notifyUsage(key);
     this.signalAvailabilityChange();
@@ -363,6 +492,11 @@ export class ApiKeyRotator {
   }
 
   getQuotaSnapshot(key: string): { usage: KeyUsage; quota: KeyQuotaConfig | null; blocked: boolean; reason: string | null } {
+    const entry = this.entryFor(key);
+    if (entry && this.sharedRuntime) {
+      const snapshot = this.sharedRuntime.coordinator.snapshot(this.sharedCandidate(entry), Date.now());
+      this.applySharedSnapshot(entry, snapshot, false, false);
+    }
     return {
       usage: this.quotaGuard.getUsage(key),
       quota: this.quotaGuard.getQuota(key),
@@ -372,6 +506,15 @@ export class ApiKeyRotator {
   }
 
   allUnavailable(): boolean {
+    if (this.sharedRuntime) {
+      if (this._keys.length === 0) return true;
+      const now = Date.now();
+      return this._keys.every((entry) => {
+        const snapshot = this.sharedRuntime!.coordinator.snapshot(this.sharedCandidate(entry), now);
+        this.applySharedSnapshot(entry, snapshot, false, false);
+        return !snapshot.enabled || snapshot.quotaBlocked;
+      });
+    }
     this.autoRecovery.recoverExpired(Date.now());
     if (this._keys.length === 0) return true;
     // 只统计「永久不可用」（禁用 / 配额阻塞）：冷却中属于临时状态，acquire 会等到期后重试，
@@ -390,6 +533,13 @@ export class ApiKeyRotator {
   enableKey(key: string): void {
     const entry = this.entryFor(key);
     if (!entry) return;
+    if (this.sharedRuntime) {
+      const candidate = { ...this.sharedCandidate(entry), configuredEnabled: true };
+      const snapshot = this.sharedRuntime.coordinator.setEnabled(candidate, true, Date.now());
+      this.applySharedSnapshot(entry, snapshot, true, false);
+      this.signalAvailabilityChange();
+      return;
+    }
     const patch: KeyStateChange = {
       enabled: true,
       error_count: 0,
@@ -408,6 +558,17 @@ export class ApiKeyRotator {
   disableKey(key: string, reason?: string): void {
     const entry = this.entryFor(key);
     if (!entry) return;
+    if (this.sharedRuntime) {
+      const snapshot = this.sharedRuntime.coordinator.setEnabled(
+        this.sharedCandidate(entry),
+        false,
+        Date.now(),
+        reason,
+      );
+      this.applySharedSnapshot(entry, snapshot, true, false);
+      this.signalAvailabilityChange();
+      return;
+    }
     const patch: KeyStateChange = {
       enabled: false,
       disabled_at: Date.now(),
@@ -428,6 +589,13 @@ export class ApiKeyRotator {
   resetErrorCount(key: string): void {
     const entry = this.entryFor(key);
     if (!entry) return;
+    if (this.sharedRuntime) {
+      const candidate = { ...this.sharedCandidate(entry), configuredEnabled: true };
+      const snapshot = this.sharedRuntime.coordinator.reset(candidate, Date.now());
+      this.applySharedSnapshot(entry, snapshot, true, false);
+      this.signalAvailabilityChange();
+      return;
+    }
     const patch: KeyStateChange = {
       error_count: 0,
       enabled: true,
@@ -453,6 +621,13 @@ export class ApiKeyRotator {
 
   getKeyStatuses(): KeyRuntimeStatus[] {
     const now = Date.now();
+    if (this.sharedRuntime) {
+      return this._keys.map((entry) => {
+        const snapshot = this.sharedRuntime!.coordinator.snapshot(this.sharedCandidate(entry), now);
+        this.applySharedSnapshot(entry, snapshot, false, false);
+        return this.statusFromSharedSnapshot(entry, snapshot, now);
+      });
+    }
     this.autoRecovery.recoverExpired(now);
     return this._keys.map((entry) => {
       const state = this.getRuntimeState(entry.key);
@@ -484,6 +659,90 @@ export class ApiKeyRotator {
   private entryFor(key: string): ApiKeyEntry | undefined {
     const idx = this._keyIndex.get(key);
     return idx === undefined ? undefined : this._keys[idx];
+  }
+
+  private entryForCompositeKey(compositeKey: string): ApiKeyEntry | undefined {
+    if (!this.sharedRuntime) return undefined;
+    const prefix = `${this.sharedRuntime.providerId}:`;
+    if (!compositeKey.startsWith(prefix)) return undefined;
+    const keyId = compositeKey.slice(prefix.length);
+    return this._keys.find((entry) => entry.id === keyId);
+  }
+
+  private sharedCandidate(entry: ApiKeyEntry): SharedKeyCandidate {
+    if (!this.sharedRuntime) throw new Error('当前 Rotator 未启用共享运行态');
+    const effectiveQuota = entry.quota !== undefined ? entry.quota : this._providerQuota;
+    return {
+      compositeKey: `${this.sharedRuntime.providerId}:${entry.id}`,
+      // 自动禁用会暂时把 enabled 置为 false；auto_disabled_at 可区分它与用户主动停用。
+      configuredEnabled: entry.auto_disabled_at != null || entry.enabled !== false,
+      maxConcurrent: this._antiBan.max_concurrent,
+      minIntervalMs: this._antiBan.min_interval_ms,
+      autoRecoverMs: this._autoRecoverMs,
+      quota: effectiveQuota,
+    };
+  }
+
+  private orderedSharedCandidates(): SharedKeyCandidate[] {
+    const keys = this._keys.map((entry) => entry.key);
+    const preferred = this.selector.pick(keys);
+    const ordered = preferred ? [preferred, ...keys.filter((key) => key !== preferred)] : keys;
+    return ordered.flatMap((key) => {
+      const entry = this.entryFor(key);
+      return entry ? [this.sharedCandidate(entry)] : [];
+    });
+  }
+
+  private applySharedSnapshot(
+    entry: ApiKeyEntry,
+    snapshot: SharedKeySnapshot,
+    notifyState: boolean,
+    notifyUsage: boolean,
+  ): void {
+    const patch: KeyStateChange = {
+      enabled: snapshot.enabled,
+      error_count: snapshot.errorCount,
+      disabled_at: snapshot.disabledAt,
+      last_error_at: snapshot.lastErrorAt,
+      last_error_message: snapshot.lastErrorMessage,
+      auto_disabled_at: snapshot.autoDisabledAt,
+    };
+    const changed = Object.entries(patch).some(([field, value]) => (
+      entry[field as keyof ApiKeyEntry] !== value
+    ));
+    Object.assign(entry, patch);
+    const state = this.getRuntimeState(entry.key);
+    state.activeRequests = snapshot.activeLeases;
+    state.activeLeaseStarts = [];
+    state.nextAvailableAt = snapshot.nextAvailableAt;
+    state.lastSentAt = snapshot.lastSentAt;
+    state.lastErrorCategory = snapshot.lastErrorCategory;
+    this.quotaGuard.hydrate(entry.key, snapshot.usage);
+    if (notifyState && changed) this._onChange?.(entry.key, patch);
+    if (notifyUsage) this.notifyUsage(entry.key);
+  }
+
+  private statusFromSharedSnapshot(
+    entry: ApiKeyEntry,
+    snapshot: SharedKeySnapshot,
+    now: number,
+  ): KeyRuntimeStatus {
+    const delayed = snapshot.enabled
+      && snapshot.nextAvailableAt != null
+      && snapshot.nextAvailableAt > now;
+    const busy = snapshot.enabled && !delayed && snapshot.activeLeases >= this._antiBan.max_concurrent;
+    return {
+      ...entry,
+      status: !snapshot.enabled ? 'disabled' : delayed ? 'delayed' : busy ? 'busy' : 'available',
+      active_requests: snapshot.activeLeases,
+      next_available_at: delayed ? snapshot.nextAvailableAt : null,
+      last_error_category: snapshot.lastErrorCategory,
+      disabled_reason: !snapshot.enabled ? snapshot.lastErrorMessage : null,
+      usage: snapshot.usage,
+      quota: this.quotaGuard.getQuota(entry.key),
+      quota_blocked: snapshot.quotaBlocked,
+      quota_reason: snapshot.quotaReason,
+    };
   }
 
   private getRuntimeState(key: string): RuntimeState {
@@ -525,4 +784,9 @@ function randomBetween(min: number, max: number): number {
 
 function minNullable(a: number | null, b: number): number {
   return a == null ? b : Math.min(a, b);
+}
+
+function normalizeLeaseTtl(value: number | undefined): number {
+  if (value == null) return LEASE_MAX_AGE_MS;
+  return Number.isFinite(value) && value > 0 ? Math.max(1, Math.trunc(value)) : LEASE_MAX_AGE_MS;
 }

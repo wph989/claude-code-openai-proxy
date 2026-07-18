@@ -14,6 +14,33 @@ export async function registerAdminConfigRoutes(app: FastifyInstance): Promise<v
     return app.runtimeConfigManager.adminView();
   });
 
+  app.get('/api/config/history', api, async (request, reply) => {
+    const rawLimit = Number((request.query as { limit?: unknown }).limit ?? 20);
+    const limit = Number.isSafeInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 50) : 20;
+    const history = await app.runtimeConfigManager.listConfigHistory(limit);
+    setRevisionHeaders(app, reply);
+    return { revision: app.runtimeConfigManager.getRevision(), history };
+  });
+
+  app.post('/api/config/history/:revision/rollback', api, async (request, reply) => {
+    const expectedRevision = parseConfigRevision(request.headers['if-match']);
+    const targetRevision = Number((request.params as { revision: string }).revision);
+    if (!Number.isSafeInteger(targetRevision) || targetRevision <= 0) {
+      throw new AdminError('历史 revision 必须是正整数。');
+    }
+    await app.runtimeConfigManager.rollbackConfig(targetRevision, expectedRevision);
+    app.adminEventStream.configChanged({
+      scope: 'config',
+      action: 'rolled_back',
+      revision: app.runtimeConfigManager.getRevision(),
+    });
+    setRevisionHeaders(app, reply);
+    return {
+      message: `已基于 revision ${targetRevision} 创建新的配置版本。`,
+      ...app.runtimeConfigManager.adminView(),
+    };
+  });
+
   app.post('/api/config/preview', api, async (request, reply) => {
     const expectedRevision = parseConfigRevision(request.headers['if-match']);
     const preview = app.runtimeConfigManager.previewAdminConfig(request.body || {}, expectedRevision);

@@ -1,4 +1,11 @@
 import type { KeyQuotaConfig, KeyUsage } from '../models.js';
+import {
+  addUsageDelta,
+  emptyUsage,
+  evaluateUsageQuota,
+  normalizeUsage,
+  type KeyUsageDelta,
+} from './usage-budget.js';
 
 interface State {
   usage: KeyUsage;
@@ -17,14 +24,16 @@ export class QuotaGuard {
 
   hydrate(key: string, usage: KeyUsage): void {
     const s = this.ensure(key);
-    s.usage = { ...usage };
+    s.usage = normalizeUsage(usage);
     this.evaluate(key);
   }
 
-  recordUsage(key: string, requests: number, tokens: number): void {
+  recordUsage(key: string, deltaOrRequests: KeyUsageDelta | number, tokens = 0): void {
     const s = this.ensure(key);
-    s.usage.requests_used += requests;
-    s.usage.tokens_used += tokens;
+    const delta = typeof deltaOrRequests === 'number'
+      ? { requests: deltaOrRequests, tokens }
+      : deltaOrRequests;
+    s.usage = addUsageDelta(s.usage, delta, s.quota);
     this.evaluate(key);
   }
 
@@ -38,7 +47,7 @@ export class QuotaGuard {
 
   getRatio(key: string): number {
     const s = this.states.get(key);
-    return s ? this.ratio(s) : 0;
+    return s ? evaluateUsageQuota(s.usage, s.quota).ratio : 0;
   }
 
   getUsage(key: string): KeyUsage {
@@ -52,40 +61,21 @@ export class QuotaGuard {
 
   reset(key: string): void {
     const s = this.ensure(key);
-    s.usage = { requests_used: 0, tokens_used: 0 };
+    s.usage = emptyUsage(s.quota);
     s.lastReason = null;
   }
 
   private ensure(key: string): State {
     let s = this.states.get(key);
     if (!s) {
-      s = { usage: { requests_used: 0, tokens_used: 0 }, quota: null, lastReason: null };
+      s = { usage: emptyUsage(), quota: null, lastReason: null };
       this.states.set(key, s);
     }
     return s;
   }
 
-  private ratio(s: State): number {
-    if (!s.quota) return 0;
-    const reqRatio = s.quota.max_requests != null && s.quota.max_requests > 0
-      ? s.usage.requests_used / s.quota.max_requests : 0;
-    const tokRatio = s.quota.max_tokens != null && s.quota.max_tokens > 0
-      ? s.usage.tokens_used / s.quota.max_tokens : 0;
-    return Math.max(reqRatio, tokRatio);
-  }
-
   private evaluate(key: string): void {
     const s = this.ensure(key);
-    if (!s.quota) { s.lastReason = null; return; }
-    const t = s.quota.soft_stop_threshold ?? 0.95;
-    if (s.quota.max_requests != null && s.usage.requests_used >= s.quota.max_requests * t) {
-      s.lastReason = '本地请求配额接近上限';
-      return;
-    }
-    if (s.quota.max_tokens != null && s.usage.tokens_used >= s.quota.max_tokens * t) {
-      s.lastReason = '本地 token 配额接近上限';
-      return;
-    }
-    s.lastReason = null;
+    s.lastReason = evaluateUsageQuota(s.usage, s.quota).reason;
   }
 }

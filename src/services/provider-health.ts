@@ -1,19 +1,14 @@
 import type { CircuitBreakerConfig } from '../types/runtime-config.js';
+import type {
+  ProviderCircuitCoordinator,
+  ProviderCircuitLease,
+  ProviderCircuitPolicy,
+  ProviderCircuitSnapshot,
+} from './provider-circuit-coordinator.js';
+
+export type { ProviderCircuitLease, ProviderCircuitSnapshot } from './provider-circuit-coordinator.js';
 
 export type ProviderFailureKind = 'network' | 'server';
-
-export interface ProviderCircuitLease {
-  providerId: string;
-  probe: boolean;
-  generation: number;
-  leaseId: number;
-}
-
-export interface ProviderCircuitSnapshot {
-  state: 'closed' | 'open' | 'half_open';
-  consecutiveFailures: number;
-  openUntil: number | null;
-}
 
 interface ProviderCircuitState {
   enabled: boolean;
@@ -27,17 +22,40 @@ interface ProviderCircuitState {
 
 const DEFAULT_FAILURE_THRESHOLD = 3;
 const DEFAULT_RECOVERY_MS = 30_000;
+const DEFAULT_PROBE_LEASE_TTL_MS = 10 * 60 * 1000;
+
+export interface ProviderHealthRegistryOptions {
+  probeLeaseTtlMs?: number;
+  onOpened?: (providerId: string, snapshot: ProviderCircuitSnapshot) => void;
+}
 
 /**
- * Provider 级熔断状态只保留在当前进程内；它描述的是短期链路健康度，
- * 不应写入用户配置或跨重启继承，避免旧故障阻塞刚恢复的 Provider。
+ * 默认使用进程内短期状态；注入事务协调器后，所有 Worker 共享熔断代际和半开探测权。
  */
 export class ProviderHealthRegistry {
   private readonly states = new Map<string, ProviderCircuitState>();
   private nextLeaseId = 0;
 
+  constructor(
+    private readonly coordinator?: ProviderCircuitCoordinator,
+    private readonly options: ProviderHealthRegistryOptions = {},
+  ) {}
+
   configure(providerId: string, config?: CircuitBreakerConfig | null): void {
     const state = this.getOrCreate(providerId);
+    if (this.coordinator) {
+      const enabled = config !== null;
+      const failureThreshold = normalizeThreshold(config?.failure_threshold);
+      const recoveryMs = normalizeRecoveryMs(config?.recovery_seconds);
+      const changed = state.enabled !== enabled
+        || state.failureThreshold !== failureThreshold
+        || state.recoveryMs !== recoveryMs;
+      state.enabled = enabled;
+      state.failureThreshold = failureThreshold;
+      state.recoveryMs = recoveryMs;
+      if (changed) this.coordinator.configure(providerId, this.policy(state), Date.now());
+      return;
+    }
     if (config === null) {
       // 切换开关时递增代际，使关闭前已经发出的请求不能再修改重新启用后的状态。
       state.generation += 1;
@@ -60,6 +78,7 @@ export class ProviderHealthRegistry {
 
   isAvailable(providerId: string, now = Date.now()): boolean {
     const state = this.getOrCreate(providerId);
+    if (this.coordinator) return this.coordinator.isAvailable(providerId, this.policy(state), now);
     if (!state.enabled || state.openUntil === 0) return true;
     if (now < state.openUntil) return false;
     // 冷却结束后，只有一个请求可以进入半开；其他请求必须继续等待下一次结果。
@@ -68,6 +87,14 @@ export class ProviderHealthRegistry {
 
   acquire(providerId: string, now = Date.now()): ProviderCircuitLease | null {
     const state = this.getOrCreate(providerId);
+    if (this.coordinator) {
+      return this.coordinator.acquire(
+        providerId,
+        this.policy(state),
+        now,
+        normalizeProbeLeaseTtl(this.options.probeLeaseTtlMs),
+      );
+    }
     const leaseId = ++this.nextLeaseId;
     if (!state.enabled || state.openUntil === 0) {
       return { providerId, probe: false, generation: state.generation, leaseId };
@@ -77,8 +104,12 @@ export class ProviderHealthRegistry {
     return { providerId, probe: true, generation: state.generation, leaseId };
   }
 
-  recordSuccess(providerId: string, lease?: ProviderCircuitLease): void {
+  recordSuccess(providerId: string, lease?: ProviderCircuitLease, now = Date.now()): void {
     const state = this.getOrCreate(providerId);
+    if (this.coordinator) {
+      this.coordinator.recordSuccess(providerId, this.policy(state), lease, now);
+      return;
+    }
     if (!state.enabled) return;
     if (lease && !this.isCurrentLease(providerId, state, lease)) return;
     if (lease?.probe && state.probeLeaseId !== lease.leaseId) return;
@@ -96,6 +127,11 @@ export class ProviderHealthRegistry {
     now = Date.now(),
   ): void {
     const state = this.getOrCreate(providerId);
+    if (this.coordinator) {
+      this.coordinator.recordFailure(providerId, this.policy(state), lease, now);
+      this.notifyIfOpened(providerId, now);
+      return;
+    }
     if (!state.enabled) return;
     if (lease && !this.isCurrentLease(providerId, state, lease)) return;
     if (lease?.probe && state.probeLeaseId !== lease.leaseId) return;
@@ -107,22 +143,29 @@ export class ProviderHealthRegistry {
       // 熔断打开后，忽略同一批并发请求稍后到达的结果，避免旧成功误关刚打开的熔断。
       state.generation += 1;
     }
+    this.notifyIfOpened(providerId, now);
   }
 
-  release(providerId: string, lease?: ProviderCircuitLease): void {
+  release(providerId: string, lease?: ProviderCircuitLease, now = Date.now()): void {
     if (!lease?.probe) return;
     const state = this.getOrCreate(providerId);
+    if (this.coordinator) {
+      this.coordinator.release(providerId, this.policy(state), lease, now);
+      return;
+    }
     if (!this.isCurrentLease(providerId, state, lease)) return;
     if (state.probeLeaseId === lease.leaseId) state.probeLeaseId = null;
   }
 
   isOpen(providerId: string, now = Date.now()): boolean {
     const state = this.getOrCreate(providerId);
+    if (this.coordinator) return this.coordinator.snapshot(providerId, this.policy(state), now).state === 'open';
     return state.enabled && state.openUntil > now;
   }
 
   snapshot(providerId: string, now = Date.now()): ProviderCircuitSnapshot {
     const state = this.getOrCreate(providerId);
+    if (this.coordinator) return this.coordinator.snapshot(providerId, this.policy(state), now);
     if (!state.enabled || state.openUntil === 0) {
       return { state: 'closed', consecutiveFailures: state.consecutiveFailures, openUntil: null };
     }
@@ -156,6 +199,20 @@ export class ProviderHealthRegistry {
   private isCurrentLease(providerId: string, state: ProviderCircuitState, lease: ProviderCircuitLease): boolean {
     return lease.providerId === providerId && lease.generation === state.generation;
   }
+
+  private policy(state: ProviderCircuitState): ProviderCircuitPolicy {
+    return {
+      enabled: state.enabled,
+      failureThreshold: state.failureThreshold,
+      recoveryMs: state.recoveryMs,
+    };
+  }
+
+  private notifyIfOpened(providerId: string, now: number): void {
+    if (!this.options.onOpened) return;
+    const snapshot = this.snapshot(providerId, now);
+    if (snapshot.state === 'open') this.options.onOpened(providerId, snapshot);
+  }
 }
 
 function normalizeThreshold(value: number | undefined): number {
@@ -168,4 +225,11 @@ function normalizeRecoveryMs(value: number | undefined): number {
   return Number.isFinite(value) && Number(value) >= 1
     ? Math.min(3600, Math.trunc(Number(value))) * 1000
     : DEFAULT_RECOVERY_MS;
+}
+
+function normalizeProbeLeaseTtl(value: number | undefined): number {
+  if (value == null) return DEFAULT_PROBE_LEASE_TTL_MS;
+  return Number.isFinite(value) && value > 0
+    ? Math.max(1, Math.trunc(value))
+    : DEFAULT_PROBE_LEASE_TTL_MS;
 }

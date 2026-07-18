@@ -17,6 +17,30 @@ export function resolveUserConfigFile(configRoot: string, isProdMode: boolean): 
   return join(configRoot, isProdMode ? 'config.json' : 'runtime_models.json');
 }
 
+export type StorageBackend = 'json' | 'sqlite';
+
+export function resolveStorageBackend(raw: string | undefined): StorageBackend {
+  const normalized = raw?.trim().toLowerCase();
+  if (!normalized || normalized === 'json') return 'json';
+  if (normalized === 'sqlite') return 'sqlite';
+  throw new Error(`STORAGE_BACKEND 仅支持 json 或 sqlite，当前值为：${raw}`);
+}
+
+export function resolveAlertWebhookUrl(raw: string | undefined): string | null {
+  const value = raw?.trim();
+  if (!value) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('ALERT_WEBHOOK_URL 必须是有效的 HTTP(S) URL。');
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new Error('ALERT_WEBHOOK_URL 仅支持 HTTP(S) URL。');
+  }
+  return url.toString();
+}
+
 export function generateAdminAuthToken(): string {
   // 首次生产安装不能使用固定默认口令；随机值写入 .env，用户可自行修改。
   return `ccop_${randomBytes(24).toString('base64url')}`;
@@ -113,6 +137,10 @@ PORT=8765
 # 配置文件路径（指向运行时配置 JSON）
 CONFIG_FILE=${USER_CONFIG_FILE}
 
+# 持久化后端；多 Worker 必须使用 sqlite（要求 Node.js 22.5+）
+STORAGE_BACKEND=json
+SQLITE_FILE=${join(USER_CONFIG_DIR, 'runtime.db')}
+
 # 管理后台密码（首次运行随机生成，修改后需重启生效）
 ADMIN_AUTH_TOKEN=${adminAuthToken}
 
@@ -120,6 +148,11 @@ ADMIN_AUTH_TOKEN=${adminAuthToken}
 LOG_LEVEL=info
 LOG_FORMAT=json
 LOG_DETAILED=false
+
+# 可选 Webhook 告警；地址可能包含签名参数，程序不会在管理 API 或日志中回显
+ALERT_WEBHOOK_URL=
+ALERT_BUDGET_THRESHOLD=0.85
+ALERT_COOLDOWN_SECONDS=300
 
 # API Key 错误自动禁用（累计错误达到 KEY_MAX_ERRORS 次后自动禁用，true=启用，false=禁用此功能）
 # 部分供应商不稳定时可设为 false，或在 config.json 的 provider 中设置 auto_disable_on_error: false
@@ -134,7 +167,7 @@ KEEP_ALIVE_TIMEOUT=60000
 RATE_LIMIT_MAX=100
 RATE_LIMIT_TIME_WINDOW=60000
 
-# 本地 JSON 状态只支持单 Worker；多 Worker 需先接入集中式状态存储
+# JSON 只支持单 Worker；SQLite 可配置多个 Worker
 CLUSTER_WORKERS=1
 `;
     writeFileSync(USER_ENV_FILE, defaultEnv, 'utf-8');
@@ -171,6 +204,8 @@ export interface AppSettings {
   adminCookieName: string;
   adminCookieMaxAgeSeconds: number;
   configFile: string;
+  storageBackend: StorageBackend;
+  sqliteFile: string;
   requestTimeoutMs: number;
   streamIdleTimeoutMs: number;
   maxRequestBodyChars: number;
@@ -190,6 +225,9 @@ export interface AppSettings {
   clusterWorkers: number;
   keyMaxErrors: number;
   keyAutoDisable: boolean;
+  alertWebhookUrl: string | null;
+  alertBudgetThreshold: number;
+  alertCooldownMs: number;
 }
 
 function toNumber(raw: string | undefined, fallback: number): number {
@@ -216,6 +254,11 @@ const toBoolean = (raw: string | undefined, fallback: boolean): boolean => {
   return fallback;
 };
 
+const toRatio = (raw: string | undefined, fallback: number): number => {
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 && value <= 1 ? value : fallback;
+};
+
 // 配置文件路径（优先环境变量，否则按模式选择）
 // 相对路径会基于 CONFIG_ROOT 解析，确保无论从哪里启动都能找到配置文件
 const configFilePath = (() => {
@@ -227,6 +270,12 @@ const configFilePath = (() => {
   return isAbsolute(envPath) ? envPath : join(CONFIG_ROOT, envPath);
 })();
 
+const sqliteFilePath = (() => {
+  const envPath = process.env.SQLITE_FILE?.trim();
+  if (!envPath) return join(CONFIG_ROOT, 'runtime.db');
+  return isAbsolute(envPath) ? envPath : join(CONFIG_ROOT, envPath);
+})();
+
 export const settings: AppSettings = {
   host: process.env.HOST?.trim() || '0.0.0.0',
   port: toNumber(process.env.PORT, 8765),
@@ -235,6 +284,8 @@ export const settings: AppSettings = {
   adminCookieName: 'ccgp_admin_session',
   adminCookieMaxAgeSeconds: 60 * 60 * 12,
   configFile: configFilePath,
+  storageBackend: resolveStorageBackend(process.env.STORAGE_BACKEND),
+  sqliteFile: sqliteFilePath,
   requestTimeoutMs: toNumber(process.env.REQUEST_TIMEOUT_MS, 300000),
   streamIdleTimeoutMs: toNumber(process.env.REQUEST_STREAM_IDLE_TIMEOUT_MS, 120000),
   maxRequestBodyChars: toNumber(process.env.MAX_REQUEST_BODY_CHARS, 4000),
@@ -260,5 +311,8 @@ export const settings: AppSettings = {
   rateLimitTimeWindow: toNumber(process.env.RATE_LIMIT_TIME_WINDOW, 60000),
   clusterWorkers: (() => { const v = Number(process.env.CLUSTER_WORKERS); return Number.isFinite(v) && v > 0 ? v : 1; })(),
   keyMaxErrors: toNumber(process.env.KEY_MAX_ERRORS, 5),
-  keyAutoDisable: toBoolean(process.env.KEY_AUTO_DISABLE, true)
+  keyAutoDisable: toBoolean(process.env.KEY_AUTO_DISABLE, true),
+  alertWebhookUrl: resolveAlertWebhookUrl(process.env.ALERT_WEBHOOK_URL),
+  alertBudgetThreshold: toRatio(process.env.ALERT_BUDGET_THRESHOLD, 0.85),
+  alertCooldownMs: toNumber(process.env.ALERT_COOLDOWN_SECONDS, 300) * 1000,
 };

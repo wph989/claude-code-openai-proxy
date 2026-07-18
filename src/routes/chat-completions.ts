@@ -80,9 +80,14 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
         });
       }
       const data = await safeJson(upstreamResponse);
-      releaseUpstreamResponse(upstreamResponse, { requests: 1, tokens: extractOpenAIUsageTokens(data.usage) });
       const inputTokens = isPlainObject(data.usage) ? toInt(data.usage.prompt_tokens) : 0;
       const outputTokens = isPlainObject(data.usage) ? toInt(data.usage.completion_tokens) : 0;
+      releaseUpstreamResponse(upstreamResponse, {
+        requests: 1,
+        tokens: extractOpenAIUsageTokens(data.usage),
+        inputTokens,
+        outputTokens,
+      });
       app.metricsRegistry.recordTokens(provider.provider_type, 'input', inputTokens);
       app.metricsRegistry.recordTokens(provider.provider_type, 'output', outputTokens);
       if (data.model) data.model = modelName;
@@ -180,6 +185,8 @@ export async function pipeOpenAISse(params: {
     releaseUpstreamResponse(upstreamResponse, {
       requests: 1,
       tokens: usage.inputTokens + usage.outputTokens,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
     });
     log('info', 'OpenAI 流式透传完成', {
       provider_id: providerId,

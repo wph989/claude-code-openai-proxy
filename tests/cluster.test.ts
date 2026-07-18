@@ -9,6 +9,10 @@ describe('集群安全限制', () => {
   });
 
   it('拒绝会破坏本地状态一致性的多 Worker', () => {
-    expect(() => assertClusterWorkerCount(2)).toThrow('不支持多 Worker 集群');
+    expect(() => assertClusterWorkerCount(2)).toThrow('JSON 状态存储不支持多 Worker 集群');
+  });
+
+  it('SQLite 事务运行态允许多个 Worker', () => {
+    expect(() => assertClusterWorkerCount(2, 'sqlite')).not.toThrow();
   });
 });

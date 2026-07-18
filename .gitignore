@@ -19,6 +19,10 @@ coverage
 runtime_models.json
 runtime_usage.json
 runtime_state.json
+runtime_history.json
+runtime.db
+runtime.db-shm
+runtime.db-wal
 *.log
 logs/
 

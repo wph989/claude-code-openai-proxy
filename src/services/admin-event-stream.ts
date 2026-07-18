@@ -127,6 +127,8 @@ export class AdminEventStream implements RuntimeConfigObserver {
       tokens_used: event.tokensUsed,
       usage_ratio: Number.isFinite(event.ratio) ? Number(event.ratio.toFixed(4)) : 0,
       blocked: event.blocked,
+      cost_usd: Number.isFinite(event.costUsd) ? Number(event.costUsd.toFixed(6)) : 0,
+      reason: cleanOptionalText(event.reason ?? undefined),
       revision: event.revision,
     });
   }

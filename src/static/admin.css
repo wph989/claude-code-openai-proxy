@@ -593,6 +593,16 @@ input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--accent);
   background: var(--bg-input); color: var(--text-muted); border-radius: 4px;
 }
 .change-preview-list { margin: 0; padding-left: 20px; line-height: 1.8; }
+.history-section { margin-top: 32px; }
+.section-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.section-heading-row h2 { margin: 0; font-size: 18px; font-weight: 600; }
+.history-table-wrap { border: 1px solid var(--border); }
+.history-table { min-width: 780px; table-layout: fixed; }
+.history-table th:nth-child(1), .history-table td:nth-child(1) { width: 90px; }
+.history-table th:nth-child(2), .history-table td:nth-child(2) { width: 180px; }
+.history-table th:nth-child(3), .history-table td:nth-child(3) { width: 190px; }
+.history-table th:nth-child(5), .history-table td:nth-child(5) { width: 90px; }
+.history-impact { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); }
 .token-controls { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto; gap: 8px; }
 
 /* ── Empty state ── */

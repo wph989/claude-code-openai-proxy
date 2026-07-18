@@ -257,11 +257,22 @@ function normalizeKeyQuota(value: unknown): KeyQuotaConfig | null | undefined {
   if (!isPlainObject(value)) return undefined;
   const maxReq = normalizeOptionalNumber(value.max_requests);
   const maxTok = normalizeOptionalNumber(value.max_tokens);
-  if (maxReq == null && maxTok == null && value.soft_stop_threshold == null) return undefined;
+  const maxCost = normalizeOptionalNumber(value.max_cost_usd);
+  const inputCost = normalizeOptionalNumber(value.input_cost_per_million);
+  const outputCost = normalizeOptionalNumber(value.output_cost_per_million);
+  if (maxReq == null
+    && maxTok == null
+    && maxCost == null
+    && inputCost == null
+    && outputCost == null
+    && value.soft_stop_threshold == null) return undefined;
   const result: KeyQuotaConfig = {
     max_requests: maxReq,
     max_tokens: maxTok
   };
+  if (maxCost != null) result.max_cost_usd = maxCost;
+  if (inputCost != null) result.input_cost_per_million = inputCost;
+  if (outputCost != null) result.output_cost_per_million = outputCost;
   const threshold = Number(value.soft_stop_threshold);
   if (Number.isFinite(threshold) && threshold > 0 && threshold <= 1) {
     result.soft_stop_threshold = threshold;

@@ -1,5 +1,6 @@
 import type { KeyErrorCategory } from './api-key-rotator.js';
 import type { KeyQuotaConfig, KeyUsage } from '../types/runtime-config.js';
+import type { KeyUsageDelta } from './usage-budget.js';
 
 export interface SharedKeyCandidate {
   compositeKey: string;
@@ -62,7 +63,7 @@ export interface KeyRuntimeCoordinator {
   markSuccess(candidate: SharedKeyCandidate, now: number): SharedKeySnapshot;
   setEnabled(candidate: SharedKeyCandidate, enabled: boolean, now: number, reason?: string): SharedKeySnapshot;
   reset(candidate: SharedKeyCandidate, now: number): SharedKeySnapshot;
-  recordUsage(candidate: SharedKeyCandidate, requests: number, tokens: number, now: number): SharedKeySnapshot;
+  recordUsage(candidate: SharedKeyCandidate, delta: KeyUsageDelta, now: number): SharedKeySnapshot;
   resetUsage(candidate: SharedKeyCandidate, now: number): SharedKeySnapshot;
   snapshot(candidate: SharedKeyCandidate, now: number): SharedKeySnapshot;
 }

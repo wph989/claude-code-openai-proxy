@@ -6,6 +6,7 @@ import {
   hasExplicitDevMode,
   logGeneratedAdminAuthToken,
   resolveAdminAuthToken,
+  resolveStorageBackend,
   resolveUserConfigFile
 } from '../src/config.js';
 
@@ -23,6 +24,12 @@ describe('配置模式判断', () => {
     const root = path.resolve('ccop-root');
     expect(resolveUserConfigFile(root, true)).toBe(path.join(root, 'config.json'));
     expect(resolveUserConfigFile(root, false)).toBe(path.join(root, 'runtime_models.json'));
+  });
+
+  it('存储后端只接受 json 或 sqlite', () => {
+    expect(resolveStorageBackend(undefined)).toBe('json');
+    expect(resolveStorageBackend(' SQLite ')).toBe('sqlite');
+    expect(() => resolveStorageBackend('redis')).toThrow('仅支持 json 或 sqlite');
   });
 
   it('生产默认管理口令使用随机格式而不是固定弱口令', () => {

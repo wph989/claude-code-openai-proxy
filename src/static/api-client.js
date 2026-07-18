@@ -50,6 +50,11 @@ export const AdminApi = {
   session: () => request('/api/admin/session'),
   logout: () => request('/api/admin/logout', { method: 'POST' }),
   loadConfig: () => request('/api/config'),
+  loadConfigHistory: (limit = 20) => request(`/api/config/history?limit=${encodeURIComponent(limit)}`),
+  rollbackConfig: (targetRevision, revision) => request(
+    `/api/config/history/${encodeURIComponent(targetRevision)}/rollback`,
+    { method: 'POST', ifMatch: revision },
+  ),
   previewConfig: (config, revision, signal) => request('/api/config/preview', {
     method: 'POST', body: config, ifMatch: revision, signal,
   }),

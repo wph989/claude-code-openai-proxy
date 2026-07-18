@@ -1,8 +1,10 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
-import { settings } from './config.js';
+import { settings, type StorageBackend } from './config.js';
 import { RuntimeConfigManager } from './services/runtime-config.js';
+import { createConfigRepository } from './services/config/repository-factory.js';
+import type { ConfigRepository } from './services/config/repository.js';
 import { UpstreamService } from './services/upstream.js';
 import { MetricsRegistry } from './services/metrics.js';
 import { AdminEventStream } from './services/admin-event-stream.js';
@@ -16,6 +18,7 @@ import { createId } from './utils/id.js';
 import { getDefaultLogger, type Logger } from './utils/logger.js';
 import { AuthError } from './auth.js';
 import { ClientInputError, ConfigConflictError, ConfigPreconditionError } from './errors.js';
+import { WebhookAlertService, type AlertSink } from './services/alerts.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -26,6 +29,7 @@ declare module 'fastify' {
     adminEventStream: AdminEventStream;
     providerConnectivity: ProviderConnectivityService;
     providerHealth: ProviderHealthRegistry;
+    alertSink: AlertSink & { flush?: () => Promise<void> };
   }
   interface FastifyRequest {
     requestId: string;
@@ -42,6 +46,10 @@ export interface CreateAppDependencies {
   adminEvents?: AdminEventStream;
   providerConnectivity?: ProviderConnectivityService;
   providerHealth?: ProviderHealthRegistry;
+  configRepository?: ConfigRepository;
+  storageBackend?: StorageBackend;
+  sqlitePath?: string;
+  alertSink?: AlertSink & { flush?: () => Promise<void> };
 }
 
 export async function createApp(
@@ -52,7 +60,6 @@ export async function createApp(
   const metricsRegistry = dependencies.metrics ?? new MetricsRegistry();
   const adminEventStream = dependencies.adminEvents ?? new AdminEventStream();
   const providerConnectivity = dependencies.providerConnectivity ?? new ProviderConnectivityService();
-  const providerHealth = dependencies.providerHealth ?? new ProviderHealthRegistry();
   appLogger.configure(settings);
   const app = Fastify({
     logger: false,
@@ -73,15 +80,34 @@ export async function createApp(
     })
   });
 
-  const runtimeConfigManager = new RuntimeConfigManager(configPath);
+  const configRepository = dependencies.configRepository ?? await createConfigRepository({
+    storage: dependencies.storageBackend ?? settings.storageBackend,
+    configPath,
+    sqlitePath: dependencies.sqlitePath ?? settings.sqliteFile,
+  });
+  const alertSink = dependencies.alertSink ?? new WebhookAlertService({
+    url: settings.alertWebhookUrl,
+    budgetThreshold: settings.alertBudgetThreshold,
+    cooldownMs: settings.alertCooldownMs,
+    logger: appLogger,
+  });
+  const providerHealth = dependencies.providerHealth ?? new ProviderHealthRegistry(
+    configRepository.createProviderCircuitCoordinator?.(),
+    {
+      onOpened: (providerId, snapshot) => alertSink.providerCircuitOpened(providerId, snapshot),
+    },
+  );
+  const runtimeConfigManager = new RuntimeConfigManager(configRepository);
   runtimeConfigManager.setObserver(adminEventStream);
   runtimeConfigManager.setProviderHealth(providerHealth);
+  runtimeConfigManager.setAlertSink(alertSink);
   app.decorate('runtimeConfigManager', runtimeConfigManager);
   app.decorate('appLogger', appLogger);
   app.decorate('metricsRegistry', metricsRegistry);
   app.decorate('adminEventStream', adminEventStream);
   app.decorate('providerConnectivity', providerConnectivity);
   app.decorate('providerHealth', providerHealth);
+  app.decorate('alertSink', alertSink);
   app.decorate('upstreamService', new UpstreamService(appLogger, metricsRegistry, providerHealth));
 
   await app.runtimeConfigManager.init();
@@ -93,6 +119,8 @@ export async function createApp(
     request.requestId = createId('req');
     const sessionHeader = request.headers['x-claude-code-session-id'];
     request.sessionId = typeof sessionHeader === 'string' && sessionHeader.trim() ? sessionHeader.trim() : createId('session');
+    // SQLite Worker 只读取 revision，检测到前进后才重载，保证请求不会长期使用旧路由配置。
+    await app.runtimeConfigManager.refreshIfStale();
   });
 
   app.addHook('onSend', async (request, _reply, payload) => {
@@ -163,13 +191,25 @@ export async function createApp(
   return app;
 }
 
-export async function startServer(options: { host: string; port: number; configPath?: string }): Promise<void> {
-  const app = await createApp(options.configPath || settings.configFile);
+export interface StartServerOptions {
+  host: string;
+  port: number;
+  configPath?: string;
+  storageBackend?: StorageBackend;
+  sqlitePath?: string;
+}
+
+export async function startServer(options: StartServerOptions): Promise<void> {
+  const app = await createApp(options.configPath || settings.configFile, {
+    storageBackend: options.storageBackend,
+    sqlitePath: options.sqlitePath,
+  });
   await app.listen({ host: options.host, port: options.port });
   app.appLogger.log('info', '服务启动成功', {
     host: options.host,
     port: options.port,
-    config_file: options.configPath || settings.configFile
+    config_file: options.configPath || settings.configFile,
+    storage_backend: options.storageBackend ?? settings.storageBackend,
   });
 
   // 使用同步退出防止日志丢失：先 close server，再 flush 日志，再 exit
@@ -189,6 +229,7 @@ export async function startServer(options: { host: string; port: number; configP
     } catch {
       // ignore
     }
+    await app.alertSink.flush?.();
     await app.appLogger.flush();
     process.exit(0);
   };

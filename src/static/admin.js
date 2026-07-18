@@ -5,7 +5,7 @@ import { collectProviderForm, providerFormHtml } from './forms/provider-form.js'
 import { collectModelForm, modelFormHtml } from './forms/model-form.js';
 import { readQuotaInputs } from './forms/shared.js';
 import { renderPagination, renderTableHead } from './components/data-table.js';
-import { renderChangePreview, renderSummary } from './views/summary-view.js';
+import { renderChangePreview, renderConfigHistory, renderSummary } from './views/summary-view.js';
 import { renderModelRow, renderProviderRow } from './views/resource-rows.js';
 import { renderKeyPanelHtml } from './views/key-panel.js';
 import { renderActivityView } from './views/activity-view.js';
@@ -38,6 +38,8 @@ const $ = (sel) => document.querySelector(sel);
 const statusBox = $('#status');
 const summaryWrap = $('#summary');
 const preview = $('#configChangePreview');
+const configHistory = $('#configHistory');
+const refreshHistoryBtn = $('#refreshHistoryBtn');
 const defaultClientModel = $('#defaultClientModel');
 const proxyAuthTokenInput = $('#proxyAuthToken');
 const proxyTokenStatus = $('#proxyTokenStatus');
@@ -93,6 +95,9 @@ function openQuotaEditor(providerId, keyId, current, displayIndex) {
   const c = current || {};
   const reqVal = c.max_requests != null ? c.max_requests : '';
   const tokVal = c.max_tokens != null ? c.max_tokens : '';
+  const costVal = c.max_cost_usd != null ? c.max_cost_usd : '';
+  const inputCostVal = c.input_cost_per_million != null ? c.input_cost_per_million : '';
+  const outputCostVal = c.output_cost_per_million != null ? c.output_cost_per_million : '';
   const thrVal = c.soft_stop_threshold != null ? c.soft_stop_threshold : '';
   const html = `
     <p class="form-hint">本地软停用配额：达到 上限 × 软停阈值 时让 Key 自动离开候选池；用户配置 enabled 不变，调用 /reset 或重置配额后立即恢复。三项留空 = 清除配额。</p>
@@ -108,6 +113,18 @@ function openQuotaEditor(providerId, keyId, current, displayIndex) {
       <div class="form-group">
         <div class="form-label-row"><span class="form-label">软停阈值 (0,1]</span><span class="field-key">soft_stop_threshold</span></div>
         <input id="qf-threshold" type="number" min="0" max="1" step="0.01" value="${esc(thrVal)}" placeholder="0.95"/>
+      </div>
+      <div class="form-group">
+        <div class="form-label-row"><span class="form-label">费用上限</span><span class="field-key">max_cost_usd</span><span class="form-label-unit">USD</span></div>
+        <input id="qf-max-cost" type="number" min="0" step="0.000001" value="${esc(costVal)}" placeholder="留空 = 不限"/>
+      </div>
+      <div class="form-group">
+        <div class="form-label-row"><span class="form-label">输入单价</span><span class="field-key">input_cost_per_million</span><span class="form-label-unit">USD / 1M Token</span></div>
+        <input id="qf-input-cost" type="number" min="0" step="0.000001" value="${esc(inputCostVal)}" placeholder="例如 3"/>
+      </div>
+      <div class="form-group">
+        <div class="form-label-row"><span class="form-label">输出单价</span><span class="field-key">output_cost_per_million</span><span class="form-label-unit">USD / 1M Token</span></div>
+        <input id="qf-output-cost" type="number" min="0" step="0.000001" value="${esc(outputCostVal)}" placeholder="例如 15"/>
       </div>
     </div>`;
   Dialog.show(`编辑配额 — ${providerId} #${displayIndex + 1}`, html, [
@@ -246,11 +263,39 @@ async function loadConfig() {
     refreshDefaultModelSelect();
     renderTable();
     void updatePreviewNow();
+    void loadHistory();
     setStatus('配置已加载');
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     setStatus(`加载失败：${message}`, true);
     Toast.error(`加载失败：${message}`);
+  }
+}
+
+async function loadHistory() {
+  try {
+    const { data, revision } = await AdminApi.loadConfigHistory(20);
+    if (revision) state.revision = revision;
+    renderConfigHistory(configHistory, data.history || []);
+  } catch (error) {
+    configHistory.innerHTML = `<div class="empty-state">加载失败：${esc(error instanceof Error ? error.message : String(error))}</div>`;
+  }
+}
+
+async function rollbackHistory(targetRevision) {
+  try {
+    setStatus(`正在回滚到 revision ${targetRevision}...`);
+    const { data, revision } = await AdminApi.rollbackConfig(targetRevision, state.revision);
+    if (revision) state.revision = revision;
+    Toast.success(data.message || '配置已回滚');
+    await loadConfig();
+  } catch (error) {
+    if (error instanceof ApiClientError && error.status === 409) {
+      showConfigConflict(error.data);
+      return;
+    }
+    setStatus(`回滚失败：${error instanceof Error ? error.message : String(error)}`, true);
+    Toast.error(`回滚失败：${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -709,6 +754,11 @@ tableContainer.addEventListener('click', (e) => {
     return;
   }
 
+  if (target.classList.contains('provider-test-btn')) {
+    void testProvider(target.dataset.provider, target);
+    return;
+  }
+
   if (target.classList.contains('key-refresh-btn')) {
     renderKeyPanel(target.dataset.provider);
     return;
@@ -938,6 +988,21 @@ tabProviders.addEventListener('click', () => switchTab('providers'));
 tabModels.addEventListener('click', () => switchTab('models'));
 tabActivity.addEventListener('click', () => switchTab('activity'));
 $('#refreshBtn').addEventListener('click', loadConfig);
+refreshHistoryBtn.addEventListener('click', loadHistory);
+configHistory.addEventListener('click', (event) => {
+  const button = event.target.closest('.history-rollback-btn');
+  if (!button || button.disabled) return;
+  const targetRevision = Number(button.dataset.revision);
+  if (!Number.isSafeInteger(targetRevision) || targetRevision <= 0) return;
+  Dialog.confirm(
+    '确认回滚配置',
+    `基于 revision ${targetRevision} 创建新版本，并恢复当时的供应商、路由与凭证配置。`,
+    () => void rollbackHistory(targetRevision),
+    '确认回滚',
+    '取消',
+    'btn-danger',
+  );
+});
 $('#saveBtn').addEventListener('click', saveConfig);
 $('#logoutBtn').addEventListener('click', async () => {
   try {
@@ -956,10 +1021,6 @@ rotateProxyTokenBtn.addEventListener('click', async () => {
     return;
   }
 
-  if (target.classList.contains('provider-test-btn')) {
-    void testProvider(target.dataset.provider, target);
-    return;
-  }
   try {
     await updateProxyToken(token);
   } catch (error) {

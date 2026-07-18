@@ -6,6 +6,8 @@ import { resolveAntiBanConfig, type ResolvedAntiBan } from './anti-ban-config.js
 import type { KeyRuntimeRecord } from './key-state-store.js';
 import type { ConfigRepository, KeyStateRepository, UsageRepository } from './config/repository.js';
 import { JsonFileConfigRepository } from './config/json-file-repository.js';
+import type { KeyRuntimeCoordinator } from './key-runtime-coordinator.js';
+import { NOOP_ALERTS, type AlertSink } from './alerts.js';
 import { ProviderHealthRegistry } from './provider-health.js';
 import { RoutingPolicy, normalizeRoutePriority, normalizeRouteWeight } from './routing-policy.js';
 import {
@@ -13,6 +15,7 @@ import {
   buildConfigChangePreview,
   mergeAdminConfigUpdate,
   toAdminKeyView,
+  type AdminConfigChange,
   type AdminConfigChangePreview,
 } from './admin-config.js';
 import { nanoid } from '../utils/nanoid.js';
@@ -47,12 +50,23 @@ export interface RuntimeKeyUsageEvent {
   tokensUsed: number;
   ratio: number;
   blocked: boolean;
+  costUsd: number;
+  reason: string | null;
   revision: number;
 }
 
 export interface RuntimeConfigObserver {
   onKeyStateChanged?(event: RuntimeKeyStateEvent): void;
   onKeyUsageChanged?(event: RuntimeKeyUsageEvent): void;
+}
+
+export interface AdminConfigHistoryEntry {
+  revision: number;
+  created_at: number;
+  current: boolean;
+  summary: ReturnType<typeof summarizeRuntimeConfig>;
+  /** 从当前配置回到该版本会发生的字段级变化，不包含任何字段值。 */
+  rollback_changes: AdminConfigChange[];
 }
 
 /**
@@ -80,7 +94,11 @@ export class RuntimeConfigManager {
   private readonly routingPolicy: RoutingPolicy;
   private observer: RuntimeConfigObserver = {};
   private providerHealth: ProviderHealthRegistry | null = null;
+  private readonly keyRuntimeCoordinator: KeyRuntimeCoordinator | null;
+  private alertSink: AlertSink = NOOP_ALERTS;
   private initialized = false;
+  private mutationTail: Promise<void> = Promise.resolve();
+  private shutdownComplete = false;
 
   constructor(
     configPathOrRepository: string | ConfigRepository = settings.configFile,
@@ -89,6 +107,7 @@ export class RuntimeConfigManager {
     this.repository = typeof configPathOrRepository === 'string'
       ? new JsonFileConfigRepository(configPathOrRepository)
       : configPathOrRepository;
+    this.keyRuntimeCoordinator = this.repository.createKeyRuntimeCoordinator?.() ?? null;
     this.routingPolicy = new RoutingPolicy(randomSource);
   }
 
@@ -114,6 +133,10 @@ export class RuntimeConfigManager {
 
   setProviderHealth(providerHealth: ProviderHealthRegistry): void {
     this.providerHealth = providerHealth;
+  }
+
+  setAlertSink(alertSink: AlertSink): void {
+    this.alertSink = alertSink;
   }
 
   resolveProvider(providerId: string): ResolvedProvider {
@@ -152,6 +175,21 @@ export class RuntimeConfigManager {
   }
 
   async reload(): Promise<RuntimeConfig> {
+    return this.serializeMutation(() => this.reloadUnlocked());
+  }
+
+  /** SQLite Worker 在请求入口调用；只有 revision 前进时才重建内存视图。 */
+  async refreshIfStale(): Promise<boolean> {
+    if (!this.repository.supportsSharedRuntime || !this.repository.getConfigRevision) return false;
+    return this.serializeMutation(async () => {
+      const persistedRevision = await this.repository.getConfigRevision?.();
+      if (persistedRevision == null || persistedRevision <= this.getRevision()) return false;
+      await this.reloadUnlocked();
+      return true;
+    });
+  }
+
+  private async reloadUnlocked(): Promise<RuntimeConfig> {
     await this.flushRuntimeStores();
     const raw = await this.repository.loadConfig();
     const needsIdRewrite = detectMissingIds(raw);
@@ -168,7 +206,9 @@ export class RuntimeConfigManager {
 
     if (needsIdRewrite) {
       // 旧版 runtime_models.json 不含 id 字段：normalize 时已现场分配，立刻持久化干净版本。
-      await this.persistNow();
+      const baseRevision = this.getRevision();
+      this.touchRevision();
+      await this.persistNow(baseRevision);
     }
     return this.getConfig();
   }
@@ -189,6 +229,7 @@ export class RuntimeConfigManager {
         const composite = `${provider.provider_id}:${entry.id}`;
         const record = this.preloadedState[composite];
         if (!record) continue;
+        if (record.enabled !== undefined) entry.enabled = record.enabled;
         if (record.error_count != null) entry.error_count = record.error_count;
         if (record.disabled_at !== undefined) entry.disabled_at = record.disabled_at ?? null;
         if (record.last_error_at !== undefined) entry.last_error_at = record.last_error_at ?? null;
@@ -237,6 +278,9 @@ export class RuntimeConfigManager {
   }
 
   async shutdown(): Promise<void> {
+    if (this.shutdownComplete) return;
+    this.shutdownComplete = true;
+    await this.mutationTail;
     this.initialized = false;
     // 先停止自动恢复等后台回调，防止关闭期间又产生新的延迟写入；在途请求应由上层先关闭服务并等待完成。
     for (const rotator of this.rotators.values()) rotator.dispose();
@@ -245,7 +289,8 @@ export class RuntimeConfigManager {
       this.persistTimer = null;
     }
     // 自动恢复和错误状态使用 500ms 合并写入；正常关闭必须主动落盘，避免已恢复的 Key 重启后再次禁用。
-    await this.persistNow();
+    // SQLite 配置写入均已同步提交；关闭旧 Worker 时重写本地快照反而可能覆盖其他 Worker 的新 revision。
+    if (!this.repository.supportsSharedRuntime) await this.persistNow();
     if (this.usageStore) await this.usageStore.forceFlush();
     if (this.stateStore) await this.stateStore.forceFlush();
     await this.repository.close?.();
@@ -256,7 +301,12 @@ export class RuntimeConfigManager {
   }
 
   async saveConfig(raw: RuntimeConfig, expectedRevision?: number): Promise<RuntimeConfig> {
+    return this.serializeMutation(() => this.saveConfigUnlocked(raw, expectedRevision));
+  }
+
+  private async saveConfigUnlocked(raw: RuntimeConfig, expectedRevision?: number): Promise<RuntimeConfig> {
     if (expectedRevision !== undefined) this.assertRevision(expectedRevision);
+    const baseRevision = this.getRevision();
     await this.flushRuntimeStores();
     let validated: RuntimeConfig;
     try {
@@ -277,17 +327,16 @@ export class RuntimeConfigManager {
       await this.initUsageStore();
       this.rebuildRotators();
       await this.reconcileStores();
-      await this.persistNow();
+      await this.persistNow(baseRevision);
     } catch (error) {
       // 管理端已经收到保存失败时，内存不能继续运行未落盘配置，否则重启前后行为会不一致。
-      await this.restoreAfterFailedSave(previousConfig);
+      await this.recoverAfterFailedMutation(previousConfig, error);
       throw error;
     }
     return this.getConfig();
   }
 
   async saveAdminConfig(raw: unknown, expectedRevision: number): Promise<RuntimeConfig> {
-    this.assertRevision(expectedRevision);
     return this.saveConfig(mergeAdminConfigUpdate(this.config, raw), expectedRevision);
   }
 
@@ -303,21 +352,49 @@ export class RuntimeConfigManager {
     return buildConfigChangePreview(this.config, validated);
   }
 
-  async updateProxyAuthToken(token: string | null, expectedRevision: number): Promise<void> {
-    this.assertRevision(expectedRevision);
-    const previousToken = this.config.proxy_auth_token ?? null;
-    const previousRevision = this.getRevision();
-    this.config.proxy_auth_token = token;
-    this.touchRevision();
-    setRuntimeProxyToken(token);
-    try {
-      await this.persistNow();
-    } catch (error) {
-      this.config.proxy_auth_token = previousToken;
-      this.config.revision = previousRevision;
-      setRuntimeProxyToken(previousToken);
-      throw error;
+  async listConfigHistory(limit = 20): Promise<AdminConfigHistoryEntry[]> {
+    if (!this.repository.listConfigHistory) return [];
+    const records = await this.repository.listConfigHistory(limit);
+    return records.map((record) => ({
+      revision: record.revision,
+      created_at: record.createdAt,
+      current: record.revision === this.getRevision(),
+      summary: summarizeRuntimeConfig(record.config),
+      rollback_changes: buildConfigChangePreview(this.config, record.config).changes,
+    }));
+  }
+
+  async rollbackConfig(targetRevision: number, expectedRevision: number): Promise<RuntimeConfig> {
+    if (!this.repository.loadConfigHistory) {
+      throw new RuntimeConfigError('当前存储后端不支持配置历史。');
     }
+    return this.serializeConfigMutation(async (baseRevision) => {
+      this.assertRevision(expectedRevision);
+      const record = await this.repository.loadConfigHistory?.(targetRevision);
+      if (!record) throw new RuntimeConfigError(`未找到配置历史 revision=${targetRevision}。`);
+      const restored = validateRuntimeConfig({
+        ...structuredClone(record.config),
+        // 回滚是一次新写入，revision 必须继续单调递增，不能倒退到历史值。
+        revision: baseRevision + 1,
+      });
+      this.config = restored;
+      setRuntimeProxyToken(this.config.proxy_auth_token ?? null);
+      await this.initUsageStore();
+      this.rebuildRotators();
+      await this.reconcileStores();
+      await this.persistNow(baseRevision);
+      return this.getConfig();
+    });
+  }
+
+  async updateProxyAuthToken(token: string | null, expectedRevision: number): Promise<void> {
+    return this.serializeConfigMutation(async (baseRevision) => {
+      this.assertRevision(expectedRevision);
+      this.config.proxy_auth_token = token;
+      this.touchRevision();
+      setRuntimeProxyToken(token);
+      await this.persistNow(baseRevision);
+    });
   }
 
   summary() {
@@ -340,7 +417,9 @@ export class RuntimeConfigManager {
       summary: this.summary(),
       runtime_settings: {
         key_auto_disable: settings.keyAutoDisable,
-        key_max_errors: this.config.key_max_errors ?? settings.keyMaxErrors
+        key_max_errors: this.config.key_max_errors ?? settings.keyMaxErrors,
+        webhook_alerts_configured: Boolean(settings.alertWebhookUrl),
+        webhook_budget_threshold: settings.alertBudgetThreshold,
       },
       provider_options: this.config.providers.map((item) => ({
         provider_id: item.provider_id,
@@ -469,7 +548,19 @@ export class RuntimeConfigManager {
     // 运行时配置优先于环境变量；全局开关是总闸，供应商只能在总闸开启时进一步关闭自身自动禁用。
     const keyMaxErrors = this.config.key_max_errors ?? settings.keyMaxErrors;
     const effectiveAutoDisable = settings.keyAutoDisable && autoDisable;
-    const rotator = new ApiKeyRotator(keys, strategy, effectiveAutoDisable, antiBan, providerQuota, keyMaxErrors, provider?.auto_recover_minutes ?? 0);
+    const rotator = new ApiKeyRotator(
+      keys,
+      strategy,
+      effectiveAutoDisable,
+      antiBan,
+      providerQuota,
+      keyMaxErrors,
+      provider?.auto_recover_minutes ?? 0,
+      this.keyRuntimeCoordinator ? {
+        coordinator: this.keyRuntimeCoordinator,
+        providerId,
+      } : null,
+    );
     rotator.onChange = (key, patch) => this.onKeyStateChange(providerId, key, patch);
     this.attachUsageBridge(providerId, rotator);
     this.rotators.set(providerId, rotator);
@@ -502,22 +593,32 @@ export class RuntimeConfigManager {
     rotator.setUsageListener((key, usage, ratio) => {
       const id = idByKey.get(key);
       if (!id) return;
-      if (store) {
+      if (store && !this.repository.supportsSharedRuntime) {
         const composite = `${providerId}:${id}`;
         // preloadedUsage 是 rebuildRotators 的 hydrate 来源；写 store 时必须同步它，避免重置后旧快照回灌。
         this.preloadedUsage[composite] = { ...usage };
         store.update(composite, usage, ratio);
       }
       const snapshot = rotator.getQuotaSnapshot(key);
-      this.notifyObserver(() => this.observer.onKeyUsageChanged?.({
+      const event: RuntimeKeyUsageEvent = {
         providerId,
         keyId: id,
         requestsUsed: usage.requests_used,
         tokensUsed: usage.tokens_used,
         ratio,
         blocked: snapshot.blocked,
+        costUsd: usage.cost_usd ?? 0,
+        reason: snapshot.reason,
         revision: this.getRevision(),
-      }));
+      };
+      this.notifyObserver(() => this.observer.onKeyUsageChanged?.(event));
+      this.alertSink.keyBudget({
+        providerId,
+        usage,
+        ratio,
+        blocked: snapshot.blocked,
+        reason: snapshot.reason,
+      });
     });
   }
 
@@ -541,14 +642,14 @@ export class RuntimeConfigManager {
     if (patch.last_error_message !== undefined) runtimePatch.last_error_message = patch.last_error_message;
     if (patch.auto_disabled_at !== undefined) runtimePatch.auto_disabled_at = patch.auto_disabled_at;
 
-    if (Object.keys(runtimePatch).length > 0 && this.stateStore) {
+    if (Object.keys(runtimePatch).length > 0 && this.stateStore && !this.repository.supportsSharedRuntime) {
       const composite = `${providerId}:${entry.id}`;
       this.preloadedState[composite] = { ...(this.preloadedState[composite] ?? {}), ...runtimePatch };
       this.stateStore.update(composite, runtimePatch);
     }
 
     const userFieldChanged = patch.enabled !== undefined || patch.note !== undefined;
-    if (userFieldChanged) {
+    if (userFieldChanged && !this.repository.supportsSharedRuntime) {
       this.schedulePersist();
     }
     if (patch.enabled === false || patch.auto_disabled_at !== undefined) {
@@ -575,6 +676,26 @@ export class RuntimeConfigManager {
     }
   }
 
+  private serializeMutation<T>(callback: () => Promise<T>): Promise<T> {
+    const run = this.mutationTail.then(callback, callback);
+    // 队列尾部吞掉单次失败，后续管理请求仍可继续执行；原 Promise 保留错误给当前调用方。
+    this.mutationTail = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private serializeConfigMutation<T>(callback: (baseRevision: number) => Promise<T>): Promise<T> {
+    return this.serializeMutation(async () => {
+      const previousConfig = structuredClone(this.config);
+      const baseRevision = this.getRevision();
+      try {
+        return await callback(baseRevision);
+      } catch (error) {
+        await this.recoverAfterFailedMutation(previousConfig, error);
+        throw error;
+      }
+    });
+  }
+
   private schedulePersist(): void {
     if (this.persistTimer) return;
     this.persistTimer = setTimeout(() => {
@@ -586,7 +707,7 @@ export class RuntimeConfigManager {
     }, 500);
   }
 
-  private async persistNow(): Promise<void> {
+  private async persistNow(expectedRevision?: number): Promise<void> {
     if (this.persisting) {
       // 当前 writer 使用的是调用时快照；写入期间发生的新状态必须在其完成后再落一版，不能只等待旧快照。
       this.persistAgain = true;
@@ -594,10 +715,13 @@ export class RuntimeConfigManager {
     }
     this.persisting = (async () => {
       try {
+        let nextExpectedRevision = expectedRevision;
         do {
           this.persistAgain = false;
           const { config: cleaned } = stripRuntimeFromConfig(this.config);
-          await this.repository.saveConfig(cleaned);
+          await this.repository.saveConfig(cleaned, nextExpectedRevision);
+          // 同一 writer 的补写发生在首个 CAS 已提交之后，不能继续使用旧 revision。
+          nextExpectedRevision = undefined;
         } while (this.persistAgain);
       } finally {
         this.persisting = null;
@@ -663,6 +787,12 @@ export class RuntimeConfigManager {
   }
 
   async updateKeyState(providerId: string, keyRef: string | number, patch: Partial<ApiKeyEntry>): Promise<void> {
+    return this.serializeConfigMutation((baseRevision) => (
+      this.updateKeyStateUnlocked(providerId, keyRef, patch, baseRevision)
+    ));
+  }
+
+  private async updateKeyStateUnlocked(providerId: string, keyRef: string | number, patch: Partial<ApiKeyEntry>, baseRevision: number): Promise<void> {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
     if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
     const { keyId } = this.resolveKeyReference(providerId, keyRef);
@@ -672,7 +802,7 @@ export class RuntimeConfigManager {
     // 直接修改 entry（rotator._keys 指向同一数组，自动同步）
     Object.assign(entry, patch);
     this.touchRevision();
-    await this.persistNow();
+    await this.persistNow(baseRevision);
   }
 
   private getRotatorAndKey(providerId: string, keyRef: string | number): { rotator: ApiKeyRotator; key: string; keyId: string } {
@@ -685,38 +815,66 @@ export class RuntimeConfigManager {
   }
 
   async enableKey(providerId: string, keyRef: string | number): Promise<void> {
+    return this.serializeConfigMutation((baseRevision) => (
+      this.enableKeyUnlocked(providerId, keyRef, baseRevision)
+    ));
+  }
+
+  private async enableKeyUnlocked(providerId: string, keyRef: string | number, baseRevision: number): Promise<void> {
     const { rotator, key } = this.getRotatorAndKey(providerId, keyRef);
     rotator.enableKey(key);
     this.touchRevision();
     if (this.stateStore) await this.stateStore.forceFlush();
-    await this.persistNow();
+    await this.persistNow(baseRevision);
   }
 
   async disableKey(providerId: string, keyRef: string | number): Promise<void> {
+    return this.serializeConfigMutation((baseRevision) => (
+      this.disableKeyUnlocked(providerId, keyRef, baseRevision)
+    ));
+  }
+
+  private async disableKeyUnlocked(providerId: string, keyRef: string | number, baseRevision: number): Promise<void> {
     const { rotator, key } = this.getRotatorAndKey(providerId, keyRef);
     rotator.disableKey(key);
     this.touchRevision();
     if (this.stateStore) await this.stateStore.forceFlush();
-    await this.persistNow();
+    await this.persistNow(baseRevision);
   }
 
   async resetKey(providerId: string, keyRef: string | number): Promise<void> {
+    return this.serializeConfigMutation((baseRevision) => (
+      this.resetKeyUnlocked(providerId, keyRef, baseRevision)
+    ));
+  }
+
+  private async resetKeyUnlocked(providerId: string, keyRef: string | number, baseRevision: number): Promise<void> {
     const { rotator, key } = this.getRotatorAndKey(providerId, keyRef);
     rotator.resetErrorCount(key);
     rotator.resetUsage(key);
     this.touchRevision();
     if (this.usageStore) await this.usageStore.forceFlush();
     if (this.stateStore) await this.stateStore.forceFlush();
-    await this.persistNow();
+    await this.persistNow(baseRevision);
   }
 
   async resetKeyQuota(providerId: string, keyRef: string | number): Promise<void> {
+    return this.serializeMutation(() => this.resetKeyQuotaUnlocked(providerId, keyRef));
+  }
+
+  private async resetKeyQuotaUnlocked(providerId: string, keyRef: string | number): Promise<void> {
     const { rotator, key } = this.getRotatorAndKey(providerId, keyRef);
     rotator.resetUsage(key);
     if (this.usageStore) await this.usageStore.forceFlush();
   }
 
   async updateKeyQuota(providerId: string, keyRef: string | number, quota: KeyQuotaConfig | null | undefined): Promise<void> {
+    return this.serializeConfigMutation((baseRevision) => (
+      this.updateKeyQuotaUnlocked(providerId, keyRef, quota, baseRevision)
+    ));
+  }
+
+  private async updateKeyQuotaUnlocked(providerId: string, keyRef: string | number, quota: KeyQuotaConfig | null | undefined, baseRevision: number): Promise<void> {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
     if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
 
@@ -738,10 +896,16 @@ export class RuntimeConfigManager {
     }
 
     this.touchRevision();
-    await this.persistNow();
+    await this.persistNow(baseRevision);
   }
 
   async addKey(providerId: string, keyValue: string): Promise<ApiKeyEntry> {
+    return this.serializeConfigMutation((baseRevision) => (
+      this.addKeyUnlocked(providerId, keyValue, baseRevision)
+    ));
+  }
+
+  private async addKeyUnlocked(providerId: string, keyValue: string, baseRevision: number): Promise<ApiKeyEntry> {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
     if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
 
@@ -772,12 +936,18 @@ export class RuntimeConfigManager {
     this.touchRevision();
     this.rebuildRotators();
     await this.reconcileStores();
-    await this.persistNow();
+    await this.persistNow(baseRevision);
 
     return newKey;
   }
 
   async resetAllKeys(providerId: string): Promise<number> {
+    return this.serializeConfigMutation((baseRevision) => (
+      this.resetAllKeysUnlocked(providerId, baseRevision)
+    ));
+  }
+
+  private async resetAllKeysUnlocked(providerId: string, baseRevision: number): Promise<number> {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
     if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
 
@@ -804,11 +974,17 @@ export class RuntimeConfigManager {
     this.rebuildRotators();
     if (this.usageStore) await this.usageStore.forceFlush();
     if (this.stateStore) await this.stateStore.forceFlush();
-    await this.persistNow();
+    await this.persistNow(baseRevision);
     return count;
   }
 
   async addKeys(providerId: string, keyValues: string[]): Promise<{ added: string[]; skipped: string[] }> {
+    return this.serializeConfigMutation((baseRevision) => (
+      this.addKeysUnlocked(providerId, keyValues, baseRevision)
+    ));
+  }
+
+  private async addKeysUnlocked(providerId: string, keyValues: string[], baseRevision: number): Promise<{ added: string[]; skipped: string[] }> {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
     if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
 
@@ -845,13 +1021,19 @@ export class RuntimeConfigManager {
       this.touchRevision();
       this.rebuildRotators();
       await this.reconcileStores();
-      await this.persistNow();
+      await this.persistNow(baseRevision);
     }
 
     return { added, skipped };
   }
 
   async deleteKey(providerId: string, keyRef: string | number): Promise<void> {
+    return this.serializeConfigMutation((baseRevision) => (
+      this.deleteKeyUnlocked(providerId, keyRef, baseRevision)
+    ));
+  }
+
+  private async deleteKeyUnlocked(providerId: string, keyRef: string | number, baseRevision: number): Promise<void> {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
     if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
 
@@ -872,7 +1054,7 @@ export class RuntimeConfigManager {
     this.touchRevision();
     this.rebuildRotators();
     await this.reconcileStores();
-    await this.persistNow();
+    await this.persistNow(baseRevision);
   }
 
   private assertRevision(expectedRevision: number): void {
@@ -899,6 +1081,19 @@ export class RuntimeConfigManager {
       // 原始保存错误仍是调用方需要处理的主错误；回滚异常只记录，避免覆盖根因。
       console.error('[config] 保存失败后的内存回滚不完整:', rollbackError);
     }
+  }
+
+  private async recoverAfterFailedMutation(previousConfig: RuntimeConfig, error: unknown): Promise<void> {
+    if (this.repository.supportsSharedRuntime && error instanceof ConfigConflictError) {
+      try {
+        // CAS 失败说明别的 Worker 已提交新配置；直接加载权威版本，不能保留相同 revision 的本地分叉。
+        await this.reloadUnlocked();
+        return;
+      } catch (reloadError) {
+        console.error('[config] 配置冲突后的权威版本重载失败:', reloadError);
+      }
+    }
+    await this.restoreAfterFailedSave(previousConfig);
   }
 }
 

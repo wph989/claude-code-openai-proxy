@@ -8,7 +8,14 @@ import type {
   SharedKeyCandidate,
   SharedKeySnapshot,
 } from '../key-runtime-coordinator.js';
-import type { KeyQuotaConfig, KeyUsage } from '../../types/runtime-config.js';
+import type { KeyUsage } from '../../types/runtime-config.js';
+import {
+  addUsageDelta,
+  evaluateUsageQuota,
+  normalizeUsage,
+  tracksCost,
+  type KeyUsageDelta,
+} from '../usage-budget.js';
 
 interface RuntimeRow {
   enabled: number | null;
@@ -25,6 +32,9 @@ interface RuntimeRow {
 interface UsageRow {
   requests_used: number;
   tokens_used: number;
+  input_tokens_used: number;
+  output_tokens_used: number;
+  cost_usd: number;
 }
 
 export class SqliteKeyRuntimeCoordinator implements KeyRuntimeCoordinator {
@@ -40,8 +50,8 @@ export class SqliteKeyRuntimeCoordinator implements KeyRuntimeCoordinator {
       let nextAvailableAt: number | null = null;
       for (const candidate of candidates) {
         const row = this.loadAndRecover(candidate, now);
-        const usage = this.loadUsage(candidate.compositeKey);
-        const quota = evaluateQuota(usage, candidate.quota);
+        const usage = this.loadUsage(candidate);
+        const quota = evaluateUsageQuota(usage, candidate.quota);
         const enabled = effectiveEnabled(row, candidate);
         if (!enabled || quota.blocked) continue;
         hasPotentialCandidate = true;
@@ -178,17 +188,30 @@ export class SqliteKeyRuntimeCoordinator implements KeyRuntimeCoordinator {
     });
   }
 
-  recordUsage(candidate: SharedKeyCandidate, requests: number, tokens: number, now: number): SharedKeySnapshot {
+  recordUsage(candidate: SharedKeyCandidate, delta: KeyUsageDelta, now: number): SharedKeySnapshot {
     return withImmediateTransaction(this.db, () => {
       this.ensureState(candidate.compositeKey, now);
+      const next = addUsageDelta(this.loadUsage(candidate), delta, candidate.quota);
       this.db.prepare(`
-        INSERT INTO key_usage(composite_key, requests_used, tokens_used, updated_at)
-        VALUES(?, ?, ?, ?)
+        INSERT INTO key_usage(
+          composite_key, requests_used, tokens_used, input_tokens_used, output_tokens_used, cost_usd, updated_at
+        ) VALUES(?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(composite_key) DO UPDATE SET
-          requests_used = key_usage.requests_used + excluded.requests_used,
-          tokens_used = key_usage.tokens_used + excluded.tokens_used,
+          requests_used = excluded.requests_used,
+          tokens_used = excluded.tokens_used,
+          input_tokens_used = excluded.input_tokens_used,
+          output_tokens_used = excluded.output_tokens_used,
+          cost_usd = excluded.cost_usd,
           updated_at = excluded.updated_at
-      `).run(candidate.compositeKey, normalizeDelta(requests), normalizeDelta(tokens), now);
+      `).run(
+        candidate.compositeKey,
+        next.requests_used,
+        next.tokens_used,
+        next.input_tokens_used ?? 0,
+        next.output_tokens_used ?? 0,
+        next.cost_usd ?? 0,
+        now,
+      );
       return this.snapshotInTransaction(candidate, now);
     });
   }
@@ -202,6 +225,9 @@ export class SqliteKeyRuntimeCoordinator implements KeyRuntimeCoordinator {
         ON CONFLICT(composite_key) DO UPDATE SET
           requests_used = 0,
           tokens_used = 0,
+          input_tokens_used = 0,
+          output_tokens_used = 0,
+          cost_usd = 0,
           updated_at = excluded.updated_at
       `).run(candidate.compositeKey, now);
       return this.snapshotInTransaction(candidate, now);
@@ -278,7 +304,7 @@ export class SqliteKeyRuntimeCoordinator implements KeyRuntimeCoordinator {
     suppliedRow?: RuntimeRow,
   ): SharedKeySnapshot {
     const row = suppliedRow ?? this.loadAndRecover(candidate, now);
-    const usage = this.loadUsage(candidate.compositeKey);
+    const usage = this.loadUsage(candidate);
     const active = this.db.prepare(
       'SELECT COUNT(*) AS count FROM key_leases WHERE composite_key = ? AND expires_at > ?',
     ).get(candidate.compositeKey, now) as { count: number };
@@ -292,7 +318,7 @@ export class SqliteKeyRuntimeCoordinator implements KeyRuntimeCoordinator {
     _now: number,
     activeLeases: number,
   ): SharedKeySnapshot {
-    const quota = evaluateQuota(usage, candidate.quota);
+    const quota = evaluateUsageQuota(usage, candidate.quota);
     return {
       enabled: effectiveEnabled(row, candidate),
       errorCount: row.error_count,
@@ -365,13 +391,25 @@ export class SqliteKeyRuntimeCoordinator implements KeyRuntimeCoordinator {
     `).get(compositeKey) as unknown as RuntimeRow;
   }
 
-  private loadUsage(compositeKey: string): KeyUsage {
+  private loadUsage(candidate: SharedKeyCandidate): KeyUsage {
     const row = this.db.prepare(
-      'SELECT requests_used, tokens_used FROM key_usage WHERE composite_key = ?',
-    ).get(compositeKey) as UsageRow | undefined;
-    return row
-      ? { requests_used: row.requests_used, tokens_used: row.tokens_used }
-      : { requests_used: 0, tokens_used: 0 };
+      `SELECT requests_used, tokens_used, input_tokens_used, output_tokens_used, cost_usd
+       FROM key_usage WHERE composite_key = ?`,
+    ).get(candidate.compositeKey) as UsageRow | undefined;
+    if (!row) return { requests_used: 0, tokens_used: 0 };
+    const detailed = tracksCost(candidate.quota)
+      || row.input_tokens_used > 0
+      || row.output_tokens_used > 0
+      || row.cost_usd > 0;
+    return normalizeUsage({
+      requests_used: row.requests_used,
+      tokens_used: row.tokens_used,
+      ...(detailed ? {
+        input_tokens_used: row.input_tokens_used,
+        output_tokens_used: row.output_tokens_used,
+        cost_usd: row.cost_usd,
+      } : {}),
+    });
   }
 
   private sweepExpiredLeases(now: number): void {
@@ -383,30 +421,11 @@ function effectiveEnabled(row: RuntimeRow, candidate: SharedKeyCandidate): boole
   return candidate.configuredEnabled && row.enabled !== 0;
 }
 
-function evaluateQuota(usage: KeyUsage, quota: KeyQuotaConfig | null): {
-  blocked: boolean;
-  reason: string | null;
-} {
-  if (!quota) return { blocked: false, reason: null };
-  const threshold = quota.soft_stop_threshold ?? 0.95;
-  if (quota.max_requests != null && usage.requests_used >= quota.max_requests * threshold) {
-    return { blocked: true, reason: '本地请求配额接近上限' };
-  }
-  if (quota.max_tokens != null && usage.tokens_used >= quota.max_tokens * threshold) {
-    return { blocked: true, reason: '本地 token 配额接近上限' };
-  }
-  return { blocked: false, reason: null };
-}
-
 function normalizeErrorCategory(value: string | null): KeyErrorCategory {
   if (value === 'hard_limit' || value === 'rate_limit' || value === 'transient' || value === 'network') {
     return value;
   }
   return null;
-}
-
-function normalizeDelta(value: number): number {
-  return Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
 }
 
 function splitCompositeKey(compositeKey: string): { providerId: string; keyId: string } {

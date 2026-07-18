@@ -82,9 +82,14 @@ export async function handleOpenAICompatibleMessages(
       usageTokens = (converted.usage.input_tokens || 0) + (converted.usage.output_tokens || 0);
     }
 
-    releaseUpstreamResponse(upstreamResponse, { requests: 1, tokens: usageTokens });
     const inputTokens = isPlainObject(body.usage) ? toNonNegInt(body.usage.input_tokens) : 0;
     const outputTokens = isPlainObject(body.usage) ? toNonNegInt(body.usage.output_tokens) : 0;
+    releaseUpstreamResponse(upstreamResponse, {
+      requests: 1,
+      tokens: usageTokens,
+      inputTokens,
+      outputTokens,
+    });
     app.metricsRegistry.recordTokens(provider.provider_type, 'input', inputTokens);
     app.metricsRegistry.recordTokens(provider.provider_type, 'output', outputTokens);
     setForwardResponseHeaders(reply, upstreamResponse);
