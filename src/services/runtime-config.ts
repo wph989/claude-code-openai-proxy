@@ -7,6 +7,7 @@ import type { UsageStore } from './usage-store.js';
 import type { KeyStateStore, KeyRuntimeRecord } from './key-state-store.js';
 import type { ConfigRepository } from './config/repository.js';
 import { JsonFileConfigRepository } from './config/json-file-repository.js';
+import { ProviderHealthRegistry } from './provider-health.js';
 import {
   buildAdminRuntimeConfigView,
   buildConfigChangePreview,
@@ -78,6 +79,7 @@ export class RuntimeConfigManager {
   private preloadedState: Record<string, KeyRuntimeRecord> = {};
   private readonly randomSource: () => number;
   private observer: RuntimeConfigObserver = {};
+  private providerHealth: ProviderHealthRegistry | null = null;
   private initialized = false;
 
   constructor(
@@ -110,9 +112,14 @@ export class RuntimeConfigManager {
     this.observer = observer;
   }
 
+  setProviderHealth(providerHealth: ProviderHealthRegistry): void {
+    this.providerHealth = providerHealth;
+  }
+
   resolveProvider(providerId: string): ResolvedProvider {
     const provider = this.config.providers.find((item) => item.provider_id === providerId);
     if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
+    this.providerHealth?.configure(providerId, provider.circuit_breaker);
     const apiKeys = resolveApiKeys(provider);
     const autoDisable = provider.auto_disable_on_error !== false;
     const antiBan = resolveAntiBanConfig(provider.anti_ban, this.config.anti_ban);
@@ -374,9 +381,15 @@ export class RuntimeConfigManager {
       throw new Error(`未找到可用的模型映射：${normalizedModel}`);
     }
 
+    let circuitBlocked = false;
     const candidates = matchedRoutes.flatMap((route) => {
       const provider = this.config.providers.find((item) => item.provider_id === route.provider_id);
       if (!provider || provider.enabled === false) return [];
+      this.providerHealth?.configure(provider.provider_id, provider.circuit_breaker);
+      if (this.providerHealth && !this.providerHealth.isAvailable(provider.provider_id)) {
+        circuitBlocked = true;
+        return [];
+      }
       const apiKeys = resolveApiKeys(provider);
       if (apiKeys.length === 0) return [];
       const autoDisable = provider.auto_disable_on_error !== false;
@@ -393,17 +406,15 @@ export class RuntimeConfigManager {
     });
 
     if (candidates.length === 0) {
+      if (circuitBlocked) {
+        throw new Error(`模型 ${normalizedModel} 的供应商均处于熔断冷却中，请稍后重试。`);
+      }
       throw new Error(`模型 ${normalizedModel} 没有启用且具备可用 Key 的供应商。`);
     }
 
-    let selected = candidates[0];
-    if (candidates.length > 1) {
-      const rawRandom = this.randomSource();
-      const randomValue = Number.isFinite(rawRandom)
-        ? Math.max(0, Math.min(0.999999999999, rawRandom))
-        : 0;
-      selected = candidates[Math.floor(randomValue * candidates.length)];
-    }
+    const highestPriority = Math.min(...candidates.map((candidate) => normalizePriority(candidate.route.priority)));
+    const prioritized = candidates.filter((candidate) => normalizePriority(candidate.route.priority) === highestPriority);
+    const selected = pickWeighted(prioritized, this.randomSource);
     const { route, provider, apiKeys, rotator, autoDisable, antiBan } = selected;
     const resolvedProvider = this.toResolvedProvider(provider, apiKeys, autoDisable, antiBan);
 
@@ -412,6 +423,8 @@ export class RuntimeConfigManager {
       client_model: route.client_model,
       provider_id: route.provider_id,
       upstream_model: route.upstream_model,
+      priority: normalizePriority(route.priority),
+      weight: normalizeWeight(route.weight),
       enabled: !!route.enabled,
       extra_body: route.extra_body || {},
       description: route.description || ''
@@ -440,6 +453,7 @@ export class RuntimeConfigManager {
       enabled: !!provider.enabled,
       headers: normalizeHeaders(provider.headers || {}),
       anti_ban: antiBan,
+      circuit_breaker: provider.circuit_breaker ?? {},
       description: provider.description || '',
     };
   }
@@ -466,6 +480,7 @@ export class RuntimeConfigManager {
     for (const rotator of this.rotators.values()) rotator.dispose();
     this.rotators.clear();
     for (const provider of this.config.providers) {
+      this.providerHealth?.configure(provider.provider_id, provider.circuit_breaker);
       const apiKeys = resolveApiKeys(provider);
       if (apiKeys.length === 0) continue;
       const strategy = provider.key_rotation_strategy ?? KeyRotationStrategy.round_robin;
@@ -983,6 +998,33 @@ function keysEqual(a: ApiKeyEntry[], b: ApiKeyEntry[]): boolean {
 function antiBanEqual(a: ResolvedAntiBan, b: ResolvedAntiBan): boolean {
   if (a === b) return true;
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function normalizePriority(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(1000, Math.trunc(parsed))) : 0;
+}
+
+function normalizeWeight(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(100000, parsed)) : 1;
+}
+
+function pickWeighted<T extends { route: { weight?: number } }>(items: T[], randomSource: () => number): T {
+  if (items.length === 1) return items[0];
+  const weights = items.map((item) => normalizeWeight(item.route.weight));
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  const rawRandom = randomSource();
+  const randomValue = Number.isFinite(rawRandom)
+    ? Math.max(0, Math.min(0.999999999999, rawRandom))
+    : 0;
+  if (total <= 0) return items[Math.min(items.length - 1, Math.floor(randomValue * items.length))];
+  let cursor = randomValue * total;
+  for (let index = 0; index < items.length; index += 1) {
+    cursor -= weights[index];
+    if (cursor < 0) return items[index];
+  }
+  return items[items.length - 1];
 }
 
 function replaceEnv(value: string): string {

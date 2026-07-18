@@ -10,11 +10,14 @@
  */
 
 import type { ApiKeyRotator, KeyErrorCategory, KeyLease } from '../api-key-rotator.js';
+import type { ProviderHealthRegistry } from '../provider-health.js';
 
 interface ResponseMeta {
-  rotator: ApiKeyRotator;
-  key: string;
+  rotator?: ApiKeyRotator;
+  key?: string;
   lease?: KeyLease;
+  providerHealth?: ProviderHealthRegistry;
+  providerId?: string;
 }
 
 const responseMeta = new WeakMap<Response, ResponseMeta>();
@@ -30,8 +33,8 @@ export function attachResponseMeta(response: Response, meta: ResponseMeta): void
 export function releaseUpstreamResponse(response: Response, usage?: { requests: number; tokens: number }): void {
   const meta = responseMeta.get(response);
   if (!meta) return;
-  if (usage) meta.rotator.recordUsage(meta.key, usage.requests, usage.tokens);
-  if (meta.lease) meta.rotator.release(meta.lease);
+  if (usage && meta.rotator && meta.key) meta.rotator.recordUsage(meta.key, usage.requests, usage.tokens);
+  if (meta.lease && meta.rotator) meta.rotator.release(meta.lease);
   responseMeta.delete(response);
 }
 
@@ -47,5 +50,9 @@ export function markUpstreamResponseStreamError(
 ): void {
   const meta = responseMeta.get(response);
   if (!meta) return;
-  meta.rotator.markError(meta.key, message, category);
+  if (meta.rotator && meta.key) meta.rotator.markError(meta.key, message, category);
+  if (meta.providerHealth && meta.providerId) {
+    // 流式阶段已经拿到 HTTP 头；此处的断流只能归为链路故障，不能把它算成单 Key 配额错误。
+    meta.providerHealth.recordFailure(meta.providerId, 'network');
+  }
 }

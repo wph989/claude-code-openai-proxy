@@ -176,7 +176,7 @@ export function buildConfigChangePreview(before: RuntimeConfig, after: RuntimeCo
     before.providers,
     after.providers,
     (provider) => provider.provider_id,
-    ['provider_type', 'base_url', 'quota', 'api_key', 'api_key_env', 'key_rotation_strategy', 'auto_disable_on_error', 'auto_recover_minutes', 'timeout_seconds', 'stream_idle_timeout_seconds', 'enabled', 'headers', 'anti_ban', 'description'],
+    ['provider_type', 'base_url', 'quota', 'api_key', 'api_key_env', 'key_rotation_strategy', 'auto_disable_on_error', 'auto_recover_minutes', 'timeout_seconds', 'stream_idle_timeout_seconds', 'enabled', 'headers', 'anti_ban', 'circuit_breaker', 'description'],
     'provider',
     changes,
   );
@@ -184,7 +184,7 @@ export function buildConfigChangePreview(before: RuntimeConfig, after: RuntimeCo
     before.models,
     after.models,
     (route) => route.route_id || `${route.provider_id}:${route.client_model}:${route.upstream_model}`,
-    ['client_model', 'provider_id', 'upstream_model', 'enabled', 'extra_body', 'description'],
+    ['client_model', 'provider_id', 'upstream_model', 'priority', 'weight', 'enabled', 'extra_body', 'description'],
     'route',
     changes,
   );

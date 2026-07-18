@@ -7,6 +7,7 @@ import { UpstreamService } from './services/upstream.js';
 import { MetricsRegistry } from './services/metrics.js';
 import { AdminEventStream } from './services/admin-event-stream.js';
 import { ProviderConnectivityService } from './services/provider-connectivity.js';
+import { ProviderHealthRegistry } from './services/provider-health.js';
 import { registerAdminRoutes } from './routes/admin.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerChatCompletionsRoutes } from './routes/chat-completions.js';
@@ -24,6 +25,7 @@ declare module 'fastify' {
     metricsRegistry: MetricsRegistry;
     adminEventStream: AdminEventStream;
     providerConnectivity: ProviderConnectivityService;
+    providerHealth: ProviderHealthRegistry;
   }
   interface FastifyRequest {
     requestId: string;
@@ -39,6 +41,7 @@ export interface CreateAppDependencies {
   metrics?: MetricsRegistry;
   adminEvents?: AdminEventStream;
   providerConnectivity?: ProviderConnectivityService;
+  providerHealth?: ProviderHealthRegistry;
 }
 
 export async function createApp(
@@ -49,6 +52,7 @@ export async function createApp(
   const metricsRegistry = dependencies.metrics ?? new MetricsRegistry();
   const adminEventStream = dependencies.adminEvents ?? new AdminEventStream();
   const providerConnectivity = dependencies.providerConnectivity ?? new ProviderConnectivityService();
+  const providerHealth = dependencies.providerHealth ?? new ProviderHealthRegistry();
   appLogger.configure(settings);
   const app = Fastify({
     logger: false,
@@ -71,12 +75,14 @@ export async function createApp(
 
   const runtimeConfigManager = new RuntimeConfigManager(configPath);
   runtimeConfigManager.setObserver(adminEventStream);
+  runtimeConfigManager.setProviderHealth(providerHealth);
   app.decorate('runtimeConfigManager', runtimeConfigManager);
   app.decorate('appLogger', appLogger);
   app.decorate('metricsRegistry', metricsRegistry);
   app.decorate('adminEventStream', adminEventStream);
   app.decorate('providerConnectivity', providerConnectivity);
-  app.decorate('upstreamService', new UpstreamService(appLogger, metricsRegistry));
+  app.decorate('providerHealth', providerHealth);
+  app.decorate('upstreamService', new UpstreamService(appLogger, metricsRegistry, providerHealth));
 
   await app.runtimeConfigManager.init();
 

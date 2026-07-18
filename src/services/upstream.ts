@@ -18,6 +18,7 @@ import {
   markUpstreamResponseStreamError,
   releaseUpstreamResponse,
 } from './upstream/response-meta.js';
+import { ProviderHealthRegistry, type ProviderCircuitLease } from './provider-health.js';
 
 // 历史兼容：早期路由 / passthrough 从 'upstream.js' 直接导入这些工具。
 // 经过重构后实际实现已经搬到 ./upstream/* 子模块，这里集中 re-export 保留旧 import。
@@ -47,6 +48,7 @@ export class UpstreamService {
   constructor(
     private readonly logger: Logger = getDefaultLogger(),
     private readonly metrics: MetricsSink = NOOP_METRICS,
+    private readonly providerHealth?: ProviderHealthRegistry,
   ) {}
 
   buildChatCompletionsUrl(provider: ResolvedProvider): string {
@@ -175,6 +177,14 @@ export class UpstreamService {
         throw new Error(`供应商 ${params.provider.provider_id} 的所有 API Key 均不可用`);
       }
 
+      let circuitLease: ProviderCircuitLease | undefined;
+      if (this.providerHealth) {
+        circuitLease = this.providerHealth.acquire(params.provider.provider_id) ?? undefined;
+        if (!circuitLease) {
+          return new Response('Provider circuit is open', { status: 503, statusText: 'Service Unavailable' });
+        }
+      }
+
       let result: { response: Response; lease: KeyLease | undefined };
       try {
         result = await this.doFetch({
@@ -192,8 +202,10 @@ export class UpstreamService {
         });
       } catch (error) {
         if (isAcquireTimeout(error)) {
+          this.providerHealth?.release(params.provider.provider_id, circuitLease);
           return lastResponse ?? new Response('waiting for available API Key timed out', { status: 503, statusText: 'Service Unavailable' });
         }
+        this.providerHealth?.recordFailure(params.provider.provider_id, 'network', circuitLease);
         this.metrics.recordUpstreamError(params.provider.provider_type, 'network');
         if (retry.retry_on_transient) {
           this.logger.log('warn', '上游网络错误，准备按 transient 策略重试', {
@@ -215,14 +227,32 @@ export class UpstreamService {
       const usedKey = result.lease?.key;
 
       if (response.ok) {
+        this.providerHealth?.recordSuccess(params.provider.provider_id, circuitLease);
         if (params.rotator && usedKey) {
           params.rotator.markSuccess(usedKey);
           if (isStream && result.lease) {
-            attachResponseMeta(response, { rotator: params.rotator, key: usedKey, lease: result.lease });
+            attachResponseMeta(response, {
+              rotator: params.rotator,
+              key: usedKey,
+              lease: result.lease,
+              providerHealth: this.providerHealth,
+              providerId: params.provider.provider_id,
+            });
           } else {
-            attachResponseMeta(response, { rotator: params.rotator, key: usedKey });
+            attachResponseMeta(response, {
+              rotator: params.rotator,
+              key: usedKey,
+              providerHealth: this.providerHealth,
+              providerId: params.provider.provider_id,
+            });
             if (result.lease) params.rotator.release(result.lease);
           }
+        } else if (this.providerHealth) {
+          // 没有配置 Key 时仍需保留 Provider 健康元数据，才能统计流式响应中途断流。
+          attachResponseMeta(response, {
+            providerHealth: this.providerHealth,
+            providerId: params.provider.provider_id,
+          });
         }
         return response;
       }
@@ -231,6 +261,13 @@ export class UpstreamService {
       const errorText = summarizeUpstreamError(response, bodyText);
       const classification = classifyUpstreamError(response.status, response.statusText, bodyText);
       this.metrics.recordUpstreamError(params.provider.provider_type, classification.category);
+
+      if (classification.category === 'transient') {
+        this.providerHealth?.recordFailure(params.provider.provider_id, 'server', circuitLease);
+      } else {
+        // hard-limit / rate-limit / request-limit 是 Key 或请求级问题，不打开 Provider 熔断。
+        this.providerHealth?.release(params.provider.provider_id, circuitLease);
+      }
 
       // 排查 429 / 4xx 自动禁用是否生效：把分类结果与原始 body 一起打出来。
       this.logger.log('warn', '上游错误响应分类', {

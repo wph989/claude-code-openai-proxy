@@ -14,6 +14,7 @@ import {
   type AntiBanConfig,
   type ApiKeyEntry,
   type ApiKeyRuntimeFields,
+  type CircuitBreakerConfig,
   type KeyQuotaConfig,
   type PersistedApiKey,
   type QuotaPersistConfig,
@@ -47,6 +48,7 @@ export function normalizeRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
     enabled: item.enabled !== false,
     headers: normalizeHeaders(item.headers || {}),
     anti_ban: normalizeAntiBanConfig(item.anti_ban),
+    circuit_breaker: normalizeCircuitBreaker(item.circuit_breaker),
     description: String(item.description || '').trim()
   }));
 
@@ -55,6 +57,8 @@ export function normalizeRuntimeConfig(raw: RuntimeConfig): RuntimeConfig {
     client_model: String(item.client_model || '').trim(),
     provider_id: String(item.provider_id || '').trim(),
     upstream_model: String(item.upstream_model || '').trim(),
+    priority: normalizePriority(item.priority),
+    weight: normalizeWeight(item.weight),
     enabled: item.enabled !== false,
     extra_body: isPlainObject(item.extra_body) ? item.extra_body : {},
     description: String(item.description || '').trim()
@@ -346,6 +350,33 @@ function normalizeOptionalNumber(value: unknown): number | null {
   if (value == null) return null;
   const num = Number(value);
   return Number.isFinite(num) && num > 0 ? num : null;
+}
+
+function normalizePriority(value: unknown): number {
+  if (value == null || value === '') return 0;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(1000, Math.trunc(parsed))) : 0;
+}
+
+function normalizeWeight(value: unknown): number {
+  if (value == null || value === '') return 1;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(100000, parsed)) : 1;
+}
+
+function normalizeCircuitBreaker(value: unknown): CircuitBreakerConfig | null {
+  if (value === null) return null;
+  const source = isPlainObject(value) ? value : {};
+  const threshold = Number(source.failure_threshold);
+  const recovery = Number(source.recovery_seconds);
+  return {
+    failure_threshold: Number.isFinite(threshold) && threshold >= 1
+      ? Math.min(100, Math.trunc(threshold))
+      : 3,
+    recovery_seconds: Number.isFinite(recovery) && recovery >= 1
+      ? Math.min(3600, Math.trunc(recovery))
+      : 30,
+  };
 }
 
 function normalizeRevision(value: unknown): number {

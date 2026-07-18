@@ -126,7 +126,16 @@ export interface ProviderConfig {
   enabled?: boolean;
   headers?: Record<string, string>;
   anti_ban?: AntiBanConfig;
+  /** Provider 级网络/5xx 熔断；显式 null 可关闭。 */
+  circuit_breaker?: CircuitBreakerConfig | null;
   description?: string;
+}
+
+export interface CircuitBreakerConfig {
+  /** 连续达到该次数的网络/5xx 错误后打开熔断。 */
+  failure_threshold?: number;
+  /** 熔断保持打开的秒数，之后放行一个半开探测。 */
+  recovery_seconds?: number;
 }
 
 export interface ModelRouteConfig {
@@ -135,6 +144,10 @@ export interface ModelRouteConfig {
   client_model: string;
   provider_id: string;
   upstream_model: string;
+  /** 同名路由中数值越小越优先，默认 0。 */
+  priority?: number;
+  /** 同优先级路由的相对流量权重，默认 1。 */
+  weight?: number;
   enabled?: boolean;
   extra_body?: Record<string, unknown>;
   description?: string;
@@ -177,6 +190,8 @@ export interface ResolvedProvider {
   enabled: boolean;
   headers: Record<string, string>;
   anti_ban: import('../services/anti-ban-config.js').ResolvedAntiBan;
+  /** 兼容直接构造 ResolvedProvider 的旧调用方；RuntimeConfigManager 会始终补齐。 */
+  circuit_breaker?: CircuitBreakerConfig | null;
   description: string;
 }
 
@@ -185,6 +200,9 @@ export interface ResolvedRoute {
   client_model: string;
   provider_id: string;
   upstream_model: string;
+  /** 兼容旧测试/调用方；正常由 RuntimeConfigManager 标准化为数字。 */
+  priority?: number;
+  weight?: number;
   enabled: boolean;
   extra_body: Record<string, unknown>;
   description: string;
