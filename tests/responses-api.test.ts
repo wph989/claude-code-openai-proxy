@@ -151,19 +151,19 @@ function writeConfig(responses: boolean, withCost = false): string {
       provider_type: 'openai_compatible',
       base_url: 'https://example.com/v1',
       capabilities: { responses, models: true },
+      ...(withCost ? {
+        quota: {
+          max_requests: null,
+          max_tokens: null,
+          max_cost_usd: 1,
+          input_cost_per_million: 2,
+          output_cost_per_million: 10,
+          soft_stop_threshold: 1,
+        },
+      } : {}),
       api_key: [{
         id: 'RESPKEY001',
         key: 'sk-responses-test',
-        ...(withCost ? {
-          quota: {
-            max_requests: null,
-            max_tokens: null,
-            max_cost_usd: 1,
-            input_cost_per_million: 2,
-            output_cost_per_million: 10,
-            soft_stop_threshold: 1,
-          },
-        } : {}),
       }],
       timeout_seconds: 30,
       stream_idle_timeout_seconds: 2,

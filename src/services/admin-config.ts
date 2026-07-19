@@ -96,7 +96,7 @@ export function toAdminKeyView(
     last_error_message: redactDiagnostic(entry.last_error_message, entry.key),
     auto_disabled_at: entry.auto_disabled_at,
     ...(entry.note ? { note: entry.note } : {}),
-    ...(entry.quota !== undefined ? { quota: entry.quota } : {}),
+    ...(runtime.quota !== undefined ? { quota: runtime.quota } : {}),
     ...(runtime.status ? { status: runtime.status } : {}),
     ...(runtime.active_requests !== undefined ? { active_requests: runtime.active_requests } : {}),
     ...(runtime.next_available_at !== undefined ? { next_available_at: runtime.next_available_at } : {}),

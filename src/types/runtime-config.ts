@@ -102,7 +102,6 @@ export interface ApiKeyEntry {
   last_error_message: string | null;
   auto_disabled_at: number | null;
   note?: string;
-  quota?: KeyQuotaConfig | null;
 }
 
 /**
@@ -114,7 +113,6 @@ export interface PersistedApiKey {
   key: string;
   enabled?: boolean;
   note?: string;
-  quota?: KeyQuotaConfig | null;
 }
 
 export type ProviderCapability =

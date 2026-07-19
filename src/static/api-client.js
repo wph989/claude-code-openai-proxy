@@ -100,9 +100,6 @@ export const AdminApi = {
     method: 'PUT', body: { note },
   }),
   deleteKey: (providerId, keyId) => request(keyPath(providerId, keyId), { method: 'DELETE' }),
-  updateKeyQuota: (providerId, keyId, quota) => request(keyPath(providerId, keyId, '/quota'), {
-    method: 'PUT', body: { quota },
-  }),
   testProvider: (providerId) => request(`/api/providers/${encodeURIComponent(providerId)}/test`, {
     method: 'POST',
   }),

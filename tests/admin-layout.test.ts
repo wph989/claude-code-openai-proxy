@@ -14,6 +14,8 @@ describe('管理端桌面信息架构', () => {
     }
     expect(script).toContain("let currentTab = 'overview';");
     expect(script).toContain('const tableSlots = {');
+    expect(html).toContain('class="github-link"');
+    expect(html).toContain('href="https://github.com/wph989/claude-code-openai-proxy"');
   });
 
   it('管理端页面不再包含旧 JSON 用量持久化字段', () => {

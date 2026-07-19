@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { renderPagination, renderTableHead } from '../src/static/components/data-table.js';
 import { renderKeyPanelHtml } from '../src/static/views/key-panel.js';
 import { renderModelRow, renderProviderRow } from '../src/static/views/resource-rows.js';
-import { renderChangePreview, renderConfigHistory, renderSummary } from '../src/static/views/summary-view.js';
+import { renderChangePreview, renderConfigHistory, renderOverviewInsights, renderSummary } from '../src/static/views/summary-view.js';
 import { renderActivityView } from '../src/static/views/activity-view.js';
 
 describe('管理端视图模块', () => {
@@ -48,6 +48,9 @@ describe('管理端视图模块', () => {
     expect(html).not.toContain('full-secret-key');
     expect(html).not.toContain('<script>bad()</script>');
     expect(html).toContain('&lt;script&gt;bad()&lt;/script&gt;');
+    expect(html).toContain('key-usage-reset-btn');
+    expect(html).not.toContain('key-quota-edit-btn');
+    expect(html).toContain('配额规则继承供应商');
   });
 
   it('摘要、变更预览和表格组件按传入数据渲染', () => {
@@ -104,5 +107,38 @@ describe('管理端视图模块', () => {
     expect(html).not.toContain('<script>alert(1)</script>');
     expect(html).toContain('alias&lt;script&gt; -&gt; nvidia/raw-model');
     expect(html).not.toContain('{"method"');
+  });
+
+  it('概览视图聚合累计用量并渲染公告与近期请求', () => {
+    const container = { innerHTML: '' };
+    renderOverviewInsights(container, [
+      {
+        id: 1,
+        type: 'quota.changed',
+        timestamp: '2026-07-19T03:00:00.000Z',
+        data: { provider_id: 'p1', key_id: 'k1', requests_used: 2, tokens_used: 1200, cost_usd: 0.12 },
+      },
+      {
+        id: 2,
+        type: 'request.completed',
+        timestamp: '2026-07-19T03:01:00.000Z',
+        data: { route: '/v1/messages', status_code: 200, client_model: 'alias<script>', upstream_model: 'raw-model' },
+      },
+      {
+        id: 3,
+        type: 'request.completed',
+        timestamp: '2026-07-19T03:02:00.000Z',
+        data: { route: '/api/providers', status_code: 200, client_model: 'admin-action' },
+      },
+    ]);
+
+    expect(container.innerHTML).toContain('模型调用消耗');
+    expect(container.innerHTML).toContain('1.2K');
+    expect(container.innerHTML).toContain('更新公告');
+    expect(container.innerHTML).toContain('概览页功能更新');
+    expect(container.innerHTML).not.toContain('统一 SQLite 存储');
+    expect(container.innerHTML).toContain('alias&lt;script&gt;');
+    expect(container.innerHTML).not.toContain('admin-action');
+    expect(container.innerHTML).not.toContain('<script>');
   });
 });

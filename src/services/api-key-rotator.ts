@@ -97,9 +97,8 @@ export class ApiKeyRotator {
     const selectionMode = this.resolveSelectionMode();
     this.selector = selectionMode === 'balanced' ? new BalancedSelector() : new StickySelector();
     for (const k of this._keys) {
-      // undefined → 使用供应商配额；null → 显式不使用配额；其他 → 使用 Key 自己的配额
-      const effectiveQuota = k.quota !== undefined ? k.quota : this._providerQuota;
-      this.quotaGuard.setQuota(k.key, effectiveQuota);
+      // 配额规则统一来自供应商，但 QuotaGuard 仍按 Key 保存独立用量和阻断状态。
+      this.quotaGuard.setQuota(k.key, this._providerQuota);
     }
     // 共享模式由事务访问顺带恢复，避免每个 Worker 都启动一份相同的恢复定时器。
     const localAutoRecoverMs = sharedRuntime ? 0 : this._autoRecoverMs;
@@ -127,6 +126,10 @@ export class ApiKeyRotator {
 
   get strategy(): KeyRotationStrategy {
     return this._strategy;
+  }
+
+  get providerQuota(): KeyQuotaConfig | null {
+    return this._providerQuota;
   }
 
   get antiBan(): ResolvedAntiBan {
@@ -475,17 +478,6 @@ export class ApiKeyRotator {
     this.signalAvailabilityChange();
   }
 
-  setKeyQuota(key: string, quota: KeyQuotaConfig | null | undefined): void {
-    const entry = this.entryFor(key);
-    if (!entry) return;
-    entry.quota = quota;
-    // undefined → 使用供应商配额；null → 显式不使用配额；其他 → 使用 Key 自己的配额
-    const effectiveQuota = quota !== undefined ? quota : this._providerQuota;
-    this.quotaGuard.setQuota(key, effectiveQuota);
-    this.notifyUsage(key);
-    this.signalAvailabilityChange();
-  }
-
   private notifyUsage(key: string): void {
     if (!this.usageListener) return;
     this.usageListener(key, this.quotaGuard.getUsage(key), this.quotaGuard.getRatio(key));
@@ -671,7 +663,6 @@ export class ApiKeyRotator {
 
   private sharedCandidate(entry: ApiKeyEntry): SharedKeyCandidate {
     if (!this.sharedRuntime) throw new Error('当前 Rotator 未启用共享运行态');
-    const effectiveQuota = entry.quota !== undefined ? entry.quota : this._providerQuota;
     return {
       compositeKey: `${this.sharedRuntime.providerId}:${entry.id}`,
       // 自动禁用会暂时把 enabled 置为 false；auto_disabled_at 可区分它与用户主动停用。
@@ -679,7 +670,7 @@ export class ApiKeyRotator {
       maxConcurrent: this._antiBan.max_concurrent,
       minIntervalMs: this._antiBan.min_interval_ms,
       autoRecoverMs: this._autoRecoverMs,
-      quota: effectiveQuota,
+      quota: this._providerQuota,
     };
   }
 

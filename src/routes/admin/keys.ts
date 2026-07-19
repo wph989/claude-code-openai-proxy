@@ -121,10 +121,4 @@ function registerSingleKeyRoutes(
     await service.resetQuota(providerId, keyId);
     return { message: '配额计数已清零。', provider_id: providerId, key_id: keyId };
   });
-  app.put('/api/keys/:providerId/:keyId/quota', api, async (request, reply) => {
-    const { providerId, keyId } = request.params as { providerId: string; keyId: string };
-    const quota = await service.updateQuota(providerId, keyId, request.body);
-    setRevisionHeaders(app, reply);
-    return { message: '配额配置已更新。', provider_id: providerId, key_id: keyId, quota };
-  });
 }

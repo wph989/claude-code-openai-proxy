@@ -7,7 +7,7 @@ import { SseModelAliasRewriter } from '../services/passthrough/sse-model-alias.j
 import { isPlainObject } from '../utils/guards.js';
 import { readStreamChunk } from '../services/stream-read.js';
 import { setForwardResponseHeaders } from '../services/http-headers.js';
-import { markUpstreamResponseStreamError, releaseUpstreamResponse, safeJson } from '../services/upstream.js';
+import { markUpstreamResponseError, markUpstreamResponseStreamError, releaseUpstreamResponse, safeJson } from '../services/upstream.js';
 import { log } from '../utils/logger.js';
 
 export async function registerChatCompletionsRoutes(app: FastifyInstance): Promise<void> {
@@ -86,6 +86,16 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
         });
       }
       const data = await safeJson(upstreamResponse);
+      if (!Array.isArray(data.choices) || data.choices.length === 0) {
+        markUpstreamResponseError(upstreamResponse, '上游返回空响应：choices 为空。', 'transient');
+        releaseUpstreamResponse(upstreamResponse);
+        return reply.code(502).send({
+          error: {
+            type: 'api_error',
+            message: '上游返回了空响应，请检查模型状态、上下文长度或供应商限流。',
+          },
+        });
+      }
       const inputTokens = isPlainObject(data.usage) ? toInt(data.usage.prompt_tokens) : 0;
       const outputTokens = isPlainObject(data.usage) ? toInt(data.usage.completion_tokens) : 0;
       releaseUpstreamResponse(upstreamResponse, {

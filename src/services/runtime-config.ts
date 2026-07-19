@@ -21,7 +21,6 @@ import { nanoid } from '../utils/nanoid.js';
 import {
   KeyRotationStrategy,
   type ApiKeyEntry,
-  type KeyQuotaConfig,
   type KeyRuntimeRecord,
   type KeyUsage,
   type ProviderCapability,
@@ -535,7 +534,11 @@ export class RuntimeConfigManager {
     const provider = this.config.providers.find((p) => p.provider_id === providerId);
     const providerQuota = provider?.quota ?? null;
     const existing = this.rotators.get(providerId);
-    if (existing && keysEqual(existing.keys, keys) && existing.strategy === strategy && antiBanEqual(existing.antiBan, antiBan)) {
+    if (existing
+      && keysEqual(existing.keys, keys)
+      && existing.strategy === strategy
+      && antiBanEqual(existing.antiBan, antiBan)
+      && JSON.stringify(existing.providerQuota) === JSON.stringify(providerQuota)) {
       return existing;
     }
     // 运行时配置优先于环境变量；全局开关是总闸，供应商只能在总闸开启时进一步关闭自身自动禁用。
@@ -815,37 +818,6 @@ export class RuntimeConfigManager {
     const { rotator, key } = this.getRotatorAndKey(providerId, keyId);
     rotator.resetUsage(key);
     if (this.usageStore) await this.usageStore.forceFlush();
-  }
-
-  async updateKeyQuota(providerId: string, keyId: string, quota: KeyQuotaConfig | null | undefined): Promise<void> {
-    return this.serializeConfigMutation((baseRevision) => (
-      this.updateKeyQuotaUnlocked(providerId, keyId, quota, baseRevision)
-    ));
-  }
-
-  private async updateKeyQuotaUnlocked(providerId: string, keyId: string, quota: KeyQuotaConfig | null | undefined, baseRevision: number): Promise<void> {
-    const provider = this.config.providers.find((p) => p.provider_id === providerId);
-    if (!provider) throw new RuntimeConfigError(`未找到供应商：${providerId}`);
-
-    // 直接从配置中获取 Key 数组（不要创建新数组）
-    if (!Array.isArray(provider.api_key)) {
-      throw new RuntimeConfigError(`供应商 ${providerId} 的 api_key 不是数组`);
-    }
-
-    // 直接修改配置中的 quota（保持 undefined / null / {...} 语义）
-    const resolvedKeyId = this.requireKeyId(providerId, keyId);
-    const entry = provider.api_key.find((key) => key.id === resolvedKeyId);
-    if (!entry) throw new RuntimeConfigError(`Key ${resolvedKeyId} 由环境变量提供，不能写入独立配额。`);
-    entry.quota = quota;
-
-    // 同步更新 Rotator 的 QuotaGuard
-    const rotator = this.rotators.get(providerId);
-    if (rotator) {
-      rotator.setKeyQuota(entry.key, quota);
-    }
-
-    this.touchRevision();
-    await this.persistNow(baseRevision);
   }
 
   async addKey(providerId: string, keyValue: string): Promise<ApiKeyEntry> {
@@ -1146,7 +1118,6 @@ function keysEqual(a: ApiKeyEntry[], b: ApiKeyEntry[]): boolean {
     entry.id === b[i].id
     && entry.key === b[i].key
     && entry.enabled === b[i].enabled
-    && JSON.stringify(entry.quota ?? null) === JSON.stringify(b[i].quota ?? null)
   ));
 }
 

@@ -81,10 +81,10 @@ describe('WebhookAlertService', () => {
         provider_id: 'provider-alert',
         provider_type: 'openai_compatible',
         base_url: 'https://example.com/v1',
+        quota: { max_requests: null, max_tokens: 10, soft_stop_threshold: 1 },
         api_key: [{
           id: 'ALERTKEY01',
           key: 'secret-key-must-not-leak',
-          quota: { max_requests: null, max_tokens: 10, soft_stop_threshold: 1 },
         }],
         circuit_breaker: { failure_threshold: 1, recovery_seconds: 30 },
         enabled: true,

@@ -163,7 +163,6 @@ export function stripRuntimeFromConfig(config: RuntimeConfig): {
       const persisted: PersistedApiKey = { id: entry.id, key: entry.key };
       if (entry.enabled === false) persisted.enabled = false;
       if (entry.note) persisted.note = entry.note;
-      if (entry.quota !== undefined) persisted.quota = entry.quota;
       const rt: ApiKeyRuntimeFields = {};
       if (entry.error_count) rt.error_count = entry.error_count;
       if (entry.disabled_at != null) rt.disabled_at = entry.disabled_at;
@@ -239,8 +238,6 @@ function normalizeApiKeyField(value: unknown): string | ApiKeyEntry[] | null {
           auto_disabled_at: item.auto_disabled_at ?? null
         };
         if (note) base.note = note;
-        const quota = normalizeKeyQuota(item.quota);
-        if (quota !== undefined) base.quota = quota;
         return base;
       })
       .filter((item): item is ApiKeyEntry => item !== null);

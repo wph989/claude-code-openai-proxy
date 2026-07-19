@@ -16,8 +16,10 @@ import { NOOP_METRICS, type MetricsSink } from './metrics.js';
 import {
   attachResponseMeta,
   markUpstreamResponseBodyComplete,
+  markUpstreamResponseError,
   markUpstreamResponseStreamError,
   releaseUpstreamResponse,
+  releaseUpstreamResponseLease,
 } from './upstream/response-meta.js';
 import { ProviderHealthRegistry, type ProviderCircuitLease } from './provider-health.js';
 
@@ -26,6 +28,7 @@ import { ProviderHealthRegistry, type ProviderCircuitLease } from './provider-he
 export {
   classifyUpstreamError,
   isQuotaLimitError,
+  markUpstreamResponseError,
   markUpstreamResponseStreamError,
   markUpstreamResponseBodyComplete,
   releaseUpstreamResponse,
@@ -251,7 +254,6 @@ export class UpstreamService {
 
       if (response.ok) {
         if (params.rotator && usedKey) {
-          params.rotator.markSuccess(usedKey);
           if (isStream && result.lease) {
             attachResponseMeta(response, {
               rotator: params.rotator,
@@ -265,11 +267,13 @@ export class UpstreamService {
             attachResponseMeta(response, {
               rotator: params.rotator,
               key: usedKey,
+              lease: result.lease,
               providerHealth: this.providerHealth,
               providerId: params.provider.provider_id,
               providerCircuitLease: circuitLease,
             });
-            if (result.lease) params.rotator.release(result.lease);
+            // 先释放并发 lease，但保留 Response 元数据；正文解析后仍需记录用量或协议错误。
+            releaseUpstreamResponseLease(response);
           }
         } else if (this.providerHealth) {
           // 没有配置 Key 时仍需保留 Provider 健康元数据，才能统计流式响应中途断流。

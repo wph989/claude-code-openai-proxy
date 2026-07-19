@@ -55,7 +55,7 @@ export function renderKeyPanelHtml(providerId, keys) {
       : '<span class="text-dim">无错误</span>';
 
     const quotaBlock = (() => {
-      if (!k.quota) return '<span class="text-dim">未配置配额</span>';
+      if (!k.quota) return '<span class="text-dim">未配置供应商配额</span>';
       const usage = k.usage || { requests_used: 0, tokens_used: 0 };
       const reqMax = k.quota.max_requests;
       const tokMax = k.quota.max_tokens;
@@ -79,12 +79,7 @@ export function renderKeyPanelHtml(providerId, keys) {
     })();
 
     let actions = `<button class="btn-icon key-action-btn" data-provider="${esc(providerId)}" data-key-id="${esc(k.id)}" data-action="reset">重置</button>`;
-    actions += isConfigKey
-      ? `<button class="btn-icon key-quota-edit-btn" data-provider="${esc(providerId)}" data-key-id="${esc(k.id)}" data-display-index="${i}">配额…</button>`
-      : `<span class="btn-icon-placeholder" aria-hidden="true"></span>`;
-    actions += isConfigKey && k.quota
-      ? `<button class="btn-icon key-quota-reset-btn" data-provider="${esc(providerId)}" data-key-id="${esc(k.id)}" data-display-index="${i}">重置配额</button>`
-      : `<span class="btn-icon-placeholder" aria-hidden="true"></span>`;
+    actions += `<button class="btn-icon key-usage-reset-btn" data-provider="${esc(providerId)}" data-key-id="${esc(k.id)}" data-display-index="${i}">重置用量</button>`;
     actions += isConfigKey
       ? `<button class="btn-icon danger key-delete-btn" data-provider="${esc(providerId)}" data-key-id="${esc(k.id)}" data-display-index="${i}">删除</button>`
       : `<span class="btn-icon-placeholder" aria-hidden="true"></span>`;
@@ -118,6 +113,7 @@ export function renderKeyPanelHtml(providerId, keys) {
     <div class="key-panel">
       <div class="key-panel-header">
         <h3>API Keys — ${esc(providerId)}</h3>
+        <span class="text-dim">配额规则继承供应商，用量按 Key 独立统计</span>
         <button class="btn btn-small key-export-btn" data-provider="${esc(providerId)}">导出所有 Key</button>
         <button class="btn btn-small key-reset-all-btn" data-provider="${esc(providerId)}">一键重置所有 Key</button>
         <button class="btn btn-small key-refresh-btn" data-provider="${esc(providerId)}">刷新</button>

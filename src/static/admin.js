@@ -3,9 +3,8 @@ import { AdminApi, ApiClientError } from './api-client.js';
 import { createAdminStore } from './store.js';
 import { collectProviderForm, providerFormHtml } from './forms/provider-form.js';
 import { collectModelForm, modelFormHtml } from './forms/model-form.js';
-import { readQuotaInputs } from './forms/shared.js';
 import { renderPagination, renderTableHead } from './components/data-table.js';
-import { renderChangePreview, renderConfigHistory, renderSummary } from './views/summary-view.js';
+import { renderChangePreview, renderConfigHistory, renderOverviewInsights, renderSummary } from './views/summary-view.js';
 import { renderModelRow, renderProviderRow } from './views/resource-rows.js';
 import { renderKeyPanelHtml } from './views/key-panel.js';
 import { renderActivityView } from './views/activity-view.js';
@@ -31,12 +30,14 @@ let activityFilter = 'all';
 let unreadActivityCount = 0;
 let eventSource = null;
 let activityRenderScheduled = false;
+let overviewMetric = 'tokens';
 
 // ── DOM refs ──
 const $ = (sel) => document.querySelector(sel);
 
 const statusBox = $('#status');
 const summaryWrap = $('#summary');
+const overviewInsights = $('#overviewInsights');
 const preview = $('#configChangePreview');
 const configHistory = $('#configHistory');
 const refreshHistoryBtn = $('#refreshHistoryBtn');
@@ -101,67 +102,6 @@ function getKeyArray(provider) {
   }
   if (Array.isArray(ak)) return ak;
   return [];
-}
-
-function openQuotaEditor(providerId, keyId, current, displayIndex) {
-  const c = current || {};
-  const reqVal = c.max_requests != null ? c.max_requests : '';
-  const tokVal = c.max_tokens != null ? c.max_tokens : '';
-  const costVal = c.max_cost_usd != null ? c.max_cost_usd : '';
-  const inputCostVal = c.input_cost_per_million != null ? c.input_cost_per_million : '';
-  const outputCostVal = c.output_cost_per_million != null ? c.output_cost_per_million : '';
-  const thrVal = c.soft_stop_threshold != null ? c.soft_stop_threshold : '';
-  const html = `
-    <p class="form-hint">本地软停用配额：达到 上限 × 软停阈值 时让 Key 自动离开候选池；用户配置 enabled 不变，调用 /reset 或重置配额后立即恢复。三项留空 = 清除配额。</p>
-    <div class="form-grid">
-      <div class="form-group">
-        <div class="form-label-row"><span class="form-label">请求次数上限</span><span class="field-key">max_requests</span></div>
-        <input id="qf-max-req" type="number" min="1" value="${esc(reqVal)}" placeholder="留空 = 不限"/>
-      </div>
-      <div class="form-group">
-        <div class="form-label-row"><span class="form-label">Token 总量上限</span><span class="field-key">max_tokens</span></div>
-        <input id="qf-max-tok" type="number" min="1" value="${esc(tokVal)}" placeholder="留空 = 不限"/>
-      </div>
-      <div class="form-group">
-        <div class="form-label-row"><span class="form-label">软停阈值 (0,1]</span><span class="field-key">soft_stop_threshold</span></div>
-        <input id="qf-threshold" type="number" min="0" max="1" step="0.01" value="${esc(thrVal)}" placeholder="0.95"/>
-      </div>
-      <div class="form-group">
-        <div class="form-label-row"><span class="form-label">费用上限</span><span class="field-key">max_cost_usd</span><span class="form-label-unit">USD</span></div>
-        <input id="qf-max-cost" type="number" min="0" step="0.000001" value="${esc(costVal)}" placeholder="留空 = 不限"/>
-      </div>
-      <div class="form-group">
-        <div class="form-label-row"><span class="form-label">输入单价</span><span class="field-key">input_cost_per_million</span><span class="form-label-unit">USD / 1M Token</span></div>
-        <input id="qf-input-cost" type="number" min="0" step="0.000001" value="${esc(inputCostVal)}" placeholder="例如 3"/>
-      </div>
-      <div class="form-group">
-        <div class="form-label-row"><span class="form-label">输出单价</span><span class="field-key">output_cost_per_million</span><span class="form-label-unit">USD / 1M Token</span></div>
-        <input id="qf-output-cost" type="number" min="0" step="0.000001" value="${esc(outputCostVal)}" placeholder="例如 15"/>
-      </div>
-    </div>`;
-  Dialog.show(`编辑配额 — ${providerId} #${displayIndex + 1}`, html, [
-    { text: '取消', class: 'btn-secondary' },
-    { text: '保存', class: 'btn-primary', action: () => submitQuota(providerId, keyId) }
-  ]);
-}
-
-async function submitQuota(providerId, keyId) {
-  let quota;
-  try {
-    quota = readQuotaInputs('qf');
-  } catch (err) {
-    Toast.error(err.message);
-    return;
-  }
-  try {
-    const { data, revision } = await AdminApi.updateKeyQuota(providerId, keyId, quota);
-    if (revision) state.revision = revision;
-    setStatus(data.message || '配额已更新');
-    Toast.success(data.message || '配额已更新');
-    await loadConfig();
-  } catch (error) {
-    Toast.error(`保存失败：${error instanceof Error ? error.message : String(error)}`);
-  }
 }
 
 function antiBanDefaults(mode) {
@@ -250,6 +190,7 @@ async function loadConfig() {
     const { data, revision } = await AdminApi.loadConfig();
     state.applyServerView(data, revision);
     renderSummary(summaryWrap, data.summary);
+    renderOverviewInsights(overviewInsights, state.activities, overviewMetric);
     renderProxyTokenState();
     keyMaxErrorsInput.value = state.config.key_max_errors || '';
     fillAntiBanConfig(state.config.anti_ban);
@@ -374,6 +315,7 @@ function updatePreview() {
 function applyServerMutation(data, revision) {
   state.applyServerView(data, revision);
   renderSummary(summaryWrap, data.summary);
+  renderOverviewInsights(overviewInsights, state.activities, overviewMetric);
   refreshDefaultModelSelect();
   renderTable();
   renderProxyTokenState();
@@ -701,14 +643,14 @@ async function deleteProviderKey(providerId, keyId) {
   }
 }
 
-async function resetProviderKeyQuota(providerId, keyId) {
+async function resetProviderKeyUsage(providerId, keyId) {
   try {
     const { data } = await AdminApi.resetKeyQuota(providerId, keyId);
-    setStatus(data.message || '配额计数已清零');
-    Toast.success(data.message || '配额计数已清零');
+    setStatus(data.message || '该 Key 的用量已清零');
+    Toast.success(data.message || '该 Key 的用量已清零');
     await renderKeyPanel(providerId);
   } catch (error) {
-    Toast.error(`重置配额失败：${error instanceof Error ? error.message : String(error)}`);
+    Toast.error(`重置用量失败：${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -832,22 +774,12 @@ tableContainer.addEventListener('click', (e) => {
     return;
   }
 
-  if (target.classList.contains('key-quota-edit-btn')) {
+  if (target.classList.contains('key-usage-reset-btn')) {
     const providerId = target.dataset.provider;
     const keyId = target.dataset.keyId;
     const displayIndex = Number(target.dataset.displayIndex);
-    const keys = state.keyStates[providerId] || [];
-    const current = keys.find((item) => item.id === keyId)?.quota || null;
-    openQuotaEditor(providerId, keyId, current, displayIndex);
-    return;
-  }
-
-  if (target.classList.contains('key-quota-reset-btn')) {
-    const providerId = target.dataset.provider;
-    const keyId = target.dataset.keyId;
-    const displayIndex = Number(target.dataset.displayIndex);
-    Dialog.confirm('确认重置配额', `确定要清零 ${providerId} 第 ${displayIndex + 1} 个 Key 的本地配额计数吗？`, () => {
-      void resetProviderKeyQuota(providerId, keyId);
+    Dialog.confirm('确认重置用量', `确定要清零 ${providerId} 第 ${displayIndex + 1} 个 Key 的独立配额用量吗？供应商配额规则不会改变。`, () => {
+      void resetProviderKeyUsage(providerId, keyId);
     }, '确认重置', '取消', 'btn-warning');
     return;
   }
@@ -976,6 +908,7 @@ function connectAdminEvents() {
   eventSource = AdminApi.openEventStream({
     onEvent: (event) => {
       state.addActivity(event);
+      renderOverviewInsights(overviewInsights, state.activities, overviewMetric);
       if (currentTab === 'activity') scheduleActivityRender();
       else {
         unreadActivityCount = Math.min(99, unreadActivityCount + 1);
@@ -992,6 +925,13 @@ function connectAdminEvents() {
     },
   });
 }
+
+overviewInsights.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-overview-metric]');
+  if (!button) return;
+  overviewMetric = button.dataset.overviewMetric || 'tokens';
+  renderOverviewInsights(overviewInsights, state.activities, overviewMetric);
+});
 
 function scheduleActivityRender() {
   if (activityRenderScheduled) return;

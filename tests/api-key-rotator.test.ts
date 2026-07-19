@@ -638,11 +638,8 @@ test('balanced selection mode picks across all enabled keys', async () => {
 });
 
 test('recordUsage notifies usageListener; soft-stop blocks key without disabling it', () => {
-  const entry: ApiKeyEntry = {
-    ...keyEntry('quota-key'),
-    quota: { max_requests: 10, max_tokens: null, soft_stop_threshold: 0.9 }
-  };
-  const rotator = new ApiKeyRotator([entry, keyEntry('spare')], KeyRotationStrategy.round_robin, true, ab());
+  const providerQuota = { max_requests: 10, max_tokens: null, soft_stop_threshold: 0.9 };
+  const rotator = new ApiKeyRotator([keyEntry('quota-key'), keyEntry('spare')], KeyRotationStrategy.round_robin, true, ab(), providerQuota);
   const updates: Array<{ key: string; ratio: number }> = [];
   rotator.setUsageListener((key, _usage: KeyUsage, ratio) => updates.push({ key, ratio }));
 
@@ -659,11 +656,8 @@ test('recordUsage notifies usageListener; soft-stop blocks key without disabling
 });
 
 test('hydrateUsage restores prior usage and is reflected in getQuotaSnapshot', () => {
-  const entry: ApiKeyEntry = {
-    ...keyEntry('hk'),
-    quota: { max_requests: 100, max_tokens: null, soft_stop_threshold: 0.95 }
-  };
-  const rotator = new ApiKeyRotator([entry], KeyRotationStrategy.round_robin, true, ab());
+  const providerQuota = { max_requests: 100, max_tokens: null, soft_stop_threshold: 0.95 };
+  const rotator = new ApiKeyRotator([keyEntry('hk')], KeyRotationStrategy.round_robin, true, ab(), providerQuota);
   rotator.hydrateUsage('hk', { requests_used: 50, tokens_used: 0 });
   const snap = rotator.getQuotaSnapshot('hk');
   assert.equal(snap.usage.requests_used, 50);
@@ -671,11 +665,8 @@ test('hydrateUsage restores prior usage and is reflected in getQuotaSnapshot', (
 });
 
 test('hydrateUsage past soft_stop_threshold blocks the key so acquire fails fast', async () => {
-  const entry: ApiKeyEntry = {
-    ...keyEntry('hk'),
-    quota: { max_requests: 100, max_tokens: null, soft_stop_threshold: 0.9 }
-  };
-  const rotator = new ApiKeyRotator([entry], KeyRotationStrategy.round_robin, true, ab());
+  const providerQuota = { max_requests: 100, max_tokens: null, soft_stop_threshold: 0.9 };
+  const rotator = new ApiKeyRotator([keyEntry('hk')], KeyRotationStrategy.round_robin, true, ab(), providerQuota);
 
   rotator.hydrateUsage('hk', { requests_used: 95, tokens_used: 0 });
 
@@ -685,25 +676,19 @@ test('hydrateUsage past soft_stop_threshold blocks the key so acquire fails fast
   assert.equal(rotator.pick(), undefined);
 });
 
-test('setKeyQuota updates the live rotator without resetting health state', () => {
-  const entry: ApiKeyEntry = {
-    ...keyEntry('hk'),
-    quota: { max_requests: 100, max_tokens: null, soft_stop_threshold: 0.9 }
-  };
-  const rotator = new ApiKeyRotator([entry], KeyRotationStrategy.round_robin, true, ab({
+test('供应商配额加载到每个 Key，但健康状态仍独立保留', () => {
+  const providerQuota = { max_requests: 100, max_tokens: null, soft_stop_threshold: 0.9 };
+  const rotator = new ApiKeyRotator([keyEntry('hk')], KeyRotationStrategy.round_robin, true, ab({
     rate_limit_delay_min_ms: 5000,
     rate_limit_delay_max_ms: 5000
-  }));
+  }), providerQuota);
   rotator.markRateLimited('hk', '429 rate limit');
   const before = rotator.getKeyStatuses()[0];
   assert.equal(before.error_count, 1);
   assert.equal(before.last_error_category, 'rate_limit');
-  assert.ok(before.next_available_at, 'cooldown should be active before setKeyQuota');
+  assert.ok(before.next_available_at, 'cooldown should be active');
 
-  rotator.setKeyQuota('hk', { max_requests: 500, max_tokens: null, soft_stop_threshold: 0.95 });
-
-  assert.equal(rotator.getQuotaSnapshot('hk').quota?.max_requests, 500);
-  // setKeyQuota 只应替换配额，不能顺带清空错误计数 / 冷却态。
+  assert.equal(rotator.getQuotaSnapshot('hk').quota?.max_requests, 100);
   const after = rotator.getKeyStatuses()[0];
   assert.equal(after.error_count, 1);
   assert.equal(after.last_error_category, 'rate_limit');

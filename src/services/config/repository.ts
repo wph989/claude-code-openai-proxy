@@ -60,9 +60,7 @@ export interface ConfigRepository {
    */
   createKeyStateStore(): KeyStateRepository;
 
-  /**
-   * 创建 Key 配额计数存储。
-   */
+  /** 创建按 Key 独立累计的用量计数存储；配额规则来自供应商配置。 */
   createUsageStore(): UsageRepository;
 
   /**

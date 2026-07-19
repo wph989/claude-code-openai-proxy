@@ -368,7 +368,7 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
     await mgr.shutdown();
   });
 
-  it('供应商级 quota 作为默认值，key 级 quota 优先覆盖', async () => {
+  it('供应商级 quota 加载到每个 Key，旧 key quota 字段被忽略', async () => {
     const cfgPath = path.join(tmp, 'runtime_models.json');
     writeConfig(cfgPath, {
       providers: [{
@@ -394,8 +394,8 @@ describe('RuntimeConfigManager — id 化 + state 文件', () => {
     const states = mgr.getKeyStates('p1');
 
     expect(states[0].quota).toEqual({ max_requests: 100, max_tokens: 1000, soft_stop_threshold: 0.8 });
-    expect(states[1].quota).toEqual({ max_requests: 5, max_tokens: null, soft_stop_threshold: 1 });
-    expect(states[2].quota).toBeNull();
+    expect(states[1].quota).toEqual({ max_requests: 100, max_tokens: 1000, soft_stop_threshold: 0.8 });
+    expect(states[2].quota).toEqual({ max_requests: 100, max_tokens: 1000, soft_stop_threshold: 0.8 });
 
     await mgr.shutdown();
   });

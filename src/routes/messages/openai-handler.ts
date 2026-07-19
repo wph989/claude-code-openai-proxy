@@ -21,7 +21,7 @@ import {
 import { bridgeOpenAIStreamToAnthropic } from '../../services/stream-bridge.js';
 import { anthropicToOpenAIMessages, anthropicToolsToOpenAI, openAIToAnthropicResponse } from '../../services/transformers.js';
 import { setForwardResponseHeaders } from '../../services/http-headers.js';
-import { markUpstreamResponseStreamError, releaseUpstreamResponse, safeJson } from '../../services/upstream.js';
+import { markUpstreamResponseError, releaseUpstreamResponse, safeJson } from '../../services/upstream.js';
 import { createId } from '../../utils/id.js';
 import { log } from '../../utils/logger.js';
 
@@ -112,7 +112,7 @@ export async function handleOpenAICompatibleMessages(
     if (emptyResponse) {
       // 200 + 空 content 不能伪装成成功响应；否则 Claude Code 会静默收到空消息，
       // 同时将当前 Key 标记为瞬时故障，给后续请求换用其他 Key。
-      markUpstreamResponseStreamError(upstreamResponse, '上游返回空响应：没有文本、推理或工具内容。', 'transient');
+      markUpstreamResponseError(upstreamResponse, '上游返回空响应：没有文本、推理或工具内容。', 'transient');
       releaseUpstreamResponse(upstreamResponse);
       return reply.code(502).send({
         type: 'error',

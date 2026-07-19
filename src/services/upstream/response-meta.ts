@@ -19,6 +19,7 @@ interface ResponseMeta {
   providerHealth?: ProviderHealthRegistry;
   providerId?: string;
   providerCircuitLease?: ProviderCircuitLease;
+  keyOutcomeRecorded?: boolean;
   providerOutcomeRecorded?: boolean;
 }
 
@@ -26,6 +27,17 @@ const responseMeta = new WeakMap<Response, ResponseMeta>();
 
 export function attachResponseMeta(response: Response, meta: ResponseMeta): void {
   responseMeta.set(response, meta);
+}
+
+/**
+ * 非流式响应拿到 HTTP 头后先释放并发 lease，但保留 Response 元数据，
+ * 让路由层读完正文后仍能记录用量或把协议异常记到原 Key。
+ */
+export function releaseUpstreamResponseLease(response: Response): void {
+  const meta = responseMeta.get(response);
+  if (!meta?.lease || !meta.rotator) return;
+  meta.rotator.release(meta.lease);
+  meta.lease = undefined;
 }
 
 /**
@@ -46,6 +58,11 @@ export function releaseUpstreamResponse(response: Response, usage?: {
       outputTokens: usage.outputTokens,
     });
   }
+  if (meta.rotator && meta.key && !meta.keyOutcomeRecorded) {
+    // 只有正文和协议处理都完成后才算成功，避免 2xx 空响应先清零历史错误。
+    meta.rotator.markSuccess(meta.key);
+    meta.keyOutcomeRecorded = true;
+  }
   if (meta.lease && meta.rotator) meta.rotator.release(meta.lease);
   if (meta.providerHealth && meta.providerId && !meta.providerOutcomeRecorded) {
     meta.providerHealth.recordSuccess(meta.providerId, meta.providerCircuitLease);
@@ -65,10 +82,36 @@ export function markUpstreamResponseStreamError(
 ): void {
   const meta = responseMeta.get(response);
   if (!meta) return;
-  if (meta.rotator && meta.key) meta.rotator.markError(meta.key, message, category);
+  if (meta.rotator && meta.key && !meta.keyOutcomeRecorded) {
+    meta.rotator.markError(meta.key, message, category);
+    meta.keyOutcomeRecorded = true;
+  }
   if (meta.providerHealth && meta.providerId && !meta.providerOutcomeRecorded) {
     // 流式阶段已经拿到 HTTP 头；此处的断流只能归为链路故障，不能把它算成单 Key 配额错误。
     meta.providerHealth.recordFailure(meta.providerId, 'network', meta.providerCircuitLease);
+    meta.providerOutcomeRecorded = true;
+  }
+}
+
+/**
+ * 记录 HTTP 成功但协议内容无效的响应。
+ *
+ * 上游已经返回 2xx 时，重试层无法再根据状态码识别故障；路由层发现空响应
+ * 后必须通过 Response 元数据把问题归还给实际使用的 Key，否则它会被误记为成功。
+ */
+export function markUpstreamResponseError(
+  response: Response,
+  message: string,
+  category: KeyErrorCategory = 'transient'
+): void {
+  const meta = responseMeta.get(response);
+  if (!meta) return;
+  if (meta.rotator && meta.key && !meta.keyOutcomeRecorded) {
+    meta.rotator.markError(meta.key, message, category);
+    meta.keyOutcomeRecorded = true;
+  }
+  if (meta.providerHealth && meta.providerId && !meta.providerOutcomeRecorded) {
+    meta.providerHealth.recordFailure(meta.providerId, 'server', meta.providerCircuitLease);
     meta.providerOutcomeRecorded = true;
   }
 }

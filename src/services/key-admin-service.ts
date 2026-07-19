@@ -1,5 +1,5 @@
 import { RuntimeConfigError } from '../errors.js';
-import type { ApiKeyEntry, KeyQuotaConfig } from '../types/runtime-config.js';
+import type { ApiKeyEntry } from '../types/runtime-config.js';
 import type { AdminKeyView } from './admin-config.js';
 
 export interface KeyAdminGateway {
@@ -14,11 +14,6 @@ export interface KeyAdminGateway {
   updateKeyState(providerId: string, keyId: string, patch: Partial<ApiKeyEntry>): Promise<void>;
   deleteKey(providerId: string, keyId: string): Promise<void>;
   resetKeyQuota(providerId: string, keyId: string): Promise<void>;
-  updateKeyQuota(
-    providerId: string,
-    keyId: string,
-    quota: KeyQuotaConfig | null | undefined,
-  ): Promise<void>;
 }
 
 export interface AddKeysResult {
@@ -90,16 +85,6 @@ export class KeyAdminService {
     await this.gateway.resetKeyQuota(providerId, keyId);
   }
 
-  async updateQuota(
-    providerId: string,
-    keyId: string,
-    input: unknown,
-  ): Promise<KeyQuotaConfig | null | undefined> {
-    const quota = toRecord(input).quota as KeyQuotaConfig | null | undefined;
-    validateQuota(quota);
-    await this.gateway.updateKeyQuota(providerId, keyId, quota);
-    return quota;
-  }
 }
 
 function toRecord(value: unknown): Record<string, unknown> {
@@ -113,27 +98,4 @@ function buildAddMessage(addedCount: number, skippedCount: number): string {
   if (addedCount > 0) parts.push(`新增 ${addedCount} 个`);
   if (skippedCount > 0) parts.push(`跳过 ${skippedCount} 个（已存在）`);
   return `添加完成：${parts.join('，')}`;
-}
-
-function validateQuota(quota: KeyQuotaConfig | null | undefined): void {
-  if (quota === null || quota === undefined) return;
-  if (!quota || typeof quota !== 'object' || Array.isArray(quota)) {
-    throw new RuntimeConfigError('quota 必须是对象、null 或省略。');
-  }
-  if (quota.soft_stop_threshold !== undefined
-    && (typeof quota.soft_stop_threshold !== 'number' || quota.soft_stop_threshold <= 0 || quota.soft_stop_threshold > 1)) {
-    throw new RuntimeConfigError('soft_stop_threshold 必须在 (0, 1] 之间。');
-  }
-  if (quota.max_requests != null && (typeof quota.max_requests !== 'number' || quota.max_requests <= 0)) {
-    throw new RuntimeConfigError('max_requests 必须为正数或 null。');
-  }
-  if (quota.max_tokens != null && (typeof quota.max_tokens !== 'number' || quota.max_tokens <= 0)) {
-    throw new RuntimeConfigError('max_tokens 必须为正数或 null。');
-  }
-  for (const field of ['max_cost_usd', 'input_cost_per_million', 'output_cost_per_million'] as const) {
-    const value = quota[field];
-    if (value != null && (typeof value !== 'number' || !Number.isFinite(value) || value <= 0)) {
-      throw new RuntimeConfigError(`${field} 必须为正数或 null。`);
-    }
-  }
 }

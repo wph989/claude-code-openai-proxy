@@ -24,6 +24,7 @@ import {
 import { filterForwardResponseHeaders, setForwardResponseHeaders } from './http-headers.js';
 import {
   markUpstreamResponseBodyComplete,
+  markUpstreamResponseError,
   markUpstreamResponseStreamError,
   releaseUpstreamResponse,
 } from './upstream/response-meta.js';
@@ -164,6 +165,25 @@ export async function sendAnthropicPassthroughResponse(params: {
       fallbackModel
     )
     : ensureAnthropicJsonShape(data, fallbackModel);
+
+  if (!Array.isArray(output.content) || output.content.length === 0) {
+    markUpstreamResponseError(upstreamResponse, '上游返回空响应：content 为空。', 'transient');
+    releaseUpstreamResponse(upstreamResponse);
+    log('warn', 'Anthropic 透传响应异常', {
+      ...buildLogContext(context),
+      upstream_status: upstreamResponse.status,
+      downstream_status: 502,
+      stream: false,
+      response_kind: `${responseKind}-empty`,
+    });
+    return reply.code(502).send({
+      type: 'error',
+      error: {
+        type: 'api_error',
+        message: '上游返回了空响应，请检查模型状态、上下文长度或供应商限流。',
+      },
+    });
+  }
 
   const inputTokens = isPlainObject(output.usage) ? toNonNegInt(output.usage.input_tokens) : 0;
   const outputTokens = isPlainObject(output.usage) ? toNonNegInt(output.usage.output_tokens) : 0;

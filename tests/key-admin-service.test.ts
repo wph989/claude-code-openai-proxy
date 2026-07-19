@@ -20,7 +20,6 @@ beforeEach(() => {
     updateKeyState: vi.fn(async () => undefined),
     deleteKey: vi.fn(async () => undefined),
     resetKeyQuota: vi.fn(async () => undefined),
-    updateKeyQuota: vi.fn(async () => undefined),
   };
   service = new KeyAdminService(gateway);
 });
@@ -70,14 +69,8 @@ describe('KeyAdminService', () => {
     expect(gateway.updateKeyState).toHaveBeenCalledWith('p1', 'key-1', { note: '主账号' });
   });
 
-  it('在调用 Gateway 前校验配额边界', async () => {
-    await expect(service.updateQuota('p1', 'key-1', {
-      quota: { soft_stop_threshold: 1.2 },
-    })).rejects.toThrow('soft_stop_threshold 必须在 (0, 1] 之间');
-    expect(gateway.updateKeyQuota).not.toHaveBeenCalled();
-
-    const quota = { max_requests: 100, max_tokens: 2000, soft_stop_threshold: 0.9 };
-    await expect(service.updateQuota('p1', 'key-1', { quota })).resolves.toEqual(quota);
-    expect(gateway.updateKeyQuota).toHaveBeenCalledWith('p1', 'key-1', quota);
+  it('保留单 Key 独立重置用量入口', async () => {
+    await service.resetQuota('p1', 'key-1');
+    expect(gateway.resetKeyQuota).toHaveBeenCalledWith('p1', 'key-1');
   });
 });

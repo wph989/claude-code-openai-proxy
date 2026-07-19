@@ -152,7 +152,7 @@ export function providerFormHtml(item) {
         <input id="mfq-output-cost" type="number" min="0" step="0.000001" value="${esc(quotaOutputCostVal)}" placeholder="例如 15" />
       </div>
       <div class="form-group">
-        <div class="form-label-row"><span class="form-label">默认软停阈值</span><span class="field-key">quota.soft_stop_threshold</span><i class="info-tip" data-tip="供应商配额会作为所有 Key 的默认值；单个 Key 设置了 quota 字段时优先使用 Key 自己的配额。软停阈值表示用量达到该比例（0~1）后停止该供应商。">i</i></div>
+        <div class="form-label-row"><span class="form-label">供应商软停阈值</span><span class="field-key">quota.soft_stop_threshold</span><i class="info-tip" data-tip="该配额规则会加载到供应商下的每个 Key；每个 Key 独立累计用量并在达到阈值后暂时离开候选池。">i</i></div>
         <input id="mfq-threshold" type="number" min="0" max="1" step="0.01" value="${esc(quotaThrVal)}" placeholder="0.95" />
       </div>
     </div>

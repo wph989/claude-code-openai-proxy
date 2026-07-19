@@ -408,6 +408,11 @@ describe('API 透传流水线', () => {
 
     const app = await createMigratedApp(cfgPath);
     try {
+      app.runtimeConfigManager.resolveModel('gpt-client', 'messages').rotator?.markError(
+        'sk-openai-test',
+        '已有瞬时错误',
+        'transient',
+      );
       const response = await app.inject({
         method: 'POST',
         url: '/v1/messages',
@@ -421,6 +426,70 @@ describe('API 透传流水线', () => {
       const body = JSON.parse(response.body);
       expect(response.statusCode).toBe(502);
       expect(body.error.message).toContain('空响应');
+      expect(app.runtimeConfigManager.getKeyStates('openai-upstream')[0].error_count).toBe(2);
+      expect(app.runtimeConfigManager.getKeyStates('openai-upstream')[0].last_error_category).toBe('transient');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('OpenAI Chat 非流式收到空 choices 会返回 502 并累计 Key 错误', async () => {
+    const cfgPath = writeConfig(openAIConfig());
+
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      id: 'chatcmpl-empty',
+      choices: [],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+
+    const app = await createMigratedApp(cfgPath);
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        payload: {
+          model: 'gpt-client',
+          messages: [{ role: 'user', content: 'hi' }],
+        },
+      });
+
+      expect(response.statusCode).toBe(502);
+      expect(JSON.parse(response.body).error.message).toContain('空响应');
+      expect(app.runtimeConfigManager.getKeyStates('openai-upstream')[0].error_count).toBe(1);
+      expect(app.runtimeConfigManager.getKeyStates('openai-upstream')[0].last_error_category).toBe('transient');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('Anthropic 原生非流式收到空 content 会返回 502 并累计 Key 错误', async () => {
+    const cfgPath = writeConfig(anthropicConfig());
+
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      id: 'msg-empty',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude-upstream',
+      content: [],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 2, output_tokens: 0 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+
+    const app = await createMigratedApp(cfgPath);
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/messages',
+        payload: {
+          model: 'claude-client',
+          max_tokens: 16,
+          messages: [{ role: 'user', content: 'hi' }],
+        },
+      });
+
+      expect(response.statusCode).toBe(502);
+      expect(JSON.parse(response.body).error.message).toContain('空响应');
+      expect(app.runtimeConfigManager.getKeyStates('anthropic-upstream')[0].error_count).toBe(1);
+      expect(app.runtimeConfigManager.getKeyStates('anthropic-upstream')[0].last_error_category).toBe('transient');
     } finally {
       await app.close();
     }
