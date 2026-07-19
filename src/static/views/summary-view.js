@@ -1,4 +1,7 @@
 import { escapeHtml as esc } from '../admin-ui.js';
+import { RELEASE_NOTES } from './release-notes.js';
+
+const MAX_VISIBLE_RELEASES = 5;
 
 export function renderSummary(container, summary) {
   const items = [
@@ -15,6 +18,7 @@ export function renderSummary(container, summary) {
 export function renderOverviewInsights(container, events, selectedMetric = 'tokens') {
   const metric = ['tokens', 'cost', 'requests'].includes(selectedMetric) ? selectedMetric : 'tokens';
   const snapshot = buildOverviewSnapshot(events);
+  const latestVersion = RELEASE_NOTES[0]?.version || '-';
   const metricMeta = {
     tokens: { label: 'Token', value: formatCompact(snapshot.tokens), suffix: '累计处理量' },
     cost: { label: '费用', value: formatMoney(snapshot.cost), suffix: '累计估算费用' },
@@ -43,17 +47,24 @@ export function renderOverviewInsights(container, events, selectedMetric = 'toke
       <section class="overview-panel overview-announcements" aria-labelledby="announcementTitle">
         <div class="overview-panel-header">
           <div><h3 id="announcementTitle">更新公告</h3><p>当前版本的重点变更。</p></div>
-          <span class="version-badge">v0.4.2</span>
+          <span class="version-badge">v${esc(latestVersion)}</span>
         </div>
-        <div class="announcement-list">
-          <article class="announcement-item"><time>2026-07-19</time><div><strong>概览页功能更新</strong><p>新增模型调用消耗曲线、近期请求和版本公告；优化顶部状态提示与 Tab 导航布局。</p></div></article>
-        </div>
+        ${renderReleaseNotes(RELEASE_NOTES)}
       </section>
     </div>
     <section class="overview-panel overview-recent" aria-labelledby="recentRequestsTitle">
       <div class="overview-panel-header"><div><h3 id="recentRequestsTitle">近期请求</h3><p>实时活动流中的最近代理请求。</p></div><span class="overview-summary-note">成功 ${snapshot.successes} · 异常 ${snapshot.failures}</span></div>
       ${renderRecentRequests(snapshot.recentRequests)}
     </section>`;
+}
+
+function renderReleaseNotes(releases) {
+  const visible = Array.isArray(releases) ? releases.slice(0, MAX_VISIBLE_RELEASES) : [];
+  if (visible.length === 0) return '<div class="overview-empty">暂无更新公告。</div>';
+  return `<div class="announcement-list">${visible.map((release) => {
+    const changes = Array.isArray(release.changes) ? release.changes : [];
+    return `<article class="announcement-item"><time>${esc(release.date || '-')}</time><div><strong>${esc(release.title || `版本 ${release.version || '-'}`)}</strong><span class="announcement-version">v${esc(release.version || '-')}</span>${changes.length > 0 ? `<ul>${changes.map((change) => `<li>${esc(change)}</li>`).join('')}</ul>` : ''}</div></article>`;
+  }).join('')}</div>`;
 }
 
 function renderMetricButton(value, label, selected) {

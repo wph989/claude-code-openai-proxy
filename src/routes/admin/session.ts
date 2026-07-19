@@ -39,6 +39,7 @@ export async function registerAdminSessionRoutes(app: FastifyInstance): Promise<
     'forms/provider-form.js',
     'forms/model-form.js',
     'components/data-table.js',
+    'views/release-notes.js',
     'views/summary-view.js',
     'views/resource-rows.js',
     'views/key-panel.js',

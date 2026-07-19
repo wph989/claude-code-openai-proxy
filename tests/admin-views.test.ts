@@ -135,8 +135,9 @@ describe('管理端视图模块', () => {
     expect(container.innerHTML).toContain('模型调用消耗');
     expect(container.innerHTML).toContain('1.2K');
     expect(container.innerHTML).toContain('更新公告');
-    expect(container.innerHTML).toContain('概览页功能更新');
-    expect(container.innerHTML).not.toContain('统一 SQLite 存储');
+    expect(container.innerHTML).toContain('v0.5.0');
+    expect(container.innerHTML).toContain('架构与管理端全面升级');
+    expect(container.innerHTML).toContain('修复空响应错误累计问题');
     expect(container.innerHTML).toContain('alias&lt;script&gt;');
     expect(container.innerHTML).not.toContain('admin-action');
     expect(container.innerHTML).not.toContain('<script>');
