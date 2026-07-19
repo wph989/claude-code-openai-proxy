@@ -41,6 +41,9 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
       });
     }
 
+    request.clientModel = modelName;
+    request.upstreamModel = route.upstream_model;
+
     const upstreamPayload: Record<string, unknown> = {
       ...payload,
       model: route.upstream_model,
@@ -55,6 +58,8 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
 
     log('info', '收到 OpenAI Chat Completions 请求', {
       provider_id: provider.provider_id,
+      client_model: modelName,
+      upstream_model: route.upstream_model,
       stream: payload.stream === true
     });
 
@@ -95,6 +100,8 @@ export async function registerChatCompletionsRoutes(app: FastifyInstance): Promi
       setForwardResponseHeaders(reply, upstreamResponse);
       log('info', 'OpenAI 透传响应完成', {
         provider_id: provider.provider_id,
+        client_model: modelName,
+        upstream_model: route.upstream_model,
         upstream_status: upstreamResponse.status,
         downstream_status: upstreamResponse.status,
         stream: false,
@@ -204,6 +211,8 @@ export async function pipeOpenAISse(params: {
     });
     log('info', protocol === 'responses' ? 'OpenAI Responses 流式透传完成' : 'OpenAI 流式透传完成', {
       provider_id: providerId,
+      client_model: params.clientModel,
+      upstream_model: params.upstreamModel,
       upstream_status: upstreamResponse.status,
       downstream_status: upstreamResponse.status,
       stream: true,
@@ -219,11 +228,18 @@ export async function pipeOpenAISse(params: {
     }
     if (clientClosed) {
       log('info', '客户端断开，停止 OpenAI 流式透传', {
-        provider_id: providerId
+        provider_id: providerId,
+        client_model: params.clientModel,
+        upstream_model: params.upstreamModel,
       });
       return;
     }
-    log('error', 'OpenAI 流式透传失败', { error });
+    log('error', 'OpenAI 流式透传失败', {
+      provider_id: providerId,
+      client_model: params.clientModel,
+      upstream_model: params.upstreamModel,
+      error,
+    });
     writeOpenAIStreamError(output, protocol, '流式透传失败。');
   } finally {
     releaseUpstreamResponse(upstreamResponse);

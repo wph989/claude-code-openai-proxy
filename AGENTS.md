@@ -2,26 +2,26 @@
 
 ## 项目结构与模块组织
 
-本仓库是面向 Node.js 22.5+ 的单包 TypeScript ESM 代理服务。`src/cli.ts` 与 `src/server.ts` 负责 CLI 和 Fastify 生命周期；HTTP 路由位于 `src/routes/`，协议转换、Key 调度、SQLite 仓储和上游通信位于 `src/services/`。桌面浏览器管理页使用原生 ESM，资源放在 `src/static/`。测试统一放在 `tests/`，文件名使用 `*.test.ts`。`dist/`、`coverage/`、`logs/`、`pids/` 和 `ccop.db*` 都是生成或运行时文件。
+本仓库是 Node.js 22.5+、TypeScript ESM 与 Fastify 实现的单包代理服务。`src/cli.ts` 和 `src/server.ts` 管理 CLI、进程及服务生命周期；公开协议路由位于 `src/routes/`，管理 API 按资源拆分在 `src/routes/admin/`。路由、Key 调度、协议转换、SQLite 仓储和上游通信位于 `src/services/`，共享类型在 `src/types/`，通用工具在 `src/utils/`。桌面浏览器管理端使用原生 ESM，资源位于 `src/static/`。测试统一放在 `tests/`，文件名采用 `*.test.ts`。
 
 ## 构建、测试与开发命令
 
-- `pnpm install`：安装依赖；不要使用 npm。
-- `pnpm dev`：通过 `tsx` 启动开发服务。
-- `pnpm build`：严格编译 TypeScript，并复制管理端资源。
-- `pnpm check`：执行构建及所有管理端 JavaScript 语法检查。
+- `pnpm install`：安装依赖；仓库统一使用 pnpm。
+- `pnpm dev`：通过 `tsx` 运行开发模式服务。
+- `pnpm build`：严格编译 TypeScript，并复制管理端静态资源。
+- `pnpm check`：构建并检查管理端 JavaScript 语法。
 - `pnpm test`：单次运行全部 Vitest 测试。
-- `pnpm test:coverage`：运行测试并生成 V8 覆盖率报告。
-- `pnpm exec vitest run tests/upstream-retry.test.ts`：定向运行单个测试文件。
+- `pnpm test:coverage`：生成 V8 覆盖率报告。
+- `pnpm exec vitest run tests/routing-policy.test.ts`：定向运行测试。
 
 ## 编码风格与命名
 
-使用两空格缩进、单引号和分号；ESM 相对导入保留 `.js` 后缀。文件名采用 kebab-case，函数和变量使用 camelCase，类型和类使用 PascalCase，模块常量使用 UPPER_SNAKE_CASE。项目启用 TypeScript `strict`，未配置 ESLint 或 Prettier，禁止无关的全仓格式化。复杂状态机、事务和协议边界需写中文注释，解释为什么这样实现。
+使用两空格缩进、单引号和分号。ESM 相对导入必须保留 `.js` 后缀。文件使用 kebab-case，函数和变量使用 camelCase，类型及类使用 PascalCase，模块常量使用 UPPER_SNAKE_CASE。仓库未配置 ESLint 或 Prettier，不执行无关的全仓格式化。复杂事务、状态机和协议边界应添加中文注释，说明为什么这样处理。
 
-## 测试与提交
+## 测试与变更要求
 
-功能变更需覆盖成功路径、错误分类、流式分块、重试、事务并发和持久化回归。覆盖率门槛为行与函数 85%、分支 80%。提交消息使用简洁中文动作摘要，例如 `修复配置迁移并清理兼容入口`；每个提交只包含一个逻辑变更，不添加作者或共同作者尾注。PR 应说明行为变化、迁移影响和已执行的检查；管理端改动附桌面浏览器截图，不做移动端或原生桌面应用适配。
+功能变更需覆盖成功路径、错误分类、流式分块、重试、并发事务和持久化回归。覆盖率门槛为行与函数 85%、分支 80%。提交使用简洁中文动作摘要，例如 `修复自动迁移并更新使用文档`；一个提交只包含一个逻辑变更，不添加作者或共同作者尾注。PR 应描述行为变化、迁移影响和已执行检查；管理端改动附桌面浏览器截图，不做移动端或原生桌面应用适配。
 
-## 安全与迁移
+## 安全与存储
 
-SQLite `ccop.db` 是唯一生产存储。启动时按固定顺序检查配置目录的 `runtime_models.json`、旧版 `config.json`，以及当前项目目录的 `runtime_models.json`，文件存在时自动迁移；也可通过 `MIGRATE_FROM_JSON` 或 `--migrate-from-json` 指定其他源。自动迁移仅在目标库未初始化时读取源文件，已初始化时跳过；显式源文件校验失败或目标不是 CCOP 数据库时必须阻止启动。源文件不会被修改或删除，程序不会扫描目录猜测迁移源。禁止提交 `.env`、数据库、真实 Key、Token 或日志；API、截图和诊断信息必须脱敏。
+`ccop.db` 是唯一运行时数据库。旧配置文件仅用于升级迁移，不再作为配置入口。禁止提交 `.env`、`ccop.db*`、真实 Key、Token、日志或运行目录。普通管理 API、日志、指标、事件和截图必须脱敏；完整 Key 只允许在管理员主动导出时返回。

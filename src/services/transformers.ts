@@ -164,9 +164,11 @@ export function openAIToAnthropicResponse(originalModel: string, data: Record<st
   const message = (choice?.message as Record<string, unknown> | undefined) || {};
   const contentBlocks: Array<Record<string, unknown>> = [];
 
-  if (typeof message.content === 'string' && message.content) {
-    contentBlocks.push({ type: 'text', text: message.content });
-  }
+  // NVIDIA 等推理模型常把思考过程放在 reasoning_content，不能只读取 content，
+  // 否则上游返回 200 时仍会被转换成空的 Anthropic content 数组。
+  const reasoning = readOpenAIText(message.reasoning_content ?? message.reasoning);
+  if (reasoning) contentBlocks.push({ type: 'thinking', thinking: reasoning });
+  appendOpenAITextBlocks(contentBlocks, message.content);
 
   const toolCalls = Array.isArray(message.tool_calls) ? (message.tool_calls as Array<Record<string, unknown>>) : [];
   for (const toolCall of toolCalls) {
@@ -220,4 +222,26 @@ export function openAIToAnthropicResponse(originalModel: string, data: Record<st
       output_tokens: outputTokens
     }
   };
+}
+
+function appendOpenAITextBlocks(target: Array<Record<string, unknown>>, value: unknown): void {
+  if (typeof value === 'string') {
+    if (value) target.push({ type: 'text', text: value });
+    return;
+  }
+  if (!Array.isArray(value)) return;
+  for (const part of value) {
+    if (typeof part === 'string') {
+      if (part) target.push({ type: 'text', text: part });
+      continue;
+    }
+    if (!part || typeof part !== 'object') continue;
+    const item = part as Record<string, unknown>;
+    const text = readOpenAIText(item.text ?? item.output_text);
+    if (text) target.push({ type: 'text', text });
+  }
+}
+
+function readOpenAIText(value: unknown): string {
+  return typeof value === 'string' ? value : '';
 }

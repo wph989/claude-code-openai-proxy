@@ -41,12 +41,13 @@ describe('AdminEventStream', () => {
     events.requestCompleted({ method: 'GET', route: '/api/config', statusCode: 200, durationMs: 1, ttfbMs: 1 });
     events.requestCompleted({ method: 'POST', route: '/api/config/preview', statusCode: 200, durationMs: 1, ttfbMs: 1 });
     events.requestCompleted({ method: 'POST', route: '/api/providers', statusCode: 200, durationMs: 7.8, ttfbMs: 2.2 });
-    events.requestCompleted({ method: 'POST', route: '/v1/messages', statusCode: 201, durationMs: 12.4, ttfbMs: 3.7 });
+    events.requestCompleted({ method: 'POST', route: '/v1/messages', statusCode: 201, durationMs: 12.4, ttfbMs: 3.7, clientModel: 'alias', upstreamModel: 'raw' });
     unsubscribe();
 
     expect(received).toHaveLength(2);
     expect(received.map(event => event.data.route)).toEqual(['/api/providers', '/v1/messages']);
     expect(received[0].data).toMatchObject({ duration_ms: 7, ttfb_ms: 2 });
+    expect(received[1].data).toMatchObject({ client_model: 'alias', upstream_model: 'raw' });
   });
 
   it('运行时 Key 与配额事件不携带 Key 值或错误正文', async () => {

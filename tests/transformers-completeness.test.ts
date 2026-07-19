@@ -119,4 +119,24 @@ describe('openAIToAnthropicResponse', () => {
     expect(content[0].name).toBe('get_weather');
     expect(content[0].input).toEqual({ city: 'sf' });
   });
+
+  it('保留 NVIDIA 推理模型的 reasoning_content 和数组文本内容', () => {
+    const { body } = openAIToAnthropicResponse('client-alias', {
+      id: 'chatcmpl-reasoning',
+      choices: [{
+        message: {
+          role: 'assistant',
+          reasoning_content: '先分析问题',
+          content: [{ type: 'text', text: '最终答案' }],
+        },
+        finish_reason: 'stop',
+      }],
+      usage: { prompt_tokens: 2, completion_tokens: 3 },
+    });
+
+    expect(body.content).toEqual([
+      { type: 'thinking', thinking: '先分析问题' },
+      { type: 'text', text: '最终答案' },
+    ]);
+  });
 });

@@ -96,6 +96,8 @@ export class AdminEventStream implements RuntimeConfigObserver {
     statusCode: number;
     durationMs: number;
     ttfbMs: number;
+    clientModel?: string;
+    upstreamModel?: string;
   }): void {
     if (!shouldPublishRequest(params.method, params.route)) return;
     this.emit('request.completed', {
@@ -104,6 +106,8 @@ export class AdminEventStream implements RuntimeConfigObserver {
       status_code: params.statusCode,
       duration_ms: toNonNegativeInteger(params.durationMs),
       ttfb_ms: toNonNegativeInteger(params.ttfbMs),
+      client_model: cleanOptionalText(params.clientModel),
+      upstream_model: cleanOptionalText(params.upstreamModel),
     });
   }
 

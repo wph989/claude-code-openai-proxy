@@ -57,16 +57,18 @@
   </header>
 
   <main class="main-content">
-    <!-- Status -->
-    <div class="status-bar loading" id="status">正在加载配置...</div>
+    <div class="workspace-chrome">
+      <!-- 状态和导航统一吸顶，避免两个独立定位层在滚动时互相遮挡。 -->
+      <div class="status-bar loading" id="status">正在加载配置...</div>
 
-    <nav class="tabs workspace-tabs" id="workspaceTabs" role="tablist" aria-label="管理工作视图">
-      <button class="tab-btn active" id="tab-overview" type="button" role="tab" aria-selected="true" aria-controls="view-overview">概览</button>
-      <button class="tab-btn" id="tab-providers" type="button" role="tab" aria-selected="false" aria-controls="view-providers">供应商<span class="tab-count"></span></button>
-      <button class="tab-btn" id="tab-models" type="button" role="tab" aria-selected="false" aria-controls="view-models">模型路由<span class="tab-count"></span></button>
-      <button class="tab-btn" id="tab-policy" type="button" role="tab" aria-selected="false" aria-controls="view-policy">策略</button>
-      <button class="tab-btn" id="tab-activity" type="button" role="tab" aria-selected="false" aria-controls="view-activity">活动日志<span class="tab-count" aria-label="未读活动"></span></button>
-    </nav>
+      <nav class="tabs workspace-tabs" id="workspaceTabs" role="tablist" aria-label="管理工作视图">
+        <button class="tab-btn active" id="tab-overview" type="button" role="tab" aria-selected="true" aria-controls="view-overview">概览</button>
+        <button class="tab-btn" id="tab-providers" type="button" role="tab" aria-selected="false" aria-controls="view-providers">供应商<span class="tab-count"></span></button>
+        <button class="tab-btn" id="tab-models" type="button" role="tab" aria-selected="false" aria-controls="view-models">模型路由<span class="tab-count"></span></button>
+        <button class="tab-btn" id="tab-policy" type="button" role="tab" aria-selected="false" aria-controls="view-policy">策略</button>
+        <button class="tab-btn" id="tab-activity" type="button" role="tab" aria-selected="false" aria-controls="view-activity">活动日志<span class="tab-count" aria-label="未读活动"></span></button>
+      </nav>
+    </div>
 
     <section class="workspace-view" id="view-overview">
       <div class="workspace-view-heading">
@@ -134,7 +136,7 @@
           </div>
           <div class="field-grid">
             <div class="field">
-              <div class="field-head"><span class="field-name">防封模式</span><span class="field-key">mode</span><i class="info-tip" data-tip="全局默认预设。保守模式并发低、间隔大，适合易封号的供应商；吞吐模式更激进。单个供应商可在 JSON 里用 anti_ban 覆盖。">i</i></div>
+              <div class="field-head"><span class="field-name">防封模式</span><span class="field-key">mode</span><i class="info-tip" data-tip="全局策略预设。保守模式并发低、间隔大，适合易封号的供应商；吞吐模式更激进。">i</i></div>
               <select id="antiBanMode">
                 <option value="conservative">保守模式（默认）</option>
                 <option value="throughput">吞吐模式</option>

@@ -38,6 +38,8 @@ declare module 'fastify' {
     metricsStartedAt: bigint;
     metricsFirstByteAt?: bigint;
     metricsFinished: boolean;
+    clientModel?: string;
+    upstreamModel?: string;
   }
 }
 
@@ -156,6 +158,8 @@ export async function createApp(
       statusCode: reply.statusCode,
       durationMs: durationSeconds * 1000,
       ttfbMs: ttfbSeconds * 1000,
+      clientModel: request.clientModel,
+      upstreamModel: request.upstreamModel,
     });
   });
 

@@ -94,12 +94,15 @@ describe('管理端视图模块', () => {
         status_code: 200,
         duration_ms: 12,
         ttfb_ms: 4,
+        client_model: 'alias<script>',
+        upstream_model: 'nvidia/raw-model',
       },
     }], { connected: true, filter: 'all' });
 
     expect(html).toContain('实时连接');
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
     expect(html).not.toContain('<script>alert(1)</script>');
+    expect(html).toContain('alias&lt;script&gt; -&gt; nvidia/raw-model');
     expect(html).not.toContain('{"method"');
   });
 });

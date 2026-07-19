@@ -1,5 +1,5 @@
 /**
- * 透传日志辅助：组装不含请求标识、模型名和正文的低基数上下文。
+ * 透传日志辅助：组装不含请求标识和正文、但包含路由模型映射的诊断上下文。
  *
  * 单独抽出来是因为这些函数在多条不同的 SSE / JSON 管线里被重复调用，
  * 否则同一份组装逻辑会在 5+ 处复制。
@@ -31,6 +31,8 @@ export function buildLogContext(context: PassthroughLogContext | StreamMetrics):
   const maybeContext = context as PassthroughLogContext;
   return omitUndefined({
     provider_id: maybeContext.providerId ?? maybeMetrics.providerId,
+    client_model: maybeContext.clientModel ?? maybeMetrics.clientModel,
+    upstream_model: maybeContext.upstreamModel ?? maybeMetrics.upstreamModel,
     endpoint: maybeContext.endpoint,
   });
 }
@@ -40,11 +42,15 @@ export function logStreamStop(clientClosed: boolean, kind: string, metrics: Stre
     log('info', '客户端断开，停止流式响应', {
       kind,
       provider_id: metrics.providerId,
+      client_model: metrics.clientModel,
+      upstream_model: metrics.upstreamModel,
     });
     return;
   }
   log('error', `${kind} 失败`, {
     provider_id: metrics.providerId,
+    client_model: metrics.clientModel,
+    upstream_model: metrics.upstreamModel,
     error,
   });
 }

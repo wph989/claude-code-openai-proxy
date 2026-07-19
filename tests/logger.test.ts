@@ -64,7 +64,7 @@ describe('Logger 实例隔离', () => {
     expect(entries.map((entry) => entry.index)).toEqual(Array.from({ length: 20 }, (_, index) => index));
   });
 
-  it('普通和详细模式都过滤正文、凭证、模型名及高基数标识', async () => {
+  it('普通和详细模式都过滤正文、凭证及高基数标识，同时保留模型路由信息', async () => {
     const file = path.join(tempDir, 'detail.log');
     const logger = new Logger({
       logFile: file,
@@ -96,7 +96,7 @@ describe('Logger 实例隔离', () => {
     expect(content).toContain('"status":"safe"');
     expect(content).toContain('Bearer [已脱敏]');
     expect(content).not.toContain('req-1');
-    expect(content).not.toContain('private-model');
+    expect(content).toContain('"client_model":"private-model"');
     expect(content).not.toContain('direct-secret');
     expect(content).not.toContain('nested-secret');
     expect(content).not.toContain('nested-token');

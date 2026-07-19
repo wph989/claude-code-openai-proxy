@@ -28,6 +28,8 @@ export async function registerResponsesRoutes(app: FastifyInstance): Promise<voi
     }
 
     const { route, provider, rotator } = resolved;
+    request.clientModel = modelName;
+    request.upstreamModel = route.upstream_model;
     const upstreamPayload: Record<string, unknown> = {
       ...payload,
       ...route.extra_body,
@@ -38,6 +40,8 @@ export async function registerResponsesRoutes(app: FastifyInstance): Promise<voi
 
     log('info', '收到 OpenAI Responses 请求', {
       provider_id: provider.provider_id,
+      client_model: modelName,
+      upstream_model: route.upstream_model,
       stream,
     });
 
@@ -75,6 +79,8 @@ export async function registerResponsesRoutes(app: FastifyInstance): Promise<voi
       setForwardResponseHeaders(reply, upstreamResponse);
       log('info', 'OpenAI Responses 非流式透传完成', {
         provider_id: provider.provider_id,
+        client_model: modelName,
+        upstream_model: route.upstream_model,
         upstream_status: upstreamResponse.status,
         input_tokens: usage.inputTokens,
         output_tokens: usage.outputTokens,

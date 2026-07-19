@@ -133,6 +133,68 @@ describe('stream failure handling', () => {
     expect(text).toContain('event: message_stop');
   });
 
+  it('把 OpenAI 推理增量转换为 Anthropic thinking 块', async () => {
+    const response = new Response(
+      'data: {"choices":[{"delta":{"reasoning_content":"先分析"},"finish_reason":null}]}\n\n' +
+      'data: {"choices":[{"delta":{"content":"最终答案"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4}}\n\n' +
+      'data: [DONE]\n\n',
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    );
+    const output = new PassThrough();
+    const chunks: Buffer[] = [];
+    output.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+
+    await bridgeOpenAIStreamToAnthropic({
+      upstreamResponse: response,
+      output,
+      clientModel: 'client-alias',
+      messageId: 'msg_reasoning',
+      metrics: {
+        requestId: 'req',
+        sessionId: 'sess',
+        providerId: 'nvidia',
+        clientModel: 'client-alias',
+        upstreamModel: 'raw-model',
+      },
+      idleTimeoutMs: 1000,
+    });
+
+    const text = Buffer.concat(chunks).toString('utf8');
+    expect(text).toContain('"type":"thinking"');
+    expect(text).toContain('"type":"thinking_delta","thinking":"先分析"');
+    expect(text).toContain('"type":"text_delta","text":"最终答案"');
+    expect(text).toContain('"stop_reason":"end_turn"');
+  });
+
+  it('200 空 SSE 返回协议错误而不是空成功消息', async () => {
+    const response = new Response('data: [DONE]\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+    const output = new PassThrough();
+    const chunks: Buffer[] = [];
+    output.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+
+    await bridgeOpenAIStreamToAnthropic({
+      upstreamResponse: response,
+      output,
+      clientModel: 'client-alias',
+      messageId: 'msg_empty',
+      metrics: {
+        requestId: 'req',
+        sessionId: 'sess',
+        providerId: 'nvidia',
+        clientModel: 'client-alias',
+        upstreamModel: 'raw-model',
+      },
+      idleTimeoutMs: 1000,
+    });
+
+    const text = Buffer.concat(chunks).toString('utf8');
+    expect(text).toContain('上游返回了空响应');
+    expect(text).toContain('event: message_stop');
+  });
+
   it('marks converted stream failures from response metadata', async () => {
     const rotator = new ApiKeyRotator(
       [keyEntry('key-a'), keyEntry('key-b')],

@@ -66,7 +66,10 @@ function formatTarget(event) {
 function formatDetail(event) {
   const data = event.data || {};
   if (event.type === 'request.completed') {
-    return `HTTP ${data.status_code ?? '-'} · ${data.duration_ms ?? 0} ms · TTFB ${data.ttfb_ms ?? 0} ms`;
+    const models = data.client_model
+      ? ` · 模型 ${data.client_model}${data.upstream_model ? ` -> ${data.upstream_model}` : ''}`
+      : '';
+    return `HTTP ${data.status_code ?? '-'} · ${data.duration_ms ?? 0} ms · TTFB ${data.ttfb_ms ?? 0} ms${models}`;
   }
   if (event.type === 'quota.changed') {
     return `请求 ${data.requests_used ?? 0} · Token ${data.tokens_used ?? 0}${data.blocked ? ' · 已阻断' : ''}`;

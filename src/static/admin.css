@@ -184,18 +184,12 @@ body {
 /* ── Main ── */
 .main-content {
   max-width: 1600px; margin: 0 auto;
-  padding-left: 32px; padding-right: 32px; padding-bottom: 60px;
+  padding-left: 32px; padding-right: 32px; padding-bottom: 60px; padding-top: 90px;
 }
 
 /* ── Status bar ── */
 .status-bar {
-  position: fixed;
-  top: 77px; /* header 高度 + 边距 */
-  left: 32px;
-  right: 32px;
-  max-width: calc(1600px - 64px);
-  margin: 0 auto;
-  padding: 14px 24px;
+  padding: 10px 16px;
   background: rgba(26, 26, 26, 0.95);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
@@ -204,9 +198,9 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  z-index: 999;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-  transition: opacity 0.3s, transform 0.3s;
+  min-height: 42px;
+  transition: color 0.3s, background 0.3s;
 }
 .status-bar::before { content: ''; width: 8px; height: 8px; border-radius: 50%; }
 .status-bar.success { color: var(--success); }
@@ -217,8 +211,14 @@ body {
 .status-bar.loading::before { background: var(--text-muted); animation: pulse 1.5s infinite; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
-/* 给主内容区域留出状态栏的空间 */
-.main-content { padding-top: 150px; }
+/* 状态栏与 Tab 作为一个顶部工作区吸附，确保滚动时保留完整上下文。 */
+.workspace-chrome {
+  position: sticky;
+  top: 74px;
+  z-index: 90;
+  background: var(--bg);
+}
+.workspace-chrome .status-bar { margin-bottom: 12px; }
 
 /* ── Stats ── */
 .stats-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 16px; margin-bottom: 32px; }
@@ -378,10 +378,8 @@ body {
 .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
 .tab-count { font-size: 12px; color: var(--text-dim); margin-left: 6px; }
 .workspace-tabs {
-  position: sticky;
-  top: 76px;
-  z-index: 80;
-  background: color-mix(in srgb, var(--bg) 94%, transparent);
+  position: static;
+  background: color-mix(in srgb, var(--bg) 96%, transparent);
   backdrop-filter: blur(10px);
 }
 .workspace-view { padding-top: 28px; }
@@ -753,7 +751,7 @@ body.theme-light .key-panel-row td {
 .toast-stack {
   position: fixed;
   right: 24px;
-  bottom: 24px;
+  top: 88px;
   display: flex;
   flex-direction: column-reverse;
   gap: 10px;

@@ -35,6 +35,8 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
 
     try {
       const { route, provider, rotator } = app.runtimeConfigManager.resolveModel(modelName, 'count_tokens');
+      request.clientModel = modelName;
+      request.upstreamModel = route.upstream_model;
       const anthropicVersion = readHeader(request.headers['anthropic-version']);
       const anthropicBeta = readHeader(request.headers['anthropic-beta']);
 
@@ -90,12 +92,16 @@ export async function registerMessageRoutes(app: FastifyInstance): Promise<void>
     }
 
     const { route, provider, rotator } = resolved;
+    request.clientModel = payload.model;
+    request.upstreamModel = route.upstream_model;
     const anthropicVersion = readHeader(request.headers['anthropic-version']);
     const anthropicBeta = readHeader(request.headers['anthropic-beta']);
 
     log('info', '收到 Claude Code 请求', {
       provider_id: provider.provider_id,
       provider_type: provider.provider_type,
+      client_model: payload.model,
+      upstream_model: route.upstream_model,
       stream: payload.stream === true,
     });
 

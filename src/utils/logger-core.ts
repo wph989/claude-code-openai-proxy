@@ -274,8 +274,7 @@ const OMITTED_LOG_FIELDS = new Set([
   'response_id',
   'request_id',
   'session_id',
-  'client_model',
-  'upstream_model',
+  // 模型别名和上游原始名用于定位路由问题；请求正文、Key 和 Token 仍继续过滤。
   'model',
   'used_key',
   'headers',

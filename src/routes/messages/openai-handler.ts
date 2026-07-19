@@ -21,7 +21,7 @@ import {
 import { bridgeOpenAIStreamToAnthropic } from '../../services/stream-bridge.js';
 import { anthropicToOpenAIMessages, anthropicToolsToOpenAI, openAIToAnthropicResponse } from '../../services/transformers.js';
 import { setForwardResponseHeaders } from '../../services/http-headers.js';
-import { releaseUpstreamResponse, safeJson } from '../../services/upstream.js';
+import { markUpstreamResponseStreamError, releaseUpstreamResponse, safeJson } from '../../services/upstream.js';
 import { createId } from '../../utils/id.js';
 import { log } from '../../utils/logger.js';
 
@@ -84,17 +84,13 @@ export async function handleOpenAICompatibleMessages(
 
     const inputTokens = isPlainObject(body.usage) ? toNonNegInt(body.usage.input_tokens) : 0;
     const outputTokens = isPlainObject(body.usage) ? toNonNegInt(body.usage.output_tokens) : 0;
-    releaseUpstreamResponse(upstreamResponse, {
-      requests: 1,
-      tokens: usageTokens,
-      inputTokens,
-      outputTokens,
-    });
-    app.metricsRegistry.recordTokens(provider.provider_type, 'input', inputTokens);
-    app.metricsRegistry.recordTokens(provider.provider_type, 'output', outputTokens);
+    const contentBlocks = Array.isArray(body.content) ? body.content : [];
+    const emptyResponse = contentBlocks.length === 0;
     setForwardResponseHeaders(reply, upstreamResponse);
-    log('info', '非流式响应完成', {
+    log(emptyResponse ? 'warn' : 'info', '非流式响应完成', {
       provider_id: provider.provider_id,
+      client_model: payload.model,
+      upstream_model: route.upstream_model,
       upstream_status: upstreamResponse.status,
       downstream_status: upstreamResponse.status,
       stream: false,
@@ -103,8 +99,37 @@ export async function handleOpenAICompatibleMessages(
       stop_reason: body.stop_reason ?? null,
       input_tokens: inputTokens,
       output_tokens: outputTokens,
-      content_blocks: Array.isArray(body.content) ? body.content.length : 0,
+      content_blocks: contentBlocks.length,
+      empty_response: emptyResponse,
+      choice_count: Array.isArray(data.choices) ? data.choices.length : 0,
+      message_content_chars: readOpenAIContentChars(data),
+      message_reasoning_chars: readOpenAIReasoningChars(data),
+      tool_calls: readOpenAIToolCallCount(data),
+      upstream_object: data.object ?? null,
+      upstream_type: data.type ?? null,
+      upstream_keys: Object.keys(data).slice(0, 20),
     });
+    if (emptyResponse) {
+      // 200 + 空 content 不能伪装成成功响应；否则 Claude Code 会静默收到空消息，
+      // 同时将当前 Key 标记为瞬时故障，给后续请求换用其他 Key。
+      markUpstreamResponseStreamError(upstreamResponse, '上游返回空响应：没有文本、推理或工具内容。', 'transient');
+      releaseUpstreamResponse(upstreamResponse);
+      return reply.code(502).send({
+        type: 'error',
+        error: {
+          type: 'api_error',
+          message: '上游返回了空响应，请检查模型状态、上下文长度或供应商限流。',
+        },
+      });
+    }
+    releaseUpstreamResponse(upstreamResponse, {
+      requests: 1,
+      tokens: usageTokens,
+      inputTokens,
+      outputTokens,
+    });
+    app.metricsRegistry.recordTokens(provider.provider_type, 'input', inputTokens);
+    app.metricsRegistry.recordTokens(provider.provider_type, 'output', outputTokens);
     return reply.code(upstreamResponse.status).send(body);
   }
 
@@ -148,6 +173,36 @@ export async function handleOpenAICompatibleMessages(
       app.metricsRegistry.recordTokens(provider.provider_type, 'output', outputTokens);
     },
   }).finally(sse.cleanup);
+}
+
+function readOpenAIContentChars(data: Record<string, unknown>): number {
+  const choices = Array.isArray(data.choices) ? data.choices : [];
+  const message = isPlainObject((choices[0] as Record<string, unknown> | undefined)?.message)
+    ? (choices[0] as Record<string, unknown>).message as Record<string, unknown>
+    : {};
+  return readTextChars(message.content);
+}
+
+function readOpenAIReasoningChars(data: Record<string, unknown>): number {
+  const choices = Array.isArray(data.choices) ? data.choices : [];
+  const message = isPlainObject((choices[0] as Record<string, unknown> | undefined)?.message)
+    ? (choices[0] as Record<string, unknown>).message as Record<string, unknown>
+    : {};
+  return readTextChars(message.reasoning_content ?? message.reasoning);
+}
+
+function readOpenAIToolCallCount(data: Record<string, unknown>): number {
+  const choices = Array.isArray(data.choices) ? data.choices : [];
+  const message = isPlainObject((choices[0] as Record<string, unknown> | undefined)?.message)
+    ? (choices[0] as Record<string, unknown>).message as Record<string, unknown>
+    : {};
+  return Array.isArray(message.tool_calls) ? message.tool_calls.length : 0;
+}
+
+function readTextChars(value: unknown): number {
+  if (typeof value === 'string') return value.length;
+  if (!Array.isArray(value)) return 0;
+  return value.reduce((total, item) => total + (isPlainObject(item) ? readTextChars(item.text ?? item.output_text) : readTextChars(item)), 0);
 }
 
 function buildOpenAICompatiblePayload(payload: AnthropicMessagesRequest, route: ResolvedRoute): Record<string, unknown> {

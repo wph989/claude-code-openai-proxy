@@ -231,6 +231,8 @@ export class UpstreamService {
         if (retry.retry_on_transient) {
           this.logger.log('warn', '上游网络错误，准备按 transient 策略重试', {
             provider_id: params.provider.provider_id,
+            client_model: params.route.client_model,
+            upstream_model: params.route.upstream_model,
             attempt: attempt + 1,
             max_attempts: retry.max_attempts,
             error: error instanceof Error ? error.message : String(error)
@@ -295,6 +297,8 @@ export class UpstreamService {
       // 排查 429 / 4xx 自动禁用是否生效：把分类结果与原始 body 一起打出来。
       this.logger.log('warn', '上游错误响应分类', {
         provider_id: params.provider.provider_id,
+        client_model: params.route.client_model,
+        upstream_model: params.route.upstream_model,
         status: response.status,
         category: classification.category,
       });

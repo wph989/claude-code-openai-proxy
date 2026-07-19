@@ -363,6 +363,69 @@ describe('API 透传流水线', () => {
     }
   });
 
+  it('Anthropic 非流式推理 JSON 会保留 reasoning_content', async () => {
+    const cfgPath = writeConfig(openAIConfig());
+
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      id: 'chatcmpl-reasoning',
+      choices: [{
+        message: { role: 'assistant', reasoning_content: '先判断', content: '最终回答' },
+        finish_reason: 'stop',
+      }],
+      usage: { prompt_tokens: 5, completion_tokens: 6 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+
+    const app = await createMigratedApp(cfgPath);
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/messages',
+        payload: {
+          model: 'gpt-client',
+          max_tokens: 16,
+          messages: [{ role: 'user', content: 'hi' }],
+        },
+      });
+
+      const body = JSON.parse(response.body);
+      expect(response.statusCode).toBe(200);
+      expect(body.content).toEqual([
+        { type: 'thinking', thinking: '先判断' },
+        { type: 'text', text: '最终回答' },
+      ]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('Anthropic 非流式收到空 OpenAI JSON 会返回 502，而不是伪造空成功', async () => {
+    const cfgPath = writeConfig(openAIConfig());
+
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      id: 'chatcmpl-empty',
+      choices: [],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+
+    const app = await createMigratedApp(cfgPath);
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/messages',
+        payload: {
+          model: 'gpt-client',
+          max_tokens: 16,
+          messages: [{ role: 'user', content: 'hi' }],
+        },
+      });
+
+      const body = JSON.parse(response.body);
+      expect(response.statusCode).toBe(502);
+      expect(body.error.message).toContain('空响应');
+    } finally {
+      await app.close();
+    }
+  });
+
   it('Anthropic /v1/messages 收到 2xx 非 JSON 会返回明确 502', async () => {
     const cfgPath = writeConfig(anthropicConfig());
 

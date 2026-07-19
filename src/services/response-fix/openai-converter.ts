@@ -64,7 +64,7 @@ export function transformOpenAISSEToAnthropicSSE(body: Buffer | Uint8Array): Buf
     const choices = Array.isArray(obj.choices) ? (obj.choices as Array<Record<string, unknown>>) : [];
     for (const choice of choices) {
       const delta = (choice.delta as Record<string, unknown> | undefined) || {};
-      const reasoningContent = delta.reasoning_content;
+      const reasoningContent = delta.reasoning_content ?? delta.reasoning;
       if (typeof reasoningContent === 'string' && reasoningContent) {
         if (!thinkingOpen) {
           thinkingIndex = nextBlockIndex;
@@ -82,8 +82,8 @@ export function transformOpenAISSEToAnthropicSSE(body: Buffer | Uint8Array): Buf
           delta: { type: 'thinking_delta', thinking: reasoningContent },
         });
       }
-      const content = delta.content;
-      if (typeof content === 'string' && content) {
+      const content = readOpenAIText(delta.content);
+      if (content) {
         if (thinkingOpen) {
           emit('content_block_stop', { type: 'content_block_stop', index: thinkingIndex });
           thinkingOpen = false;
@@ -175,14 +175,11 @@ export function transformOpenAIJsonToAnthropicJson(body: Buffer | Uint8Array): B
   const choice = choices[0] || {};
   const message = (choice.message as Record<string, unknown> | undefined) || {};
   const content: Array<Record<string, unknown>> = [];
-  const reasoning = message.reasoning_content;
-  if (typeof reasoning === 'string' && reasoning) {
+  const reasoning = readOpenAIText(message.reasoning_content ?? message.reasoning);
+  if (reasoning) {
     content.push({ type: 'thinking', thinking: reasoning });
   }
-  const mainContent = message.content;
-  if (typeof mainContent === 'string' && mainContent) {
-    content.push({ type: 'text', text: mainContent });
-  }
+  appendOpenAITextBlocks(content, message.content);
 
   const toolCalls = Array.isArray(message.tool_calls) ? (message.tool_calls as Array<Record<string, unknown>>) : [];
   for (const toolCall of toolCalls) {
@@ -227,4 +224,24 @@ export function transformOpenAIJsonToAnthropicJson(body: Buffer | Uint8Array): B
     },
   };
   return Buffer.from(JSON.stringify(out), 'utf8');
+}
+
+function appendOpenAITextBlocks(target: Array<Record<string, unknown>>, value: unknown): void {
+  if (typeof value === 'string') {
+    if (value) target.push({ type: 'text', text: value });
+    return;
+  }
+  if (!Array.isArray(value)) return;
+  for (const part of value) {
+    const text = typeof part === 'string'
+      ? part
+      : part && typeof part === 'object'
+        ? readOpenAIText((part as Record<string, unknown>).text ?? (part as Record<string, unknown>).output_text)
+        : '';
+    if (text) target.push({ type: 'text', text });
+  }
+}
+
+function readOpenAIText(value: unknown): string {
+  return typeof value === 'string' ? value : '';
 }

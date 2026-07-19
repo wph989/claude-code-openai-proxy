@@ -29,12 +29,20 @@ interface StreamState {
   textStarted: boolean;
   textStopped: boolean;
   textIndex: number;
+  thinkingStarted: boolean;
+  thinkingStopped: boolean;
+  thinkingIndex: number;
   nextContentIndex: number;
   stopReason: string | null;
   usageInputTokens: number | null;
   usageOutputTokens: number | null;
   tools: Map<number, ToolBlockState>;
   responseChunks: number;
+  reasoningChunks: number;
+  toolChunks: number;
+  sseEvents: number;
+  parsedEvents: number;
+  parseErrors: number;
 }
 
 export async function bridgeOpenAIStreamToAnthropic(params: {
@@ -57,12 +65,20 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
     textStarted: false,
     textStopped: false,
     textIndex: 0,
+    thinkingStarted: false,
+    thinkingStopped: false,
+    thinkingIndex: 0,
     nextContentIndex: 0,
     stopReason: null,
     usageInputTokens: null,
     usageOutputTokens: null,
     tools: new Map(),
-    responseChunks: 0
+    responseChunks: 0,
+    reasoningChunks: 0,
+    toolChunks: 0,
+    sseEvents: 0,
+    parsedEvents: 0,
+    parseErrors: 0,
   };
 
   try {
@@ -103,6 +119,7 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
     state.messageStarted = true;
 
     for await (const event of iterateSse(upstreamResponse, idleTimeoutMs, clientAbortSignal)) {
+      state.sseEvents += 1;
       if (event.data === '[DONE]') {
         break;
       }
@@ -110,8 +127,10 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
       try {
         chunk = JSON.parse(event.data) as Record<string, unknown>;
       } catch {
+        state.parseErrors += 1;
         continue;
       }
+      state.parsedEvents += 1;
 
       const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
       const choice = (choices[0] || {}) as Record<string, unknown>;
@@ -121,7 +140,33 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
         state.stopReason = mapFinishReason(finishReason);
       }
 
-      if (typeof delta.content === 'string' && delta.content) {
+      const reasoningContent = readDeltaText(delta.reasoning_content ?? delta.reasoning);
+      if (reasoningContent) {
+        if (!state.thinkingStarted) {
+          state.thinkingStarted = true;
+          state.thinkingIndex = state.nextContentIndex;
+          state.nextContentIndex += 1;
+          writeSse(output, 'content_block_start', {
+            type: 'content_block_start',
+            index: state.thinkingIndex,
+            content_block: { type: 'thinking', thinking: '' }
+          });
+        }
+        state.reasoningChunks += 1;
+        state.responseChunks += 1;
+        writeSse(output, 'content_block_delta', {
+          type: 'content_block_delta',
+          index: state.thinkingIndex,
+          delta: { type: 'thinking_delta', thinking: reasoningContent }
+        });
+      }
+
+      const content = readDeltaText(delta.content);
+      if (content) {
+        if (state.thinkingStarted && !state.thinkingStopped) {
+          state.thinkingStopped = true;
+          writeSse(output, 'content_block_stop', { type: 'content_block_stop', index: state.thinkingIndex });
+        }
         if (!state.textStarted) {
           state.textStarted = true;
           state.textIndex = state.nextContentIndex;
@@ -136,7 +181,7 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
         writeSse(output, 'content_block_delta', {
           type: 'content_block_delta',
           index: state.textIndex,
-          delta: { type: 'text_delta', text: delta.content }
+          delta: { type: 'text_delta', text: content }
         });
       }
 
@@ -178,6 +223,8 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
           });
         }
         if (typeof functionInfo.arguments === 'string' && functionInfo.arguments) {
+          state.toolChunks += 1;
+          state.responseChunks += 1;
           writeSse(output, 'content_block_delta', {
             type: 'content_block_delta',
             index: toolState.anthropicIndex,
@@ -198,14 +245,35 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
       }
     }
 
+    const emptyResponse = state.nextContentIndex === 0;
+    if (emptyResponse) {
+      // NVIDIA 在限流或上下文超限时可能返回 200 + 空 SSE；不能让客户端把它当作成功消息。
+      markUpstreamResponseStreamError(upstreamResponse, '上游返回空流：没有文本、推理或工具内容。', 'transient');
+      writeSse(output, 'error', {
+        type: 'error',
+        error: {
+          type: 'api_error',
+          message: '上游返回了空响应，请检查模型状态、上下文长度或供应商限流。',
+        },
+      });
+    }
     closeAnthropicMessage(output, state);
 
-    log('info', '流式响应完成', {
+    log(emptyResponse ? 'warn' : 'info', '流式响应完成', {
       provider_id: metrics.providerId,
+      client_model: metrics.clientModel,
+      upstream_model: metrics.upstreamModel,
       input_tokens: state.usageInputTokens,
       output_tokens: state.usageOutputTokens,
       stop_reason: state.stopReason,
-      response_chunks: state.responseChunks
+      response_chunks: state.responseChunks,
+      reasoning_chunks: state.reasoningChunks,
+      tool_chunks: state.toolChunks,
+      content_blocks: state.nextContentIndex,
+      sse_events: state.sseEvents,
+      parsed_events: state.parsedEvents,
+      parse_errors: state.parseErrors,
+      empty_response: emptyResponse,
     });
 
     const totalTokens = (state.usageInputTokens ?? 0) + (state.usageOutputTokens ?? 0);
@@ -225,12 +293,16 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
     }
     if (clientClosed) {
       log('info', '客户端断开，停止流式桥接', {
-        provider_id: metrics.providerId
+        provider_id: metrics.providerId,
+        client_model: metrics.clientModel,
+        upstream_model: metrics.upstreamModel,
       });
       return;
     }
     log('error', '流式桥接失败', {
       provider_id: metrics.providerId,
+      client_model: metrics.clientModel,
+      upstream_model: metrics.upstreamModel,
       error
     });
     writeSse(output, 'error', {
@@ -254,6 +326,10 @@ export async function bridgeOpenAIStreamToAnthropic(params: {
 
 function closeAnthropicMessage(output: PassThrough, state: StreamState): void {
   if (!state.messageStarted || state.messageStopped) return;
+  if (state.thinkingStarted && !state.thinkingStopped) {
+    state.thinkingStopped = true;
+    writeSse(output, 'content_block_stop', { type: 'content_block_stop', index: state.thinkingIndex });
+  }
   if (state.textStarted && !state.textStopped) {
     state.textStopped = true;
     writeSse(output, 'content_block_stop', { type: 'content_block_stop', index: state.textIndex });
@@ -336,4 +412,15 @@ async function* iterateSse(response: Response, idleTimeoutMs: number, clientAbor
   } finally {
     reader.cancel().catch(() => { });
   }
+}
+
+function readDeltaText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (!Array.isArray(value)) return '';
+  return value.map((item) => {
+    if (typeof item === 'string') return item;
+    if (!item || typeof item !== 'object') return '';
+    const part = item as Record<string, unknown>;
+    return typeof part.text === 'string' ? part.text : typeof part.output_text === 'string' ? part.output_text : '';
+  }).join('');
 }
