@@ -6,7 +6,10 @@ import { settings } from './config.js';
 import { startServer } from './server.js';
 import { buildDefaultRuntimeConfig } from './services/runtime-config.js';
 import { SqliteConfigRepository } from './services/config/sqlite-config-repository.js';
-import { migrateJsonToSqlite } from './services/config/json-to-sqlite-migration.js';
+import {
+  autoMigrateJsonToSqlite,
+  migrateJsonToSqlite,
+} from './services/config/json-to-sqlite-migration.js';
 import { log } from './utils/logger.js';
 import { checkExistingProcess, stopProcess, getStatus, writeProcessInfo, removeProcessInfo, openAdminUI } from './utils/pid.js';
 import process from 'node:process';
@@ -32,6 +35,7 @@ program
   .option('--host <host>', '监听地址', settings.host)
   .option('--port <port>', '监听端口', String(settings.port))
   .option('--sqlite-file <path>', 'SQLite 数据库路径', settings.sqliteFile)
+  .option('--migrate-from-json <path>', '覆盖默认的旧 JSON 自动迁移源')
   .option('--dev', '强制开发模式（使用本地目录配置）', false)
   .option('-d, --daemon', '后台运行（守护进程模式）', false)
   .option('-c, --cluster [workers]', '启用集群模式；多 Worker 要求 SQLite', false)
@@ -46,6 +50,33 @@ program
       log('warn', '服务已在运行', { port: existingInfo.port, pid: existingInfo.pid });
       console.log(`服务已在运行 (Port: ${existingInfo.port}, PID: ${existingInfo.pid})`);
       process.exit(1);
+    }
+
+    try {
+      const migration = await autoMigrateJsonToSqlite({
+        configPath: options.migrateFromJson ?? settings.migrateFromJson,
+        sqlitePath,
+        sourceRequired: options.migrateFromJson != null || settings.migrateFromJsonRequired,
+      });
+      if (migration.status === 'migrated') {
+        console.log(`已自动迁移旧 JSON 到 SQLite: ${migration.result.sqlitePath}`);
+        log('info', '启动前自动迁移完成', {
+          sqlitePath: migration.result.sqlitePath,
+          revision: migration.result.revision,
+          sourceFiles: migration.result.sourceFiles,
+        });
+      } else if (migration.status === 'skipped') {
+        log('info', 'SQLite 已初始化，跳过 JSON 自动迁移', {
+          sqlitePath: migration.sqlitePath,
+          revision: migration.revision,
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`自动迁移失败，服务未启动: ${message}`);
+      log('error', '启动前自动迁移失败', { sqlitePath, error: message });
+      process.exitCode = 1;
+      return;
     }
 
     if (options.daemon) {

@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-本仓库是面向 Node.js 22.5+ 的单包 TypeScript ESM 代理服务。`src/cli.ts` 与 `src/server.ts` 负责 CLI 和 Fastify 生命周期；HTTP 路由位于 `src/routes/`，协议转换、Key 调度、SQLite 仓储和上游通信位于 `src/services/`。桌面浏览器管理页使用原生 ESM，资源放在 `src/static/`。测试统一放在 `tests/`，文件名使用 `*.test.ts`。`dist/`、`coverage/`、`logs/`、`pids/` 和 `runtime.db*` 都是生成或运行时文件。
+本仓库是面向 Node.js 22.5+ 的单包 TypeScript ESM 代理服务。`src/cli.ts` 与 `src/server.ts` 负责 CLI 和 Fastify 生命周期；HTTP 路由位于 `src/routes/`，协议转换、Key 调度、SQLite 仓储和上游通信位于 `src/services/`。桌面浏览器管理页使用原生 ESM，资源放在 `src/static/`。测试统一放在 `tests/`，文件名使用 `*.test.ts`。`dist/`、`coverage/`、`logs/`、`pids/` 和 `ccop.db*` 都是生成或运行时文件。
 
 ## 构建、测试与开发命令
 
@@ -24,4 +24,4 @@
 
 ## 安全与迁移
 
-SQLite `runtime.db` 是唯一生产存储。旧 `runtime_models.json`、状态、用量和历史文件只能通过 `ccop migrate` 显式导入，启动时不得自动读取。禁止提交 `.env`、数据库、真实 Key、Token 或日志；API、截图和诊断信息必须脱敏。
+SQLite `ccop.db` 是唯一生产存储。启动时按固定顺序检查配置目录的 `runtime_models.json`、旧版 `config.json`，以及当前项目目录的 `runtime_models.json`，文件存在时自动迁移；也可通过 `MIGRATE_FROM_JSON` 或 `--migrate-from-json` 指定其他源。自动迁移仅在目标库未初始化时读取源文件，已初始化时跳过；显式源文件校验失败或目标不是 CCOP 数据库时必须阻止启动。源文件不会被修改或删除，程序不会扫描目录猜测迁移源。禁止提交 `.env`、数据库、真实 Key、Token 或日志；API、截图和诊断信息必须脱敏。

@@ -52,7 +52,7 @@ Fastify Routes
 
 ## 3. SQLite 与多 Worker
 
-`runtime.db` 是唯一生产运行时存储。SQLite 启用 WAL、`busy_timeout`、外键与显式 schema migration，并统一保存：
+`ccop.db` 是唯一生产运行时存储。SQLite 启用 WAL、`busy_timeout`、外键与显式 schema migration，并统一保存：
 
 - 当前配置和最近 50 个历史快照；
 - Key 状态、用量与带 TTL 的并发 lease；
@@ -60,7 +60,7 @@ Fastify Routes
 
 配置写入使用 revision CAS，避免页面或 Worker 静默覆盖。Key acquire/release、冷却、错误计数和用量增量通过 `BEGIN IMMEDIATE` 事务协调；Worker 崩溃后过期 lease 会被回收。`${providerId}:${keyId}` 是稳定运行态主键，Key 字面量不会进入该主键。
 
-旧 `runtime_models.json`、`runtime_state.json`、`runtime_usage.json` 和 `runtime_history.json` 只由 `ccop migrate` 显式读取。迁移要求目标库未初始化，在单个事务中导入，并保持源文件不变；启动流程不会自动探测 JSON。
+旧 `runtime_models.json`（早期安装名为 `config.json`）、`runtime_state.json`、`runtime_usage.json` 和 `runtime_history.json` 可由 `ccop migrate` 显式读取；启动时也会按固定候选路径检查主配置，仅在 `ccop.db` 未初始化且源文件存在时自动迁移。迁移要求目标库未初始化，在单个事务中导入，并保持源文件不变。
 
 ## 4. 请求与状态流
 

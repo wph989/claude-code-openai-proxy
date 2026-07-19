@@ -149,7 +149,7 @@ SQLite WAL、显式 schema migration 和多 Worker 事务协调已完成。Key a
 - 两个 Worker 并发获取 Key 时不会超过 `max_concurrent`。
 - Worker 崩溃后过期 lease 可恢复，Key 不会永久占满。
 - 配置、状态和用量可在目标库未初始化时原子导入，源 JSON 保持不变且稳定 ID 不丢失。
-- SQLite 目标库已解除单 Worker 限制；迁移失败不会修改源文件或已初始化目标。
+- SQLite 目标库已解除单 Worker 限制；显式或启动自动迁移失败不会修改源文件或已初始化目标。
 
 ## 8. 阶段六：功能扩展
 
@@ -162,5 +162,6 @@ SQLite WAL、显式 schema migration 和多 Worker 事务协调已完成。Key a
 - 新增或修改行为具有回归测试，关键边界具有中文原因注释。
 - `pnpm check`、`pnpm test` 和相关覆盖率门槛通过。
 - 配置格式、HTTP 契约与迁移策略已记录；明确的破坏性迁移删除旧入口，不保留无效兼容层。
+- 启动自动迁移只检查配置目录的 `runtime_models.json`、旧版 `config.json` 或当前项目目录的 `runtime_models.json`，也接受显式 `MIGRATE_FROM_JSON` 或 `--migrate-from-json`，不扫描目录、不重复导入已初始化 SQLite。
 - 管理端变更通过桌面布局、键盘操作、文本溢出和敏感信息检查。
 - 文档同步更新 `README.md`、`ARCHITECTURE.md` 或 `FEATURES.md` 中受影响的契约。

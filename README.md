@@ -98,13 +98,23 @@ pnpm dlx claude-code-openai-proxy start
 ccop init-config
 ```
 
-这会在 SQLite 中创建默认配置，默认数据库为开发目录 `runtime.db`，生产目录为 `~/.ccop/runtime.db`。
-旧版 JSON 配置必须显式迁移，不会被启动流程自动读取：
+这会在 SQLite 中创建默认配置，默认数据库为开发目录 `ccop.db`，生产目录为 `~/.ccop/ccop.db`。启动时会依次检查配置目录的 `runtime_models.json`、旧版 `config.json`，以及当前项目目录的 `runtime_models.json`：找到源文件则自动迁移，均不存在才创建默认配置。
+旧版 JSON 配置也可以通过环境变量或启动参数指定来源，并使用显式命令预检或迁移：
 
 ```powershell
-pnpm exec ccop migrate --config .\runtime_models.json --sqlite-file .\runtime.db --dry-run
-pnpm exec ccop migrate --config .\runtime_models.json --sqlite-file .\runtime.db
+# 覆盖默认迁移源；目标 SQLite 尚未初始化且文件存在时自动迁移
+$env:MIGRATE_FROM_JSON = '.\runtime_models.json'
+pnpm start
+
+# 单次启动参数优先级高于 MIGRATE_FROM_JSON
+pnpm exec ccop start --migrate-from-json .\runtime_models.json
+
+# 显式预检或迁移
+pnpm exec ccop migrate --config .\runtime_models.json --sqlite-file .\ccop.db --dry-run
+pnpm exec ccop migrate --config .\runtime_models.json --sqlite-file .\ccop.db
 ```
+
+自动迁移成功后源 JSON 不会删除或修改；目标库已初始化时会跳过且不读取源文件。程序只检查上述固定候选或用户显式指定的路径，不会扫描目录，也不会把已初始化数据库再次导入。
 
 ### 2. 编辑配置
 
@@ -179,8 +189,8 @@ ccop ui
 
 | 模式 | 启动方式 | 配置位置 | 日志位置 | PID 位置 |
 |------|---------|---------|---------|---------|
-| **开发** | `ccop start --dev`<br>或 `NODE_ENV=development ccop start`<br>或 `pnpm dev` | 项目目录 `.env`<br>项目目录 `runtime.db` | 项目目录 `logs/app.log` | 项目目录 `pids/` |
-| **生产** | `ccop start` | `~/.ccop/.env`<br>`~/.ccop/runtime.db` | `~/.ccop/logs/app.log` | `~/.ccop/pids/` |
+| **开发** | `ccop start --dev`<br>或 `NODE_ENV=development ccop start`<br>或 `pnpm dev` | 项目目录 `.env`<br>项目目录 `ccop.db` | 项目目录 `logs/app.log` | 项目目录 `pids/` |
+| **生产** | `ccop start` | `~/.ccop/.env`<br>`~/.ccop/ccop.db` | `~/.ccop/logs/app.log` | `~/.ccop/pids/` |
 
 生产模式下所有配置数据都在 `~/.ccop/`，方便备份和迁移；开发模式下配置与项目代码在一起。
 
@@ -204,7 +214,10 @@ PORT=8765
 ADMIN_AUTH_TOKEN=change-me-random-admin-token
 
 # SQLite 数据库（Node.js 22.5+；相对路径以配置根目录为基准）
-SQLITE_FILE=./runtime.db
+SQLITE_FILE=./ccop.db
+
+# 启动默认检查同目录 runtime_models.json；也可覆盖自动迁移源
+MIGRATE_FROM_JSON=./runtime_models.json
 
 # 可选脱敏告警；Webhook URL 不会在管理 API 或日志中回显
 ALERT_WEBHOOK_URL=
@@ -219,7 +232,7 @@ LOG_DETAILED=false      # 是否允许显式安全诊断事件；始终不记录
 
 ## 旧 JSON 配置示例
 
-`runtime_models.example.json` 仅用于理解字段或作为旧数据迁移源；生产运行时配置由管理端写入 SQLite，不读取该 JSON。
+`runtime_models.example.json` 仅用于理解字段或作为旧数据迁移源；生产运行时配置由管理端写入 SQLite。启动默认检查 `runtime_models.json`，也可通过 `MIGRATE_FROM_JSON` 或 `ccop migrate` 指定旧 JSON。
 
 ```json
 {
@@ -324,9 +337,9 @@ Provider 默认连续 3 次网络异常或 5xx 后熔断 30 秒；冷却结束�
 
 ## SQLite 持久化与迁移
 
-`runtime.db` 是唯一生产运行时存储，统一保存配置、最近 50 个历史快照、Key lease/状态/用量和 Provider 熔断状态。数据库启用 WAL、显式 schema migration、revision CAS、事务 lease 和 TTL 回收，可供多个 Worker 共享。
+`ccop.db` 是唯一生产运行时存储，统一保存配置、最近 50 个历史快照、Key lease/状态/用量和 Provider 熔断状态。数据库启用 WAL、显式 schema migration、revision CAS、事务 lease 和 TTL 回收，可供多个 Worker 共享。
 
-每个 Key 使用稳定 `id`，状态与用量以 `${providerId}:${keyId}` 为主键；Key 字面量不会进入运行态主键。迁移命令可原子导入旧 `runtime_models.json`、`runtime_state.json`、`runtime_usage.json` 和 `runtime_history.json`，要求目标库尚未初始化，且不会修改源文件。迁移成功后请备份并移除旧 JSON，避免误以为它仍会影响运行时。
+每个 Key 使用稳定 `id`，状态与用量以 `${providerId}:${keyId}` 为主键；Key 字面量不会进入运行态主键。迁移流程会完整保留已启用和已停用的 Provider、模型及 Key，并可原子导入旧 `runtime_models.json`、`runtime_state.json`、`runtime_usage.json` 和 `runtime_history.json`，要求目标库尚未初始化，且不会修改源文件。启动默认检查约定的 `runtime_models.json`，也可通过 `MIGRATE_FROM_JSON` 或 `--migrate-from-json` 指定其他源：目标库已初始化会跳过，默认源文件不存在时走默认配置初始化，显式源文件不存在或校验失败会阻止启动，非 CCOP SQLite 数据库会拒绝迁移。迁移成功后源 JSON 保持不变，可作为备份保存。
 
 
 ## 防封策略（anti-ban）

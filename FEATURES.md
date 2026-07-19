@@ -546,7 +546,7 @@ Provider 的 `circuit_breaker` 默认开启：连续 3 次网络或 5xx 失败�
 
 ### 11.1 数据职责
 
-`runtime.db` 统一保存当前配置、配置历史、Key 状态、用量、并发 lease 和 Provider 熔断。数据库启用 WAL、外键、`busy_timeout` 和显式 schema migration；配置与历史快照在同一事务中提交。
+`ccop.db` 统一保存当前配置、配置历史、Key 状态、用量、并发 lease 和 Provider 熔断。数据库启用 WAL、外键、`busy_timeout` 和显式 schema migration；配置与历史快照在同一事务中提交。
 
 ### 11.2 主键策略
 

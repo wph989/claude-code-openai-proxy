@@ -21,6 +21,12 @@ export interface JsonToSqliteMigrationOptions {
   dryRun?: boolean;
 }
 
+export interface AutoJsonToSqliteMigrationOptions {
+  configPath?: string | null;
+  sqlitePath: string;
+  sourceRequired?: boolean;
+}
+
 export interface JsonToSqliteMigrationResult {
   dryRun: boolean;
   sqlitePath: string;
@@ -34,14 +40,21 @@ export interface JsonToSqliteMigrationResult {
   historyCount: number;
 }
 
+export type AutoJsonToSqliteMigrationResult =
+  | { status: 'disabled'; sqlitePath: string }
+  | { status: 'skipped'; sqlitePath: string; revision: number }
+  | { status: 'migrated'; result: JsonToSqliteMigrationResult };
+
+export interface SqliteTargetStatus {
+  initialized: boolean;
+  revision?: number;
+}
+
 interface OptionalJson {
   exists: boolean;
   value?: unknown;
 }
 
-/**
- * 显式迁移旧 JSON 数据。启动流程绝不调用该函数，避免部署时静默导入或覆盖数据。
- */
 export async function migrateJsonToSqlite(
   options: JsonToSqliteMigrationOptions,
 ): Promise<JsonToSqliteMigrationResult> {
@@ -49,8 +62,8 @@ export async function migrateJsonToSqlite(
   const sqlitePath = path.resolve(options.sqlitePath);
   if (configPath === sqlitePath) throw new Error('JSON 源文件与 SQLite 目标文件不能是同一路径。');
 
-  const loaded = await loadLegacyBundle(configPath);
   await assertUninitializedTarget(sqlitePath);
+  const loaded = await loadLegacyBundle(configPath);
 
   if (!options.dryRun) {
     const repository = new SqliteConfigRepository(sqlitePath);
@@ -77,6 +90,47 @@ export async function migrateJsonToSqlite(
     usageCount: Object.keys(loaded.bundle.usage).length,
     historyCount: loaded.bundle.history?.length ?? 0,
   };
+}
+
+/**
+ * 启动前只在目标库尚未初始化时导入旧 JSON；已初始化时跳过源文件读取，避免
+ * 旧配置被误认为仍是运行时真相，也避免多进程启动时反复解析敏感文件。
+ */
+export async function autoMigrateJsonToSqlite(
+  options: AutoJsonToSqliteMigrationOptions,
+): Promise<AutoJsonToSqliteMigrationResult> {
+  const sqlitePath = path.resolve(options.sqlitePath);
+  const configPath = options.configPath?.trim();
+  if (!configPath) return { status: 'disabled', sqlitePath };
+
+  const resolvedConfigPath = path.resolve(configPath);
+  if (resolvedConfigPath === sqlitePath) {
+    throw new Error('JSON 源文件与 SQLite 目标文件不能是同一路径。');
+  }
+
+  const target = await inspectSqliteTarget(sqlitePath);
+  if (target.initialized) {
+    return { status: 'skipped', sqlitePath, revision: target.revision ?? 1 };
+  }
+
+  if (options.sourceRequired !== true && !(await isRegularFile(resolvedConfigPath))) {
+    return { status: 'disabled', sqlitePath };
+  }
+
+  const result = await migrateJsonToSqlite({
+    configPath: resolvedConfigPath,
+    sqlitePath,
+  });
+  return { status: 'migrated', result };
+}
+
+async function isRegularFile(filePath: string): Promise<boolean> {
+  try {
+    return (await stat(filePath)).isFile();
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT')) return false;
+    throw error;
+  }
 }
 
 async function loadLegacyBundle(configPath: string): Promise<{
@@ -272,12 +326,19 @@ async function readOptionalJson(filePath: string, label: string): Promise<Option
 }
 
 async function assertUninitializedTarget(sqlitePath: string): Promise<void> {
+  const status = await inspectSqliteTarget(sqlitePath);
+  if (status.initialized) {
+    throw new Error(`SQLite 目标库已初始化（revision=${status.revision ?? 1}），拒绝迁移。`);
+  }
+}
+
+async function inspectSqliteTarget(sqlitePath: string): Promise<SqliteTargetStatus> {
   try {
     const info = await stat(sqlitePath);
     if (!info.isFile()) throw new Error(`SQLite 目标不是文件：${sqlitePath}`);
-    if (info.size === 0) return;
+    if (info.size === 0) return { initialized: false };
   } catch (error) {
-    if (isNodeError(error, 'ENOENT')) return;
+    if (isNodeError(error, 'ENOENT')) return { initialized: false };
     throw error;
   }
 
@@ -291,7 +352,7 @@ async function assertUninitializedTarget(sqlitePath: string): Promise<void> {
     const tables = db.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
     ).all() as Array<{ name: string }>;
-    if (tables.length === 0) return;
+    if (tables.length === 0) return { initialized: false };
     const names = new Set(tables.map((row) => row.name));
     if (!names.has('schema_migrations') || !names.has('app_config')) {
       throw new Error(`SQLite 目标包含非 CCOP 数据，拒绝迁移：${sqlitePath}`);
@@ -300,8 +361,9 @@ async function assertUninitializedTarget(sqlitePath: string): Promise<void> {
       | { revision: number }
       | undefined;
     if (existing) {
-      throw new Error(`SQLite 目标库已初始化（revision=${existing.revision}），拒绝迁移。`);
+      return { initialized: true, revision: existing.revision };
     }
+    return { initialized: false };
   } finally {
     db.close();
   }

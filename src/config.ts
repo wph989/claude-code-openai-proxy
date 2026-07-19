@@ -28,6 +28,16 @@ export function resolveAlertWebhookUrl(raw: string | undefined): string | null {
   return url.toString();
 }
 
+export function resolveDefaultMigrationPath(configRoot: string, cwd: string): string {
+  const candidates = [
+    join(configRoot, 'runtime_models.json'),
+    join(configRoot, 'config.json'),
+    join(cwd, 'runtime_models.json'),
+  ];
+  // 旧安装把主配置写成 config.json；只检查固定候选，避免把任意 JSON 当作含密钥配置导入。
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
+}
+
 export function generateAdminAuthToken(): string {
   // 首次生产安装不能使用固定默认口令；随机值写入 .env，用户可自行修改。
   return `ccop_${randomBytes(24).toString('base64url')}`;
@@ -120,7 +130,10 @@ HOST=0.0.0.0
 PORT=8765
 
 # SQLite 是唯一运行时存储（要求 Node.js 22.5+）
-SQLITE_FILE=${join(USER_CONFIG_DIR, 'runtime.db')}
+SQLITE_FILE=${join(USER_CONFIG_DIR, 'ccop.db')}
+
+# 启动时默认检查同目录 runtime_models.json 或旧版 config.json；目标 SQLite 已初始化后跳过
+# MIGRATE_FROM_JSON=./runtime_models.json
 
 # 管理后台密码（首次运行随机生成，修改后需重启生效）
 ADMIN_AUTH_TOKEN=${adminAuthToken}
@@ -185,6 +198,8 @@ export interface AppSettings {
   adminCookieName: string;
   adminCookieMaxAgeSeconds: number;
   sqliteFile: string;
+  migrateFromJson: string | null;
+  migrateFromJsonRequired: boolean;
   requestTimeoutMs: number;
   streamIdleTimeoutMs: number;
   maxRequestBodyChars: number;
@@ -240,8 +255,14 @@ const toRatio = (raw: string | undefined, fallback: number): number => {
 
 const sqliteFilePath = (() => {
   const envPath = process.env.SQLITE_FILE?.trim();
-  if (!envPath) return join(CONFIG_ROOT, 'runtime.db');
+  if (!envPath) return join(CONFIG_ROOT, 'ccop.db');
   return isAbsolute(envPath) ? envPath : join(CONFIG_ROOT, envPath);
+})();
+
+const migrateFromJsonEnv = process.env.MIGRATE_FROM_JSON?.trim();
+const migrateFromJsonPath = (() => {
+  if (!migrateFromJsonEnv) return resolveDefaultMigrationPath(CONFIG_ROOT, process.cwd());
+  return isAbsolute(migrateFromJsonEnv) ? migrateFromJsonEnv : join(CONFIG_ROOT, migrateFromJsonEnv);
 })();
 
 export const settings: AppSettings = {
@@ -252,6 +273,8 @@ export const settings: AppSettings = {
   adminCookieName: 'ccgp_admin_session',
   adminCookieMaxAgeSeconds: 60 * 60 * 12,
   sqliteFile: sqliteFilePath,
+  migrateFromJson: migrateFromJsonPath,
+  migrateFromJsonRequired: Boolean(migrateFromJsonEnv),
   requestTimeoutMs: toNumber(process.env.REQUEST_TIMEOUT_MS, 300000),
   streamIdleTimeoutMs: toNumber(process.env.REQUEST_STREAM_IDLE_TIMEOUT_MS, 120000),
   maxRequestBodyChars: toNumber(process.env.MAX_REQUEST_BODY_CHARS, 4000),

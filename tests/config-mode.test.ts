@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import {
   ensureEnvTextHasAdminAuthToken,
   generateAdminAuthToken,
   hasExplicitDevMode,
   logGeneratedAdminAuthToken,
+  resolveDefaultMigrationPath,
   resolveAdminAuthToken,
   resolveAlertWebhookUrl
 } from '../src/config.js';
@@ -16,6 +20,24 @@ describe('配置模式判断', () => {
 
   it('--dev 会显式触发开发模式', () => {
     expect(hasExplicitDevMode(['node', 'dist/cli.js', 'start', '--dev'])).toBe(true);
+  });
+
+  it('自动迁移兼容旧 config.json，并优先使用标准 runtime_models.json', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'ccop-config-path-'));
+    const configRoot = path.join(root, 'config-root');
+    const cwd = path.join(root, 'cwd');
+    mkdirSync(configRoot);
+    mkdirSync(cwd);
+    const legacyPath = path.join(configRoot, 'config.json');
+    const standardPath = path.join(configRoot, 'runtime_models.json');
+    try {
+      writeFileSync(legacyPath, '{}\n', 'utf8');
+      expect(resolveDefaultMigrationPath(configRoot, cwd)).toBe(legacyPath);
+      writeFileSync(standardPath, '{}\n', 'utf8');
+      expect(resolveDefaultMigrationPath(configRoot, cwd)).toBe(standardPath);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('Webhook 地址只接受 HTTP(S)，空值保持未配置', () => {
