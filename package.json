@@ -4,6 +4,14 @@
   "description": "Claude Code 多供应商代理（TypeScript 版），对外暴露 Anthropic Messages 接口，对内转发到 OpenAI-compatible 上游。",
   "type": "module",
   "main": "dist/server.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wph989/claude-code-openai-proxy.git"
+  },
+  "homepage": "https://github.com/wph989/claude-code-openai-proxy",
+  "bugs": {
+    "url": "https://github.com/wph989/claude-code-openai-proxy/issues"
+  },
   "bin": {
     "claude-code-openai-proxy": "dist/cli.js",
     "ccop": "dist/cli.js"
@@ -11,6 +19,9 @@
   "files": [
     "dist",
     "README.md",
+    "ARCHITECTURE.md",
+    "docs/local-development.md",
+    "docs/npm-publishing.md",
     ".env.example",
     "scripts/postbuild.mjs"
   ],
